@@ -151,7 +151,9 @@ class Engine:
             pending.clear()
             if self._inflight is not None and not self._inflight.done():
                 await asyncio.wait({self._inflight}, timeout=15)
-            end = self.stats.last_quote_ts if self.clock.override is not None and self.stats.last_quote_ts else self.clock.now()
+            # Summarise as of the last quote we saw: after the feeds stop every quote
+            # ages past its venue's limit, which would read as "all stale, no marks".
+            end = self.stats.last_quote_ts or self.clock.now()
             # orders still "in the air" in the paper arrival model settle against the last book
             for rec in self._settle(end, final=True):
                 self._finish_trade(rec, end)
