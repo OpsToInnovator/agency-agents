@@ -1,0 +1,74 @@
+# arbbot configuration. Every key is optional; these are the defaults.
+# Copy to config.toml and edit. Load with: python -m arbbot scan --config config.toml
+
+[universe]
+binance_symbols = []          # explicit list (e.g. ["BTCUSDT", "ETHUSDT", "ETHBTC"]); empty = discover
+top_n = 60                    # Binance USDT markets by 24h volume when discovering
+auto_discover = true          # false = use the built-in snapshot (no REST calls at start)
+venues = ["binance", "coinbase", "kraken"]
+triangle_quotes = ["BTC", "ETH", "BNB"]
+track_stable_rates = true     # subscribe USDT-USD so USDT prices convert to USD honestly
+
+[venues]
+# Taker fees in basis points. Defaults are each venue's lowest public tier;
+# set yours. Flattering these numbers is the #1 way scanners "find" profit.
+taker_fee_bps = { binance = 10.0, coinbase = 60.0, kraken = 80.0 }
+binance_ws = "wss://data-stream.binance.vision/stream"   # api.binance.com is HTTP 451 in some regions
+binance_rest = "https://data-api.binance.vision"
+binance_trade_rest = "https://api.binance.com"           # signed endpoints, live mode only
+coinbase_ws = "wss://ws-feed.exchange.coinbase.com"
+coinbase_rest = "https://api.exchange.coinbase.com"
+kraken_ws = "wss://ws.kraken.com/v2"
+kraken_rest = "https://api.kraken.com"
+reconnect_min_s = 1.0
+reconnect_max_s = 60.0
+
+[detection]
+cross_exchange = true
+triangular = true
+anomaly = true
+min_net_edge_bps = 1.0        # act only when the edge net of ALL fees is at least this
+max_quote_age_ms = 2000.0     # a quote older than this is not tradable
+max_quote_age_ms_by_venue = { binance = 5000.0, kraken = 5000.0 }  # push-on-change feeds; dropped on disconnect
+identity_mismatch_bps = 2000.0  # venues this far apart are quoting different assets (ticker collision)
+max_plausible_net_edge_bps = 200.0  # bigger "edges" are bad data, never traded
+anchor_venue = "binance"      # marks for quarantined assets come from here
+stable_rate_band = [0.97, 1.03]  # a learned USDT/USD rate outside this is bad data
+stable_haircut_bps = 5.0      # extra edge demanded when comparing USDT with USD prices
+anomaly_threshold_bps = 50.0  # |deviation| that counts as a "price error"
+anomaly_ewma_halflife_s = 10.0
+anomaly_cooldown_s = 5.0
+triangle_start_assets = ["USDT"]
+
+[risk]
+max_notional_per_trade_usd = 100.0
+max_daily_loss_usd = 25.0     # realized; trading halts for the UTC day when hit
+max_trades_per_minute = 30
+cooldown_s = 2.0              # per opportunity (same venues/symbols/sides)
+max_detect_latency_ms = 250.0
+kill_switch_file = "STOP"     # create this file to stop all trading instantly
+min_profit_usd = 0.05         # dust-sized "opportunities" are not actionable
+max_drawdown_pct = 5.0        # halt when equity is this far below its running peak (0 = off)
+state_file = "logs/risk_state.json"  # daily loss + halt state survive a restart (replay never uses it)
+
+[paper]
+starting_quote_per_venue_usd = 1000.0
+starting_base_inventory_usd = 200.0   # per asset per venue, funded lazily at the first mark
+slippage_bps = 2.0
+fill_fraction = 1.0           # fraction of displayed top-of-book size assumed fillable
+fill_model = "arrival"        # "arrival": IOC at the detection price against the book assumed_rtt_ms later; "instant": generous
+assumed_rtt_ms = 150.0        # detection -> venue per leg; triangle legs are sequential
+
+[live]
+enabled = false               # must be true AND pass --live on the CLI
+real_orders = false           # must be true AND pass --i-know-this-sends-real-orders
+api_key_env = "BINANCE_API_KEY"
+api_secret_env = "BINANCE_API_SECRET"
+recv_window_ms = 5000
+intent_log = "logs/live_intents.jsonl"  # every order intent is journaled here before it is sent
+
+[report]
+interval_s = 10.0
+log_dir = "logs"
+write_jsonl = true
+log_every_opportunity = false # true writes every gross-positive observation (large files)
