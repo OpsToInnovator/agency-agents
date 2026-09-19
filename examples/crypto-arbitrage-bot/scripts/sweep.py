@@ -27,6 +27,7 @@ from arbbot.cli import make_engine  # noqa: E402
 from arbbot.config import load_config  # noqa: E402
 from arbbot.engine import Clock  # noqa: E402
 from arbbot.feeds import ReplayFeed  # noqa: E402
+from arbbot.feeds.replay import read_tape_header  # noqa: E402
 from arbbot.fees import DEFAULT_TAKER_BPS  # noqa: E402
 from arbbot.universe import static_universe  # noqa: E402
 
@@ -41,7 +42,8 @@ def run_once(fixture: Path, fee_scale: float, min_edge: float, haircut: float, s
         "paper": {"slippage_bps": slippage, "fill_model": fill_model},
         "report": {"write_jsonl": False, "interval_s": 3600},
     })
-    markets = static_universe(cfg)
+    markets = read_tape_header(fixture)
+    markets = static_universe(cfg) if markets is None else [m for m in markets if m.venue in cfg.enabled_venues()]
     clock = Clock()
     feed = ReplayFeed(fixture, markets, speed=0.0, clock_setter=clock.set)
     for row in feed.rows():
@@ -54,9 +56,12 @@ def run_once(fixture: Path, fee_scale: float, min_edge: float, haircut: float, s
         "fee_scale": fee_scale, "min_edge_bps": min_edge, "haircut_bps": haircut, "slippage_bps": slippage,
         "gross_positive": sum(v for k, v in stats.gross_by_kind.items() if k != "anomaly"),
         "net_positive": sum(stats.actionable_by_kind.values()),
-        "sent": stats.pending + sum(v for k, v in stats.trades_by_status.items() if k in ("filled", "partial", "rejected")),
+        # orders that left the paper desk: one per accepted opportunity
+        "sent": stats.pending if fill_model == "arrival" else sum(
+            v for k, v in stats.trades_by_status.items() if k in ("filled", "partial", "rejected")),
         "filled": stats.trades_by_status.get("filled", 0) + stats.trades_by_status.get("partial", 0),
         "missed_legs": getattr(ex, "missed_legs", 0),
+        "unknown_symbol_rows": feed.unknown_symbols,
         "realized_usd": round(getattr(ex, "realized_pnl_usd", 0.0), 4),
         "best_net_bps": round(max((v[0] for k, v in stats.best_net.items() if k != "anomaly"), default=float("nan")), 2),
     }
@@ -83,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     cols = ["fee_scale", "min_edge_bps", "haircut_bps", "slippage_bps", "gross_positive", "net_positive", "sent",
             "filled", "missed_legs", "realized_usd", "best_net_bps"]
+    if any(r["unknown_symbol_rows"] for r in rows):
+        print(f"warning: {rows[0]['unknown_symbol_rows']} rows are for markets outside the replay universe", file=sys.stderr)
     widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) for c in cols}
     print("  ".join(c.rjust(widths[c]) for c in cols))
     for r in rows:

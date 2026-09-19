@@ -32,11 +32,12 @@ def test_fixture_replays_deterministically(tmp_path):
                         {k: round(v[0], 6) for k, v in stats.best_net.items()}))
     assert results[0] == results[1]
     quotes, gross, actionable, best_net = results[0]
-    assert quotes > 300  # every quote in the fixture is processed (nothing coalesced)
-    assert gross["cross_exchange"] > 100 and gross["triangular"] > 0
+    # exact figures quoted in README.md ("The reality check"): keep them in sync
+    assert quotes == 333  # every quote in the fixture is processed (nothing coalesced)
+    assert gross == {"cross_exchange": 380, "triangular": 27}
     # the honest result: gross-positive spreads everywhere, nothing survives fees
     assert actionable == {}
-    assert best_net["cross_exchange"] < 0 and best_net["triangular"] < 0
+    assert {k: round(v, 3) for k, v in best_net.items()} == {"cross_exchange": -70.063, "triangular": -29.663}
     assert engine.stats.coalesced == 0
 
 
@@ -165,8 +166,10 @@ def test_sweep_script_runs_a_small_grid(capsys):
     rows = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
     assert len(rows) == 2
     full_fee, no_fee = rows
-    assert full_fee["net_positive"] == 0 and full_fee["filled"] == 0
-    assert no_fee["net_positive"] > 0  # "profit" appears exactly when the fees stop being real
+    assert full_fee["net_positive"] == 0 and full_fee["filled"] == 0 and full_fee["gross_positive"] == 407
+    # the README's sweep table quotes this row exactly: "profit" appears when the fees stop being real
+    assert (no_fee["net_positive"], no_fee["sent"], no_fee["filled"], no_fee["realized_usd"]) == (307, 307, 72, 0.445)
+    assert no_fee["unknown_symbol_rows"] == 0
 
 
 def test_cli_refuses_live_without_config(tmp_path, capsys):

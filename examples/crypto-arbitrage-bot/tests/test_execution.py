@@ -251,7 +251,7 @@ def test_risk_manager_checks(tmp_path):
     assert rm.check(_opp(), 1000.0) == (True, "")
     assert rm.check(_opp(net=0.5), 1000.0)[1] == "below min net edge"
     assert rm.check(_opp(net=500), 1000.0)[1] == "implausible edge (bad data?)"
-    assert rm.check(_opp(ages=(3000,)), 1000.0)[1] == "stale quote"
+    assert rm.check(_opp(ages=(6000,)), 1000.0)[1] == "stale quote"  # beyond even the 5 s Binance rule
     assert rm.check(_opp(latency=80), 1000.0)[1] == "slow detection"
     assert rm.check(_opp(notional=1500), 1000.0)[1] == "over max notional"
     assert rm.check(_opp(notional=20), 1000.0)[1] == "below min profit"  # 20 * 10 bps = 2 cents
@@ -297,19 +297,28 @@ def test_risk_drawdown_from_peak_halts(tmp_path):
     state = tmp_path / "risk_state.json"
     rm = RiskManager(RiskConfig(max_drawdown_pct=5.0, max_daily_loss_usd=1e9), DetectionConfig(), state_file=state, now=1000.0)
     rec = TradeRecord(_opp(), [], "filled", "", 0.0, 1000.0)
-    rm.on_settled(rec, 1000.0, equity_usd=1000.0)
-    rm.on_settled(rec, 1001.0, equity_usd=1040.0)  # new peak
-    rm.on_settled(rec, 1002.0, equity_usd=1000.0)  # -3.8%: fine
-    assert not rm.halted and rm.peak_equity_usd == 1040.0
-    rm.on_settled(rec, 1003.0, equity_usd=987.0)  # -5.1%
+    rm.on_settled(rec, 1000.0, pnl_usd=0.0, capital_usd=1000.0)
+    rm.on_settled(rec, 1001.0, pnl_usd=40.0, capital_usd=1000.0)  # new peak
+    rm.on_settled(rec, 1002.0, pnl_usd=0.0, capital_usd=1000.0)  # 40 USD = 4% of capital below peak: fine
+    assert not rm.halted and rm.peak_pnl_usd == 40.0
+    rm.on_settled(rec, 1003.0, pnl_usd=-11.0, capital_usd=1000.0)  # 51 USD = 5.1%
     assert rm.halted and "drawdown" in rm.halt_reason and not rm.halt_sticky
-    assert json.loads(state.read_text())["peak_equity_usd"] == 1040.0
+    assert "peak" not in json.loads(state.read_text())  # the curve is per session, not persisted
     rm2 = RiskManager(RiskConfig(max_drawdown_pct=5.0), DetectionConfig(), state_file=state, now=1000.0 + 86400)
-    assert rm2.peak_equity_usd == 1040.0 and not rm2.halted  # day rolled: trading resumes, peak remembered
+    assert rm2.peak_pnl_usd is None and not rm2.halted
     rm3 = RiskManager(RiskConfig(max_drawdown_pct=0.0), DetectionConfig())
-    rm3.on_settled(rec, 1000.0, equity_usd=1000.0)
-    rm3.on_settled(rec, 1001.0, equity_usd=500.0)
+    rm3.on_settled(rec, 1000.0, pnl_usd=0.0, capital_usd=1000.0)
+    rm3.on_settled(rec, 1001.0, pnl_usd=-500.0, capital_usd=1000.0)
     assert not rm3.halted  # disabled
+
+
+def test_risk_staleness_is_per_venue():
+    det = DetectionConfig(max_quote_age_ms=2000, max_quote_age_ms_by_venue={"binance": 5000.0})
+    rm = RiskManager(RiskConfig(max_notional_per_trade_usd=1000), det)
+    opp = _opp(ages=(3000.0,))  # a 3 s old Binance quote is still valid under the 5 s venue rule
+    assert rm.check(opp, 1000.0) == (True, "")
+    opp.legs[0].venue = COINBASE
+    assert rm.check(opp, 1000.0)[1] == "stale quote"
 
 
 def test_risk_state_survives_restart(tmp_path):

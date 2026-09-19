@@ -89,6 +89,22 @@ def test_unexecutable_opportunities_do_not_consume_budget():
     assert [t.status for t in rep.trades] == ["test"]
 
 
+def test_implausible_edges_are_anomalies_not_opportunities():
+    good = _opp(BINANCE)
+    absurd = _opp(BINANCE)
+    absurd.net_edge_bps = 480.0
+    eng, ex, rep, risk = _engine([absurd, good])
+
+    async def scenario():
+        await eng.handle(quote(BTC_BINANCE, 100, 101, ts=1000.0))
+        await eng._inflight
+
+    run(scenario())
+    assert eng.stats.gross_by_kind == {"triangular": 1} and eng.stats.actionable_by_kind == {"triangular": 1}
+    assert eng.stats.anomalies == {"implausible_edge": 1}
+    assert [o.net_edge_bps for o in ex.executed] == [5.0]
+
+
 def test_nothing_is_sent_after_stop():
     eng, ex, rep, risk = _engine([_opp(BINANCE)])
     eng.stop()

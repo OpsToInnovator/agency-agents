@@ -34,7 +34,10 @@ class RiskManager:
         self.halted = False
         self.halt_reason = ""
         self.halt_sticky = False  # sticky halts (live errors) survive the day roll; daily-cap halts do not
-        self.peak_equity_usd: float | None = None
+        # Drawdown is measured on this session's own PnL curve against the capital
+        # in play, so it is comparable across restarts (equity is not: paper runs
+        # restart from their configured balances). Not persisted on purpose.
+        self.peak_pnl_usd: float | None = None
         self.rejections: Counter[str] = Counter()
         if self.state_file is not None:
             self._load_state(now)
@@ -52,8 +55,6 @@ class RiskManager:
         if data.get("day") == today:
             self.daily_realized_usd = float(data.get("daily_realized_usd", 0.0))
             self._day = today
-        if data.get("peak_equity_usd") is not None:
-            self.peak_equity_usd = float(data["peak_equity_usd"])
         if data.get("halt_sticky"):
             self.halted = True
             self.halt_sticky = True
@@ -69,8 +70,7 @@ class RiskManager:
         if self.state_file is None:
             return
         payload = {"day": self._day, "daily_realized_usd": round(self.daily_realized_usd, 8), "halted": self.halted,
-                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason,
-                   "peak_equity_usd": self.peak_equity_usd}
+                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason}
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".risk_state", dir=str(self.state_file.parent))
@@ -130,8 +130,10 @@ class RiskManager:
             return False, "below min net edge"
         if opp.net_edge_bps > self.det.max_plausible_net_edge_bps:
             return False, "implausible edge (bad data?)"
-        if opp.quote_ages_ms and max(opp.quote_ages_ms) > self.det.max_quote_age_ms:
-            return False, "stale quote"
+        for leg, age in zip(opp.legs, opp.quote_ages_ms):
+            limit = self.det.max_quote_age_ms_by_venue.get(leg.venue, self.det.max_quote_age_ms)
+            if age > limit:
+                return False, "stale quote"
         if opp.detect_latency_ms > self.cfg.max_detect_latency_ms:
             return False, "slow detection"
         if opp.notional_usd > self.cfg.max_notional_per_trade_usd * 1.001:
@@ -154,28 +156,27 @@ class RiskManager:
         self._trade_times.append(now)
         self._last_by_key[opp.key] = now
 
-    def on_settled(self, record: TradeRecord, now: float, equity_usd: float | None = None) -> None:
-        """Fills are known: book the realized PnL against the daily cap and the
-        equity against the drawdown-from-peak cap."""
+    def on_settled(self, record: TradeRecord, now: float, pnl_usd: float | None = None,
+                   capital_usd: float | None = None) -> None:
+        """Fills are known: book the realized PnL against the daily cap, and the
+        session PnL (realized + unrealized) against the drawdown-from-peak cap."""
         self._roll_day(now)
-        changed = False
         if record.status in ("filled", "partial"):
             self.daily_realized_usd += record.realized_pnl_usd
-            changed = True
-        if equity_usd is not None and equity_usd > 0:
-            changed = self.note_equity(equity_usd) or changed
-        if changed:
             self._save_state()
+        if pnl_usd is not None and capital_usd:
+            self.note_pnl(pnl_usd, capital_usd)
 
-    def note_equity(self, equity_usd: float) -> bool:
-        """Track the running peak; halt (non-sticky, lifts with the UTC day) when
-        equity has fallen max_drawdown_pct below it. Returns True when state changed."""
-        if self.peak_equity_usd is None or equity_usd > self.peak_equity_usd:
-            self.peak_equity_usd = equity_usd
-            return True
+    def note_pnl(self, pnl_usd: float, capital_usd: float) -> bool:
+        """Track the peak of the session PnL curve; halt (non-sticky, lifts with the
+        UTC day) when PnL has fallen max_drawdown_pct of the capital below that peak."""
+        if self.peak_pnl_usd is None or pnl_usd > self.peak_pnl_usd:
+            self.peak_pnl_usd = pnl_usd
+            return False
         pct = self.cfg.max_drawdown_pct
-        if pct > 0 and not self.halted and equity_usd < self.peak_equity_usd * (1.0 - pct / 100.0):
-            self.halt(f"drawdown cap hit: equity {equity_usd:,.2f} is {100 * (1 - equity_usd / self.peak_equity_usd):.2f}% "
-                      f"below peak {self.peak_equity_usd:,.2f}", sticky=False)
+        if pct > 0 and capital_usd > 0 and not self.halted and (self.peak_pnl_usd - pnl_usd) >= capital_usd * pct / 100.0:
+            self.halt(f"drawdown cap hit: PnL {pnl_usd:+,.2f} is {self.peak_pnl_usd - pnl_usd:,.2f} USD "
+                      f"({100 * (self.peak_pnl_usd - pnl_usd) / capital_usd:.2f}% of capital) below its peak {self.peak_pnl_usd:+,.2f}",
+                      sticky=False)
             return True
         return False

@@ -40,7 +40,7 @@ prints this table at startup from whatever fees you configure):
 | Buy Binance, sell Coinbase (60 bps) + 5 bps USDT haircut | 75.4 bps |
 | Buy Binance, sell Kraken (80 bps) + 5 bps haircut | 95.7 bps |
 | Buy Coinbase, sell Kraken | 141.1 bps |
-| Buy Kraken, sell Coinbase | 141.3 bps |
+| Buy Kraken, sell Coinbase | 140.8 bps |
 | Three-leg triangle inside Binance (3 × 10 bps) | 30.1 bps |
 
 Against that, here is what the market actually offered while this was being written:
@@ -49,8 +49,8 @@ Against that, here is what the market actually offered while this was being writ
   Coinbase BTC-USD 81,053.91/81,053.92, Kraken XBT/USD 81,067.1/81,067.2. Best gross
   gap: **2.97 bps**. Convert Binance's USDT price to dollars at the live USDT/USD rate
   (0.99965) and the "Binance premium" becomes **−0.5 bps before any fees**.
-- The recorded fixture in `tests/fixtures/` (10 s of live quotes, 10 assets on all
-  three venues): 380 gross-positive cross-exchange observations, 27 gross-positive
+- The recorded fixture in `tests/fixtures/` (10 s of live quotes, 10 assets on Coinbase
+  and Kraken, 9 of them also on Binance): 380 gross-positive cross-exchange observations, 27 gross-positive
   triangles, **0** net-positive. Best net edge: −70 bps (cross-exchange), −30 bps
   (triangular).
 - Academic results say the same. Muck, Schmidl & Wolf (2025) implemented triangular
@@ -90,7 +90,7 @@ entirely, and even then two basis points of slippage turn the "profit" negative:
 | 1.00 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
 | 0.50 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
 | 0.25 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
-| 0.00 (no haircut) | 407 | 307 | 341 | 67 | −$0.43 | +$0.40 |
+| 0.00 (no haircut) | 407 | 307 | 307 | 71–72 | −$0.52 | +$0.45 |
 
 Every "this bot prints money" screenshot you will ever see lives in that last row: a fee
 assumption no retail account gets, no slippage, and fills that were never actually
@@ -104,8 +104,9 @@ a different asset with ticker `ONE` at $0.14; the bot "bought" on Binance and "s
 Kraken. `U` on Binance is a stablecoin; `U/USD` on Kraken is not. This is exactly the
 kind of "price error a human would never notice" that a naive scanner reports as a
 5,800% opportunity. The bot now quarantines any asset whose venues disagree by more
-than 20% (`identity_mismatch_bps`), refuses to trade any net edge above 2%
-(`max_plausible_net_edge_bps`), and logs both as anomalies rather than opportunities.
+than 20% (`identity_mismatch_bps`) and treats any net edge above 2%
+(`max_plausible_net_edge_bps`) as bad data; both are logged as anomalies, never as
+opportunities.
 If a screenshot of a bot's profit does not come with the trade IDs, assume it is one of
 these.
 
@@ -146,8 +147,9 @@ kraken ticker(bbo) ─┘    + USDT→USD rate        anomaly (report only)     
   add `slippage_bps`. If paper mode is not profitable, live will not be.
 - **Risk manager** (runs before any executor): minimum net edge, maximum plausible edge,
   minimum profit in dollars, quote staleness, detection latency, per-trade notional cap,
-  daily realized-loss cap and drawdown-from-peak cap (both halt trading for the UTC
-  day and persist to `logs/risk_state.json` so a restart cannot reset them),
+  daily realized-loss cap (halts for the UTC day, persisted to `logs/risk_state.json`
+  so a restart cannot reset it) and a drawdown-from-peak cap on the session's PnL
+  curve (paper mode, where equity can be marked),
   trades-per-minute limit, per-opportunity cooldown, and a kill-switch file (`STOP` in
   the working directory stops all trading instantly, checked again before every live leg).
 - **Feeds**: one WebSocket connection per venue, exponential backoff with jitter on
@@ -196,9 +198,10 @@ Binance's terms.
 Every 10 seconds:
 
 ```
-[    30s] quotes=29499 (binance=21968 coinbase=729 kraken=6802) 983/s coalesced=0 markets=192 stale=54 |
-gross>0: cross_exchange=11534 triangular=8186 | net>=1bps: cross_exchange=47 | anomalies=14 |
-trades=1 realized=+0.1790 equity=3,199.83/3,200.00 | detect p50=0.08ms p99=0.34ms
+[    60s] quotes=67999 (binance=50340 coinbase=1095 kraken=16564) 1133/s unchanged=9 markets=194 stale=59 |
+gross>0: cross_exchange=20871 triangular=14414 | net>=1bps: cross_exchange=64 | anomalies=35 |
+trades=0 realized=+0.0000 promised=+0.0000 missed_legs=2 pending=0 equity=3,198.55 contributed=3,198.55 unrealized=+0.0000 |
+detect p50=0.09ms p99=0.39ms
 ```
 
 - `gross>0`: observations where the raw prices crossed (before fees). There are thousands
@@ -239,7 +242,7 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `detection.max_plausible_net_edge_bps` | 200 | Larger "edges" are bad data |
 | `risk.max_notional_per_trade_usd` | 100 | Per-trade size cap (also caps detector sizing) |
 | `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
-| `risk.max_drawdown_pct` | 5.0 | Equity this far below its running peak halts for the day (0 = off) |
+| `risk.max_drawdown_pct` | 5.0 | Session PnL this far (as % of capital) below its peak halts for the day (0 = off; paper mode) |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -255,7 +258,8 @@ machine, and even then it goes to Binance's **validation-only** endpoint:
    format and symbol filters but never reaches the matching engine (no fill, no
    balance check). `TradeRecord.status` is `"test"` and PnL is zero.
 2. Additionally `[live] real_orders = true` **and** `--i-know-this-sends-real-orders`
-   → `POST /api/v3/order` with market orders. Keys come from the environment
+   → `POST /api/v3/order` with LIMIT IOC orders priced at the current top of book
+   (fills what is there at that price or better, never chases the book). Keys come from the environment
    (`BINANCE_API_KEY`, `BINANCE_API_SECRET`); they are never read from the config file
    and never written to any log.
 3. The risk manager still applies: kill switch, daily loss cap, notional cap, plausibility.

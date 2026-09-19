@@ -62,6 +62,8 @@ class Stats:
     disconnects: Counter = field(default_factory=Counter)
 
     def note(self, opp: Opportunity, record_latency: bool = True) -> None:
+        if opp.kind == "anomaly":
+            return  # counted in `anomalies`, never as a gross-positive opportunity
         self.gross_by_kind[opp.kind] += 1
         g = self.best_gross.get(opp.kind)
         if g is None or opp.gross_edge_bps > g[0]:
@@ -241,6 +243,13 @@ class Engine:
                 await self._process(opp, now)
 
     async def _process(self, opp: Opportunity, now: float) -> None:
+        if opp.kind != "anomaly" and opp.net_edge_bps > self.cfg.detection.max_plausible_net_edge_bps:
+            # too good to be true: a bad print, never an opportunity
+            opp.extra["subtype"] = "implausible_edge"
+            opp.extra["net_edge_bps"] = opp.net_edge_bps
+            opp.description = f"{opp.kind} net {opp.net_edge_bps:+.1f} bps is implausible: {opp.description}"
+            opp.kind = "anomaly"
+            opp.legs = []
         self.stats.note(opp, record_latency=self.clock.override is None)
         if opp.kind == "anomaly":
             self.stats.anomalies[opp.extra.get("subtype", "?")] += 1
@@ -301,11 +310,14 @@ class Engine:
     def _finish_trade(self, record: TradeRecord, now: float) -> None:
         if not record.ts:
             record.ts = now
-        equity = None
+        pnl = capital = None
         equity_fn = getattr(self.executor, "equity_usd", None)
-        if equity_fn is not None and record.status in ("filled", "partial"):
+        contrib_fn = getattr(self.executor, "contributions_value_usd", None)
+        if equity_fn is not None and contrib_fn is not None and record.status in ("filled", "partial"):
             value, unmarked = equity_fn(now)
-            equity = value if not unmarked else None  # an unmarkable asset would fake a drawdown
-        self.risk.on_settled(record, now, equity_usd=equity)
+            if not unmarked:  # an unmarkable asset would fake a drawdown
+                capital = contrib_fn(now)
+                pnl = value - capital
+        self.risk.on_settled(record, now, pnl_usd=pnl, capital_usd=capital)
         self.stats.trades_by_status[record.status] += 1
         self.reporter.on_trade(record)
