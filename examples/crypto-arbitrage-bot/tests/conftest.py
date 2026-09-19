@@ -11,6 +11,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)
+def _scratch_cwd(tmp_path, monkeypatch):
+    """A stray STOP kill-switch file or logs/ in the repo must never leak into tests."""
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
     """The suite must pass offline: any accidental socket use fails loudly."""
     import websockets

@@ -59,6 +59,21 @@ def test_coinbase_ticker():
     assert feed.parse(json.dumps({"type": "heartbeat", "product_id": "BTC-USD"}), 1.0) == []
 
 
+def test_coinbase_error_attribution_matches_whole_product_ids():
+    from tests.helpers import market
+    ar = market("coinbase", "AR-USD", "AR", "USD")
+    hbar = market("coinbase", "HBAR-USD", "HBAR", "USD")
+    feed = CoinbaseFeed([ar, hbar], "wss://x")
+    feed.parse(json.dumps({"type": "error", "message": "Failed to subscribe", "reason": "HBAR-USD is not a valid product"}), 1.0)
+    assert "AR-USD" in feed.markets and "HBAR-USD" not in feed.markets
+
+
+def test_binance_error_ack_real_shape_is_a_venue_error():
+    feed = BinanceFeed([BTC_BINANCE], "wss://x/stream")
+    assert feed.parse(json.dumps({"error": {"code": 2, "msg": "Invalid request: unknown property"}, "id": 1}), 0.0) == []
+    assert feed.venue_errors == 1
+
+
 def test_coinbase_drops_out_of_order_sequence():
     feed = CoinbaseFeed([BTC_COINBASE], "wss://x")
     base = {"type": "ticker", "product_id": "BTC-USD", "best_bid": "1", "best_bid_size": "1", "best_ask": "2", "best_ask_size": "1"}

@@ -161,14 +161,16 @@ def _coerce(kind: str, value: Any, where: str) -> Any:
         if not isinstance(value, str):
             raise ConfigError(f"{where}: expected a string, got {value!r}")
         return value
+    inner = kind[len(base) + 1:-1] if "[" in kind else ""
     if base == "list":
         if not isinstance(value, list):
             raise ConfigError(f"{where}: expected a list, got {value!r}")
-        return list(value)
+        return [_coerce(inner, v, f"{where}[{i}]") if inner else v for i, v in enumerate(value)]
     if base == "dict":
         if not isinstance(value, dict):
             raise ConfigError(f"{where}: expected a table, got {value!r}")
-        return dict(value)
+        vkind = inner.split(",", 1)[1].strip() if "," in inner else ""
+        return {k: (_coerce(vkind, v, f"{where}.{k}") if vkind else v) for k, v in value.items()}
     return value
 
 
@@ -184,9 +186,17 @@ def _apply(obj: Any, data: dict[str, Any], path: str = "") -> None:
         if is_dataclass(current) and not isinstance(current, type):
             _apply(current, value, f"{where}.")
         elif isinstance(current, dict):
-            # per-venue tables merge over the defaults, so one venue can be set alone
+            # per-venue tables merge over the defaults, so one venue can be set alone;
+            # keys are venue names and compare case-insensitively everywhere else
+            incoming = _coerce(str(known[key].type), value, where)
+            lowered: dict[str, Any] = {}
+            for k, v in incoming.items():
+                lk = str(k).lower()
+                if lk in lowered:
+                    raise ConfigError(f"{where}: key {k!r} given twice (case-insensitive)")
+                lowered[lk] = v
             merged = dict(current)
-            merged.update(_coerce(str(known[key].type), value, where))
+            merged.update(lowered)
             setattr(obj, key, merged)
         else:
             setattr(obj, key, _coerce(str(known[key].type), value, where))

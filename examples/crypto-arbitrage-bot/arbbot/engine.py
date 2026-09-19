@@ -162,7 +162,7 @@ class Engine:
                 # A live order may be mid-reconciliation: give it the executor's worst case,
                 # and never cancel it (a cancelled reconciliation is an unknown position).
                 log.warning("waiting for the in-flight live execution to finish")
-                await asyncio.wait({self._inflight}, timeout=90)
+                await asyncio.wait({self._inflight}, timeout=max(90.0, getattr(self.executor, "worst_case_s", 0.0) + 10.0))
             try:
                 # Summarise as of the last quote we saw: after the feeds stop every quote
                 # ages past its venue's limit, which would read as "all stale, no marks".
@@ -304,6 +304,8 @@ class Engine:
             raise
         except Exception as exc:  # the executor halts itself on ambiguity; this is the last net
             log.exception("live execution crashed")
+            if getattr(self.executor, "real_orders", False):
+                self.risk.halt(f"executor crashed mid-cycle ({exc!r}); fills may exist, reconcile manually", sticky=True)
             record = TradeRecord(opp, [], "rejected", f"executor crashed: {exc}", 0.0, now)
         self._finish_trade(record, self.clock.now())
 

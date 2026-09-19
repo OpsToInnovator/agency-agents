@@ -64,6 +64,8 @@ class PaperExecutor:
         self.rejected = 0
         self.missed_legs = 0
         self.pending: list[_Plan] = []
+        # displayed size already taken by other plans that settled against the same quote
+        self._consumed: dict[tuple[str, str, str, float], float] = {}
         for v in venues:
             quote = "USDT" if v == BINANCE else "USD"
             self.balances[v][quote] = cfg.starting_quote_per_venue_usd
@@ -89,16 +91,30 @@ class PaperExecutor:
         return self.promised_pnl_usd - self.realized_pnl_usd
 
     def _ensure_inventory(self, venue: str, asset: str, now: float) -> None:
-        """Fund a base asset the first time a venue needs to sell it. With no mark
-        available yet the asset stays unfunded (not pinned) so a later call can fund it."""
-        if asset in self.balances.setdefault(venue, {}) or self.cfg.starting_base_inventory_usd <= 0:
+        """Fund a base asset the first time a venue needs to sell it (once per
+        (venue, asset), tracked in the contributions ledger; a holding created by an
+        earlier buy is topped up, not overwritten). With no mark available yet the
+        asset stays unfunded (not pinned) so a later call can fund it."""
+        self.balances.setdefault(venue, {})
+        if (venue, asset) in self.contributed or self.cfg.starting_base_inventory_usd <= 0:
             return
         mark = self.book.usd_price(asset, now)
         if mark is None or mark <= 0:
             return
         qty = self.cfg.starting_base_inventory_usd / mark
-        self.balances[venue][asset] = qty
+        self.balances[venue][asset] = self.balances[venue].get(asset, 0.0) + qty
         self.contributed[(venue, asset)] += qty
+
+    def _fundable(self, opp: Opportunity) -> str | None:
+        """Reason a plan cannot be sent from the balances on hand, else None. Legs
+        that consume what an earlier leg of the same plan produces are fine."""
+        produced: set[tuple[str, str]] = set()
+        for i, leg in enumerate(opp.legs):
+            need = (leg.venue, leg.base) if leg.side == "sell" else (leg.venue, leg.quote)
+            if need not in produced and self.balance(*need) <= 0:
+                return f"leg{i + 1} {leg.symbol}: no {need[1]} on {need[0]}"
+            produced.add((leg.venue, leg.quote if leg.side == "sell" else leg.base))
+        return None
 
     def _fund_for(self, opp: Opportunity, now: float) -> None:
         # Sell legs need inventory unless an earlier leg of the same plan produces the
@@ -118,11 +134,14 @@ class PaperExecutor:
         return self.book.usd_price(asset, now)
 
     def equity_usd(self, now: float) -> tuple[float, list[str]]:
+        """Portfolio value and the holdings that could not be marked. A contributed
+        asset counts as unmarked even at zero quantity, so equity and
+        contributions_value_usd can never disagree about what is priceable."""
         total = 0.0
         unmarked: list[str] = []
         for venue, assets in self.balances.items():
             for asset, qty in assets.items():
-                if qty == 0:
+                if qty == 0 and (venue, asset) not in self.contributed:
                     continue
                 mark = self._mark(asset, now)
                 if mark is None:
@@ -136,6 +155,10 @@ class PaperExecutor:
         self._fund_for(opp, now)
         if self.cfg.fill_model == "instant":
             return self._execute_instant(opp, now)
+        reason = self._fundable(opp)
+        if reason:
+            self.rejected += 1
+            return TradeRecord(opp, [], "rejected", f"insufficient paper balance: {reason}", 0.0, now)
         sequential = opp.kind == "triangular"
         rtt = self.cfg.assumed_rtt_ms / 1000.0
         due = [now + rtt] * len(opp.legs) if not sequential else [now + rtt] + [float("inf")] * (len(opp.legs) - 1)
@@ -149,6 +172,8 @@ class PaperExecutor:
         """Resolve legs whose orders have 'arrived'. Called on every quote update
         (and once more with final=True at shutdown/end of tape)."""
         done: list[TradeRecord] = []
+        if not self.pending:
+            self._consumed.clear()  # nothing in flight: forget old quotes' consumption
         for plan in list(self.pending):
             progressed = True
             while progressed:
@@ -194,6 +219,8 @@ class PaperExecutor:
                 want = plan.carry
         else:
             want = leg.qty * plan.scale
+        depth_key = (leg.venue, leg.symbol, leg.side, q.recv_ts)
+        taken = self._consumed.get(depth_key, 0.0)
         if leg.side == "buy":
             if q.ask > leg.price:
                 plan.missed.append(f"leg{i + 1} {leg.symbol}: ask moved {leg.price:g} -> {q.ask:g}")
@@ -201,7 +228,7 @@ class PaperExecutor:
                 plan.carry = 0.0
                 return
             price = q.ask * (1.0 + slip)
-            qty = min(want, q.ask_qty * self.cfg.fill_fraction)
+            qty = min(want, max(0.0, q.ask_qty * self.cfg.fill_fraction - taken))
             have = acct.get(leg.quote, 0.0)
             cost = qty * price * (1.0 + fee_rate)
             if cost > have:
@@ -218,6 +245,7 @@ class PaperExecutor:
             plan.deltas[leg.base] += qty
             plan.fills.append(Fill(leg.venue, leg.symbol, "buy", price, qty, qty * price * fee_rate, leg.quote, now, "paper"))
             plan.carry = qty
+            self._consumed[depth_key] = taken + qty
         else:
             if q.bid < leg.price:
                 plan.missed.append(f"leg{i + 1} {leg.symbol}: bid moved {leg.price:g} -> {q.bid:g}")
@@ -225,7 +253,7 @@ class PaperExecutor:
                 plan.carry = 0.0
                 return
             price = q.bid * (1.0 - slip)
-            qty = min(want, q.bid_qty * self.cfg.fill_fraction)
+            qty = min(want, max(0.0, q.bid_qty * self.cfg.fill_fraction - taken))
             have = acct.get(leg.base, 0.0)
             if qty > have:
                 qty = have
@@ -241,6 +269,7 @@ class PaperExecutor:
             plan.deltas[leg.quote] += proceeds
             plan.fills.append(Fill(leg.venue, leg.symbol, "sell", price, qty, qty * price * fee_rate, leg.quote, now, "paper"))
             plan.carry = proceeds
+            self._consumed[depth_key] = taken + qty
 
     def _finish(self, plan: _Plan, now: float) -> TradeRecord:
         realized = 0.0
@@ -259,8 +288,8 @@ class PaperExecutor:
             self.promised_pnl_usd += plan.opp.expected_profit_usd * plan.scale
         reason = "; ".join(plan.missed) if plan.missed else ""
         return TradeRecord(plan.opp, plan.fills, status, reason, realized if plan.fills else 0.0, now,
-                           promised_pnl_usd=plan.opp.expected_profit_usd * plan.scale,
-                           latency_ms=(now - plan.created) * 1e3)
+                           promised_pnl_usd=plan.opp.expected_profit_usd * plan.scale if plan.fills else 0.0,
+                           latency_ms=max(0.0, (now - plan.created) * 1e3))
 
     # -- instant model ----------------------------------------------------
     def _execute_instant(self, opp: Opportunity, now: float) -> TradeRecord:

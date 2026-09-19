@@ -234,10 +234,10 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         log.info("universe from tape header: %s", summarize(markets))
     clock = Clock()
     feed = ReplayFeed(fixture, markets, speed=args.speed, clock_setter=clock.set)
-    # prime the clock with the first row so stats.started is in fixture time
-    for row in feed.rows():
-        clock.set(float(row["t"]))
-        break
+    first = feed.first_row_ts()  # prime the clock so stats.started is in fixture time
+    if first is not None:
+        clock.set(first)
+    cfg.risk.kill_switch_file = ""  # an offline replay must not be zeroed by a stray STOP file
     engine = make_engine(cfg, markets, [feed], clock, state_file=None)  # replays never touch persisted risk state
     _install_sigint(engine)
     stats = await engine.run()
@@ -267,7 +267,8 @@ async def cmd_preflight(args: argparse.Namespace) -> int:
         return 2
     markets = await _markets(cfg, args.static)
     try:
-        _, _, _, executor, _ = build_components(cfg, markets, Clock(), live=True, real_orders=False)
+        _, _, _, executor, _ = build_components(cfg, markets, Clock(), live=True, real_orders=False,
+                                                state_file=cfg.risk.state_file)  # see what scan --live will see
     except LiveDisabled as exc:
         print(f"live mode unavailable: {exc}", file=sys.stderr)
         return 2
@@ -352,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
 
 
