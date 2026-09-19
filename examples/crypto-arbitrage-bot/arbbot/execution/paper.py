@@ -47,6 +47,10 @@ class _Plan:
 class PaperExecutor:
     remote = False  # executes in-process; the engine awaits it inline
 
+    @staticmethod
+    def can_execute(opp: Opportunity) -> bool:
+        return opp.executable
+
     def __init__(self, cfg: PaperConfig, fees: FeeSchedule, book: QuoteBook, venues: list[str]):
         self.cfg = cfg
         self.fees = fees

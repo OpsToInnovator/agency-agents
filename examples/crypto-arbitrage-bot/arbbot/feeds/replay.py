@@ -28,6 +28,30 @@ def parser_for(venue: str, markets: Iterable[Market]) -> Feed:
     return cls(markets, ws_url="")
 
 
+def tape_header(markets: Iterable[Market]) -> str:
+    """First line of a recording: the universe it was made with."""
+    return json.dumps({"universe": [
+        {"venue": m.venue, "symbol": m.symbol, "base": m.base, "quote": m.quote, "tick_size": m.tick_size,
+         "step_size": m.step_size, "min_qty": m.min_qty, "min_notional": m.min_notional} for m in markets
+    ]}, separators=(",", ":"))
+
+
+def read_tape_header(path: str | Path) -> list[Market] | None:
+    """Markets recorded in the tape's header line, or None for a headerless tape."""
+    with Path(path).open(encoding="utf-8") as fh:
+        first = fh.readline().strip()
+    if not first:
+        return None
+    try:
+        row = json.loads(first)
+    except ValueError:
+        return None
+    if not isinstance(row, dict) or "universe" not in row:
+        return None
+    return [Market(m["venue"], m["symbol"], m["base"], m["quote"], m.get("tick_size"), m.get("step_size"),
+                   m.get("min_qty"), m.get("min_notional")) for m in row["universe"]]
+
+
 class ReplayFeed:
     """Not a `Feed` subclass: it drives all venues from one file."""
 
@@ -48,6 +72,11 @@ class ReplayFeed:
     def stop(self) -> None:
         self._stop.set()
 
+    @property
+    def unknown_symbols(self) -> int:
+        """Rows for markets the replay universe does not know (tape recorded with a different universe)."""
+        return sum(p.unknown_symbols for p in self.parsers.values())
+
     def rows(self):
         with self.path.open(encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
@@ -56,6 +85,8 @@ class ReplayFeed:
                     continue
                 try:
                     row = json.loads(line)
+                    if lineno == 1 and isinstance(row, dict) and "universe" in row:
+                        continue  # header
                     float(row["t"])
                     row["venue"], row["raw"]
                 except (ValueError, KeyError, TypeError) as exc:
@@ -95,4 +126,5 @@ class ReplayFeed:
                 # order: replays must be deterministic, never coalesced.
                 await asyncio.sleep(0)
         await asyncio.sleep(0)
-        log.info("replay finished: %d messages, %d quotes, %d malformed rows skipped", self.messages, self.quotes, self.bad_rows)
+        log.info("replay finished: %d messages, %d quotes, %d malformed rows skipped, %d rows for unknown markets",
+                 self.messages, self.quotes, self.bad_rows, self.unknown_symbols)

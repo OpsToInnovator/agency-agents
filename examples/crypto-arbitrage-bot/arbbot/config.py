@@ -137,6 +137,41 @@ class ConfigError(ValueError):
     pass
 
 
+def _coerce(kind: str, value: Any, where: str) -> Any:
+    """Check a TOML/override value against the dataclass field annotation."""
+    kind = kind.split("|")[0].strip()
+    base = kind.split("[")[0]
+    if base == "bool":
+        if not isinstance(value, bool):
+            raise ConfigError(f"{where}: expected true/false, got {value!r}")
+        return value
+    if base == "int":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{where}: expected an integer, got {value!r}")
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ConfigError(f"{where}: expected an integer, got {value!r}")
+            value = int(value)
+        return value
+    if base == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{where}: expected a number, got {value!r}")
+        return float(value)
+    if base == "str":
+        if not isinstance(value, str):
+            raise ConfigError(f"{where}: expected a string, got {value!r}")
+        return value
+    if base == "list":
+        if not isinstance(value, list):
+            raise ConfigError(f"{where}: expected a list, got {value!r}")
+        return list(value)
+    if base == "dict":
+        if not isinstance(value, dict):
+            raise ConfigError(f"{where}: expected a table, got {value!r}")
+        return dict(value)
+    return value
+
+
 def _apply(obj: Any, data: dict[str, Any], path: str = "") -> None:
     if not isinstance(data, dict):
         raise ConfigError(f"{path or 'root'}: expected a table, got {type(data).__name__}")
@@ -145,28 +180,59 @@ def _apply(obj: Any, data: dict[str, Any], path: str = "") -> None:
         if key not in known:
             raise ConfigError(f"unknown config key {path + key!r}")
         current = getattr(obj, key)
+        where = f"{path}{key}"
         if is_dataclass(current) and not isinstance(current, type):
-            _apply(current, value, f"{path}{key}.")
+            _apply(current, value, f"{where}.")
+        elif isinstance(current, dict):
+            # per-venue tables merge over the defaults, so one venue can be set alone
+            merged = dict(current)
+            merged.update(_coerce(str(known[key].type), value, where))
+            setattr(obj, key, merged)
         else:
-            setattr(obj, key, value)
+            setattr(obj, key, _coerce(str(known[key].type), value, where))
 
 
 def load_config(path: str | os.PathLike[str] | None = None, overrides: dict[str, Any] | None = None) -> Config:
     """Build a Config from defaults, then a TOML file, then a dict of overrides."""
     cfg = Config()
     if path:
-        text = Path(path).read_text(encoding="utf-8")
-        _apply(cfg, tomllib.loads(text))
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"cannot read config file {path}: {exc}") from exc
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+        _apply(cfg, data)
     if overrides:
         _apply(cfg, overrides)
     _validate(cfg)
     return cfg
 
 
+KNOWN_VENUES = (BINANCE, COINBASE, KRAKEN)
+
+
 def _validate(cfg: Config) -> None:
-    for v in cfg.universe.venues:
-        if v.lower() not in (BINANCE, COINBASE, KRAKEN):
+    if not cfg.universe.venues:
+        raise ConfigError("universe.venues must list at least one of binance, coinbase, kraken")
+    lowered = [str(v).lower() for v in cfg.universe.venues]
+    for v in lowered:
+        if v not in KNOWN_VENUES:
             raise ConfigError(f"unknown venue {v!r}")
+    if len(set(lowered)) != len(lowered):
+        raise ConfigError("universe.venues lists a venue twice")
+    for key, value in cfg.venues.taker_fee_bps.items():
+        if str(key).lower() not in KNOWN_VENUES:
+            raise ConfigError(f"venues.taker_fee_bps: unknown venue {key!r}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < 10000:
+            raise ConfigError(f"venues.taker_fee_bps.{key} must be a non-negative number of basis points")
+    for key, value in cfg.detection.max_quote_age_ms_by_venue.items():
+        if str(key).lower() not in KNOWN_VENUES:
+            raise ConfigError(f"detection.max_quote_age_ms_by_venue: unknown venue {key!r}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"detection.max_quote_age_ms_by_venue.{key} must be a positive number of milliseconds")
     if cfg.detection.max_quote_age_ms <= 0:
         raise ConfigError("detection.max_quote_age_ms must be positive")
     if cfg.detection.anchor_venue.lower() not in (BINANCE, COINBASE, KRAKEN):
@@ -175,6 +241,16 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("detection.max_plausible_net_edge_bps must exceed min_net_edge_bps")
     if cfg.risk.max_notional_per_trade_usd <= 0:
         raise ConfigError("risk.max_notional_per_trade_usd must be positive")
+    if cfg.risk.max_daily_loss_usd <= 0:
+        raise ConfigError("risk.max_daily_loss_usd must be positive")
+    # Paths resolve against the directory the bot was started in, once, so a kill
+    # switch touched "in the repo" from another cwd cannot silently miss.
+    if cfg.risk.kill_switch_file:
+        cfg.risk.kill_switch_file = str(Path(cfg.risk.kill_switch_file).expanduser().resolve())
+    if cfg.risk.state_file:
+        cfg.risk.state_file = str(Path(cfg.risk.state_file).expanduser().resolve())
+    if cfg.live.intent_log:
+        cfg.live.intent_log = str(Path(cfg.live.intent_log).expanduser().resolve())
     if not 0 < cfg.paper.fill_fraction <= 1:
         raise ConfigError("paper.fill_fraction must be in (0, 1]")
     if cfg.paper.slippage_bps < 0:

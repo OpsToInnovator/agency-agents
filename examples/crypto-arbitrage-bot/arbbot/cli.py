@@ -8,6 +8,7 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -17,6 +18,7 @@ from .engine import Clock, Engine
 from .execution import BinanceLiveExecutor, PaperExecutor, RiskManager
 from .execution.live import LiveDisabled
 from .feeds import BinanceFeed, CoinbaseFeed, KrakenFeed, ReplayFeed
+from .feeds.replay import read_tape_header, tape_header
 from .fees import FEES_VERIFIED_ON, FeeSchedule, cross_break_even_bps, triangle_break_even_bps
 from .models import BINANCE, COINBASE, KRAKEN, Market
 from .quotes import QuoteBook
@@ -110,11 +112,11 @@ def make_engine(cfg: Config, markets: list[Market], feeds: list, clock: Clock, l
 def _overrides(args: argparse.Namespace) -> dict[str, Any]:
     o: dict[str, Any] = {}
     uni: dict[str, Any] = {}
-    if getattr(args, "top", None):
+    if getattr(args, "top", None) is not None:
         uni["top_n"] = args.top
-    if getattr(args, "symbols", None):
+    if getattr(args, "symbols", None) is not None:
         uni["binance_symbols"] = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    if getattr(args, "venues", None):
+    if getattr(args, "venues", None) is not None:
         uni["venues"] = [s.strip().lower() for s in args.venues.split(",") if s.strip()]
     if uni:
         o["universe"] = uni
@@ -167,7 +169,11 @@ def _install_sigint(engine: Engine) -> None:
 async def cmd_scan(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, _overrides(args))
     markets = await _markets(cfg, args.static)
-    raw_fh = open(args.record, "a", encoding="utf-8") if args.record else None
+    raw_fh = None
+    if args.record:
+        raw_fh = open(args.record, "a", encoding="utf-8")
+        if raw_fh.tell() == 0:
+            raw_fh.write(tape_header(markets) + "\n")  # so a replay rebuilds the same universe
 
     def raw_sink(venue: str, raw: str, ts: float) -> None:
         raw_fh.write(json.dumps({"t": round(ts, 6), "venue": venue, "raw": raw}, separators=(",", ":")) + "\n")
@@ -199,6 +205,7 @@ async def cmd_scan(args: argparse.Namespace) -> int:
             return 3
         log.info("preflight passed (clock offset %+.0f ms)", engine.executor.rest.time_offset_ms)
     mode = "LIVE/REAL ORDERS" if (live and real) else "LIVE/test-endpoint" if live else "PAPER"
+    log.info("kill switch: create %s to stop trading; risk state: %s", cfg.risk.kill_switch_file, cfg.risk.state_file)
     log.info("arbbot %s starting in %s mode: %d markets, %d feeds, min net edge %.2f bps, fees %s",
              __version__, mode, len(markets), len(feeds), cfg.detection.min_net_edge_bps,
              {k: f"{v:g}bps" for k, v in FeeSchedule(cfg.venues.taker_fee_bps).as_bps().items() if k in cfg.enabled_venues()})
@@ -215,9 +222,18 @@ async def cmd_scan(args: argparse.Namespace) -> int:
 
 async def cmd_replay(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, _overrides(args))
-    markets = static_universe(cfg)
+    fixture = Path(args.fixture)
+    if not fixture.is_file():
+        print(f"no such tape: {fixture}", file=sys.stderr)
+        return 2
+    markets = read_tape_header(fixture)
+    if markets is None:
+        markets = static_universe(cfg)  # headerless tape (e.g. the bundled fixture)
+    else:
+        markets = [m for m in markets if m.venue in cfg.enabled_venues()]
+        log.info("universe from tape header: %s", summarize(markets))
     clock = Clock()
-    feed = ReplayFeed(args.fixture, markets, speed=args.speed, clock_setter=clock.set)
+    feed = ReplayFeed(fixture, markets, speed=args.speed, clock_setter=clock.set)
     # prime the clock with the first row so stats.started is in fixture time
     for row in feed.rows():
         clock.set(float(row["t"]))
@@ -229,6 +245,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     print(json.dumps({
         "quotes": stats.quotes,
         "malformed_rows": feed.bad_rows,
+        "unknown_symbol_rows": feed.unknown_symbols,
         "feed_errors": stats.feed_errors,
         "gross_positive": dict(stats.gross_by_kind),
         "net_actionable": dict(stats.actionable_by_kind),

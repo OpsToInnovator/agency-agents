@@ -60,7 +60,10 @@ class CoinbaseFeed(Feed):
         if mtype != "ticker":
             return []
         market = self.markets.get(msg.get("product_id", ""))
-        if market is None or "best_bid" not in msg:
+        if market is None:
+            self.unknown_symbols += 1
+            return []
+        if "best_bid" not in msg:
             return []
         seq = msg.get("sequence")
         if isinstance(seq, int):

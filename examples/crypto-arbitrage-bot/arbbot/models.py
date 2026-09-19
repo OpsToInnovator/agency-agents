@@ -149,10 +149,21 @@ class Fill:
     side: str
     price: float
     qty: float  # base quantity actually filled
-    fee: float
+    fee: float  # total commission in `fee_asset` (the largest component when several assets were charged)
     fee_asset: str
     ts: float
     order_id: str = ""
+    fees_by_asset: dict[str, float] | None = None  # every commission asset, e.g. BNB discount running out mid-fill
+
+    def fee_in(self, asset: str) -> float:
+        if self.fees_by_asset is not None:
+            return self.fees_by_asset.get(asset, 0.0)
+        return self.fee if self.fee_asset == asset else 0.0
+
+    def all_fees(self) -> dict[str, float]:
+        if self.fees_by_asset is not None:
+            return dict(self.fees_by_asset)
+        return {self.fee_asset: self.fee} if self.fee else {}
 
 
 @dataclass

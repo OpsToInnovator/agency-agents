@@ -162,8 +162,11 @@ async def discover(cfg: Config, session: Any | None = None) -> list[Market]:
             except Exception as exc:
                 log.warning("Binance discovery failed (%s: %s); using static list", type(exc).__name__, exc)
                 markets += [m for m in static_universe(cfg) if m.venue == BINANCE]
-        if cfg.universe.binance_symbols or BINANCE in venues:
+        if BINANCE in venues:
             bases = sorted({m.base for m in markets if m.quote in USD_FAMILY and m.base not in USD_FAMILY})
+        elif cfg.universe.binance_symbols:
+            requested = _binance_markets([s.upper() for s in cfg.universe.binance_symbols])
+            bases = sorted({m.base for m in requested if m.quote in USD_FAMILY and m.base not in USD_FAMILY})
         else:
             bases = STATIC_BASES[: cfg.universe.top_n]
 

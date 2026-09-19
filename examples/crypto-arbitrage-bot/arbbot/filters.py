@@ -52,6 +52,8 @@ def size_order(market: Market, price: float, qty: float, side: str) -> tuple[Dec
     Returns (price, qty, rejection_reason). qty is rounded down to the step
     size; the result is rejected when it violates min_qty or min_notional.
     """
+    if not market.step_size or not market.tick_size:
+        return _d(price), _d(qty), "no exchange filters known for this market (run with discovery, not --static)"
     p = round_tick(price, market.tick_size, side)
     q = round_step(qty, market.step_size)
     if q <= 0:

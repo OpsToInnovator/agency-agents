@@ -40,6 +40,32 @@ def test_unknown_key_is_an_error(tmp_path):
         load_config(None, {"detection": {"stable_rate_band": [1.1, 1.2]}})
 
 
+def test_types_are_checked_and_tables_merge(tmp_path):
+    with pytest.raises(ConfigError):
+        load_config(None, {"universe": {"top_n": "60"}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"universe": {"top_n": 60.5}})
+    assert load_config(None, {"universe": {"top_n": 60.0}}).universe.top_n == 60
+    with pytest.raises(ConfigError):
+        load_config(None, {"detection": {"min_net_edge_bps": "1.0"}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"live": {"enabled": "yes"}})
+    cfg = load_config(None, {"detection": {"max_quote_age_ms_by_venue": {"binance": 9000.0}}})
+    assert cfg.detection.max_quote_age_ms_by_venue == {"binance": 9000.0, "kraken": 5000.0}  # merged, not replaced
+    for bad in ({"venues": {"taker_fee_bps": {"binanace": 2.0}}}, {"venues": {"taker_fee_bps": {"binance": -50.0}}},
+                {"venues": {"taker_fee_bps": 5.0}}, {"detection": {"max_quote_age_ms_by_venue": {"ftx": 1}}},
+                {"detection": {"max_quote_age_ms_by_venue": {"kraken": 0}}}, {"universe": {"venues": []}},
+                {"universe": {"venues": ["binance", "binance"]}}):
+        with pytest.raises(ConfigError):
+            load_config(None, bad)
+    p = tmp_path / "broken.toml"
+    p.write_text("[detection\n")
+    with pytest.raises(ConfigError):
+        load_config(p)
+    with pytest.raises(ConfigError):
+        load_config(tmp_path / "missing.toml")
+
+
 def test_example_config_loads():
     cfg = load_config(ROOT / "config.example.toml")
     assert cfg.paper.fill_model == "arrival"
@@ -77,6 +103,17 @@ def test_static_universe_fallbacks_respect_top_n_and_explicit_symbols():
     markets = static_universe(cfg)
     assert {m.symbol for m in markets if m.venue == BINANCE} == {"ETHBTC"}
     assert not any(m.venue != BINANCE and m.base not in USD_FAMILY for m in markets)  # nothing the operator did not ask for
+
+
+def test_cli_overrides_do_not_drop_zero_or_empty():
+    from arbbot.cli import build_parser, _overrides
+
+    args = build_parser().parse_args(["markets", "--static", "--top", "0"])
+    with pytest.raises(ConfigError):
+        load_config(None, _overrides(args))
+    args = build_parser().parse_args(["markets", "--static", "--venues", ""])
+    with pytest.raises(ConfigError):
+        load_config(None, _overrides(args))
 
 
 def test_reconnect_settings_are_validated():

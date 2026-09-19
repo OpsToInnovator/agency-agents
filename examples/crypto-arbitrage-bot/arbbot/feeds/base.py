@@ -57,6 +57,7 @@ class Feed:
         self.quotes = 0
         self.parse_errors = 0
         self.venue_errors = 0  # the venue said no (bad symbol, bad subscription): not a parse problem
+        self.unknown_symbols = 0  # quotes for markets this feed was not asked about
         self.reconnects = 0
         self.connected = False
         self._stop = asyncio.Event()

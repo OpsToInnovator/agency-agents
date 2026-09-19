@@ -419,7 +419,7 @@ def test_live_executor_test_endpoint_by_default(monkeypatch, tmp_path):
     posts = [c for c in session.calls if c[0] == "POST"]
     assert len(posts) == 3 and all(c[1].endswith("/api/v3/order/test") for c in posts)
     body = posts[0][2]
-    assert "symbol=BTCUSDT&side=BUY&type=MARKET&quantity=0.00999&newClientOrderId=arb" in body
+    assert "symbol=BTCUSDT&side=BUY&type=LIMIT&timeInForce=IOC&price=100000&quantity=0.00999&newClientOrderId=arb" in body
     assert "&signature=" in body and "recvWindow=5000" in body and "timestamp=" in body
     assert ex.rest.used_weight_1m == 7
     intents = [json.loads(l) for l in (tmp_path / "intents.jsonl").read_text().splitlines()]
@@ -447,7 +447,7 @@ def test_live_executor_rejects_cross_venue_and_filter_failures(monkeypatch):
     book.update(quote(BTC_BINANCE, 99999, 100000.0, ts=1000.0))
     tiny = Opportunity("triangular", 1000.0, [Leg(BINANCE, "BTCUSDT", "buy", "BTC", "USDT", 100000.0, 0.00001, 0.001)],
                        5, 5, 1.0, 0.0, "tiny")
-    rec = run(ex.execute(tiny, 1000.0))
+    rec = run(ex.execute(tiny, 1000.0, min_edge_bps=-1e9))
     assert rec.status == "rejected" and "min_notional" in rec.reason
 
 
@@ -467,7 +467,7 @@ def test_live_executor_rechecks_kill_switch_and_edge_before_each_leg(monkeypatch
 
     ex._send = send_then_move
     rec = run(ex.execute(opp, 1000.0))
-    assert rec.status == "rejected" and "leg 2" in rec.reason and "ask moved" in rec.reason
+    assert rec.status == "rejected" and "leg 2" in rec.reason and "moved" in rec.reason  # 76 bps: a dislocation
     # kill switch engaged before leg 1
     (tmp_path / "STOP").write_text("")
     ex2 = _live(book, FakeSession([TIME]), risk=risk)
@@ -492,14 +492,17 @@ def test_live_executor_ambiguous_send_recovers_by_client_id_or_halts(monkeypatch
     def ctx(method, url, data):
         if method == "GET" and "origClientOrderId=" in url:
             cid = url.split("origClientOrderId=")[1].split("&")[0]
-            session.script = [(m, s, {"clientOrderId": cid, "executedQty": "0.00999", "cummulativeQuoteQty": "999",
-                                      "fills": [{"commission": "0.00000999", "commissionAsset": "BTC"}], "orderId": 42}
+            # Binance's query-order shape: status + executed quantities, no `fills`
+            session.script = [(m, s, {"clientOrderId": cid, "status": "FILLED", "executedQty": "0.00999",
+                                      "cummulativeQuoteQty": "999", "orderId": 42}
                                if m == "/api/v3/order?" else p) for (m, s, p) in session.script]
         return real_ctx(method, url, data)
 
     session._ctx = ctx
-    session.script += [("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 43}),
-                       ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.00999", "fills": [], "orderId": 44})]
+    session.script += [("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999",
+                                                "fills": [{"commission": "0.00000999", "commissionAsset": "ETH"}], "orderId": 43}),
+                       ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.00999",
+                                                "fills": [{"commission": "0.00001", "commissionAsset": "USDT"}], "orderId": 44})]
     async def _instant(_s, *_a, **_k):
         return None
 
@@ -507,6 +510,22 @@ def test_live_executor_ambiguous_send_recovers_by_client_id_or_halts(monkeypatch
     rec = run(ex.execute(opp, 1000.0))
     assert rec.status == "filled"
     assert rec.fills[0].order_id == "42" and not risk.halted
+    assert rec.fills[0].fee_asset == "BTC" and rec.fills[0].fee == pytest.approx(0.00999 * 0.001)  # schedule fee, received asset
+    # 1b) real orders: the lookup says the order never existed -> nothing filled, nothing sent after it
+    session_never = FakeSession([TIME, ("/api/v3/order", 200, asyncio.TimeoutError()),
+                                 ("/api/v3/order?", 400, {"code": -2013, "msg": "Order does not exist."})])
+    risk_never = RiskManager(RiskConfig(), DetectionConfig())
+    ex_never = _live(book, session_never, real=True, cfg_real=True, risk=risk_never)
+    rec = run(ex_never.execute(opp, 1000.0))
+    assert rec.status == "rejected" and "never received" in rec.reason and rec.fills == []
+    assert sum(1 for c in session_never.calls if c[0] == "POST") == 1 and not risk_never.halted
+    # 1c) real orders: the IOC filled nothing (EXPIRED) -> no fabricated fill, cycle not continued
+    session_zero = FakeSession([TIME, ("/api/v3/order", 200, {"status": "EXPIRED", "executedQty": "0.00000000",
+                                                              "cummulativeQuoteQty": "0.00000000", "fills": [], "orderId": 45})])
+    ex_zero = _live(book, session_zero, real=True, cfg_real=True, risk=RiskManager(RiskConfig(), DetectionConfig()))
+    rec = run(ex_zero.execute(opp, 1000.0))
+    assert rec.status == "rejected" and "filled nothing" in rec.reason and rec.fills == []
+    assert sum(1 for c in session_zero.calls if c[0] == "POST") == 1
     # 2) real orders: POST times out and the lookup keeps failing -> sticky halt, no blind resend
     session2 = FakeSession([TIME, ("/api/v3/order", 200, asyncio.TimeoutError()),
                             ("/api/v3/order?", 200, ConnectionError("x")), ("/api/v3/order?", 200, ConnectionError("x")),
@@ -517,6 +536,98 @@ def test_live_executor_ambiguous_send_recovers_by_client_id_or_halts(monkeypatch
     assert rec.status == "rejected" and "ambiguous" in rec.reason.lower()
     assert risk2.halted and risk2.halt_sticky
     assert sum(1 for c in session2.calls if c[0] == "POST") == 1  # never resent
+
+
+def test_live_partial_cycle_books_its_loss_and_splits_commissions(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    # leg 1 fills with commission split across BNB and BTC; leg 2 is rejected by the venue
+    session = FakeSession([TIME,
+                           ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999.0", "orderId": 1,
+                                                   "fills": [{"commission": "0.001", "commissionAsset": "BNB"},
+                                                             {"commission": "0.000005", "commissionAsset": "BTC"}]}),
+                           ("/api/v3/order", 400, {"code": -2010, "msg": "Account has insufficient balance for requested action."})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "partial" and risk.halted and risk.halt_sticky
+    assert rec.fills[0].fees_by_asset == {"BNB": 0.001, "BTC": 0.000005}
+    assert rec.fills[0].fee_in("BTC") == 0.000005  # only the BTC part reduces what we can sell on
+    # realized = -999 USDT + 0.00999 BTC marked at mid (99999.5) - 0.000005 BTC - 0.001 BNB (unmarkable -> 0)
+    expected = -999.0 + (0.00999 - 0.000005) * 99999.5
+    assert rec.realized_pnl_usd == pytest.approx(expected, rel=1e-9)
+    assert ex.realized_pnl_usd == pytest.approx(expected, rel=1e-9)
+    risk.on_settled(rec, 1000.0)
+    assert risk.daily_realized_usd == pytest.approx(expected, rel=1e-9)
+
+
+def test_live_gates_whole_cycle_before_leg_one_and_only_dislocations_later(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    def thin_triangle():
+        # USDT -> BTC -> ETH -> USDT with ~1.5 bps net: 100000 * 0.0396 = 3960; ETH bid 3972.6 -> +31.8 bps gross
+        book = QuoteBook(max_age_s=2.0)
+        markets = [BTC_BINANCE, ETH_BINANCE, ETHBTC_BINANCE]
+        for m in markets:
+            book.register(m)
+        book.update(quote(BTC_BINANCE, 99999, 100000, ts=1000.0))
+        book.update(quote(ETH_BINANCE, 3972.6, 3973, ts=1000.0))
+        ethbtc = quote(ETHBTC_BINANCE, 0.0395, 0.0396, ts=1000.0)
+        book.update(ethbtc)
+        (opp,) = TriangularDetector(markets, FEES, DetectionConfig(), 1000.0).on_quote(ethbtc, book, 1000.0)
+        assert 1.0 < opp.net_edge_bps < 3.0
+        return book, opp
+
+    book, opp = thin_triangle()
+    # each leg drifts 0.9 bps against us: the cycle no longer clears a 1 bps minimum -> nothing sent
+    book.update(quote(BTC_BINANCE, 99999, 100000 * 1.00009, ts=1000.0))
+    book.update(quote(ETHBTC_BINANCE, 0.0395, 0.0396 * 1.00009, ts=1000.0))
+    book.update(quote(ETH_BINANCE, 3972.6 * 0.99991, 3973, ts=1000.0))
+    session = FakeSession([TIME])
+    ex = _live(book, session)
+    rec = run(ex.execute(opp, 1000.0, min_edge_bps=1.0))
+    assert rec.status == "rejected" and "edge decayed" in rec.reason
+    assert not [c for c in session.calls if c[0] == "POST"]
+    # mid-cycle a 2 bps drift does not strand inventory: the cycle completes
+    book, opp = thin_triangle()
+    session = FakeSession([TIME, ("/api/v3/order/test", 200, {}), ("/api/v3/order/test", 200, {}), ("/api/v3/order/test", 200, {})])
+    ex = _live(book, session)
+    orig = ex._send
+
+    async def send_then_drift(params, client_id):
+        payload = await orig(params, client_id)
+        if params["symbol"] == "BTCUSDT":
+            book.update(quote(ETHBTC_BINANCE, 0.0395, 0.0396 * 1.0002, ts=1000.1))
+        return payload
+
+    ex._send = send_then_drift
+    rec = run(ex.execute(opp, 1000.0, min_edge_bps=1.0))
+    assert rec.status == "test" and len(rec.fills) == 3
+
+
+def test_live_refuses_markets_without_filters(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    from tests.helpers import market
+    bare = market(BINANCE, "BTCUSDT", "BTC", "USDT")  # static universe: no tick/step
+    book = QuoteBook(max_age_s=2.0)
+    book.register(bare)
+    book.update(quote(bare, 99999, 100000, ts=1000.0))
+    opp = Opportunity("triangular", 1000.0, [Leg(BINANCE, "BTCUSDT", "buy", "BTC", "USDT", 100000.0, 0.001, 0.001)], 5, 5, 100.0, 0.05, "x")
+    session = FakeSession([TIME])
+    ex = _live(book, session)
+    rec = run(ex.execute(opp, 1000.0, min_edge_bps=-1e9))  # a one-leg "cycle" never clears a real edge gate
+    assert rec.status == "rejected" and "no exchange filters" in rec.reason
+    assert not [c for c in session.calls if c[0] == "POST"]
+    problems = run(_live(book, FakeSession([
+        ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+        ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+        ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+        ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "1000"}]}),
+        ("/api/v3/order/test", 200, {}),
+    ])).preflight(["BTCUSDT"]))
+    assert any("no exchange filters" in p for p in problems)
 
 
 def test_live_preflight_reports_problems(monkeypatch):
@@ -541,6 +652,7 @@ def test_live_preflight_reports_problems(monkeypatch):
         ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "1000"}]}),
         ("/api/v3/order/test", 200, {}),
     ])
+    book.register(BTC_BINANCE)
     assert run(_live(book, ok_session).preflight(["BTCUSDT"])) == []
 
 

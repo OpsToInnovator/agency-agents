@@ -77,6 +77,7 @@ class BinanceFeed(Feed):
             return []
         market = self.markets.get(symbol)
         if market is None:
+            self.unknown_symbols += 1
             return []
         u = data.get("u")
         if isinstance(u, int):

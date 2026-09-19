@@ -60,6 +60,13 @@ class AmbiguousOrderState(RuntimeError):
     """We do not know whether the venue received the order."""
 
 
+class OrderNeverArrived(RuntimeError):
+    """The venue confirms it never saw the order (lookup answered -2013)."""
+
+
+ABORT_DRIFT_BPS = 50.0  # mid-cycle, only a dislocation this large stops us completing the cycle
+
+
 def sign_query(params: dict[str, Any], secret: str) -> str:
     """Return the urlencoded query with Binance's HMAC-SHA256 signature appended."""
     query = urlencode(params, doseq=True)
@@ -219,6 +226,12 @@ class BinanceLiveExecutor:
                 "symbol": symbols[0] if symbols else "BTCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": "10"})
         except Exception as exc:
             problems.append(f"order/test smoke call failed: {exc}")
+        missing = [s for s in symbols if (m := self.book.market(BINANCE, s)) is None or not m.step_size or not m.tick_size]
+        if missing:
+            problems.append(f"no exchange filters for {', '.join(missing[:6])}{'...' if len(missing) > 6 else ''} "
+                            f"(use discovery, not --static)")
+        if self.risk is not None and self.risk.kill_switch_engaged():
+            problems.append(f"kill switch file {self.risk.cfg.kill_switch_file} already exists")
         return problems
 
     # -- execution --------------------------------------------------------
@@ -231,21 +244,52 @@ class BinanceLiveExecutor:
             fh.flush()
             os.fsync(fh.fileno())
 
-    def _edge_still_there(self, leg: Leg, tolerance_bps: float = 1.0) -> tuple[bool, str]:
+    @staticmethod
+    def can_execute(opp: Opportunity) -> bool:
+        return opp.executable and all(l.venue == BINANCE for l in opp.legs)
+
+    def _leg_drift_bps(self, leg: Leg) -> float | None:
+        """How far the touch moved against the plan, in bps (None = no quote)."""
         q = self.book.get(BINANCE, leg.symbol)
-        if q is None:
-            return False, f"{leg.symbol}: no current quote"
-        tol = tolerance_bps / 1e4
-        if leg.side == "buy" and q.ask > leg.price * (1 + tol):
-            return False, f"{leg.symbol}: ask moved {leg.price:g} -> {q.ask:g}"
-        if leg.side == "sell" and q.bid < leg.price * (1 - tol):
-            return False, f"{leg.symbol}: bid moved {leg.price:g} -> {q.bid:g}"
-        return True, ""
+        if q is None or not q.is_sane:
+            return None
+        if leg.side == "buy":
+            return (q.ask / leg.price - 1.0) * 1e4
+        return (1.0 - q.bid / leg.price) * 1e4
+
+    def _cycle_edge_bps(self, legs: list[Leg]) -> float | None:
+        """Net edge of executing `legs` at the current book (planned sizes are irrelevant
+        to the multiplier). None when any quote is missing."""
+        fee = self.fees.taker(BINANCE)
+        mult = 1.0
+        for leg in legs:
+            q = self.book.get(BINANCE, leg.symbol)
+            if q is None or not q.is_sane:
+                return None
+            mult *= (1.0 / q.ask) / (1.0 + fee) if leg.side == "buy" else q.bid * (1.0 - fee)
+        return (mult - 1.0) * 1e4
+
+    def _gate_leg(self, opp: Opportunity, i: int, min_edge_bps: float) -> str | None:
+        """Before leg 1: the whole cycle must still clear the minimum edge. Later: we are
+        holding an intermediate asset, so only a dislocation stops us completing."""
+        if i == 0:
+            edge = self._cycle_edge_bps(opp.legs)
+            if edge is None:
+                return "no current quote for every leg"
+            if edge < min_edge_bps:
+                return f"edge decayed to {edge:+.2f} bps before sending"
+            return None
+        drift = self._leg_drift_bps(opp.legs[i])
+        if drift is None:
+            return f"{opp.legs[i].symbol}: no current quote"
+        if drift > ABORT_DRIFT_BPS:
+            return f"{opp.legs[i].symbol}: moved {drift:.0f} bps against the plan"
+        return None
 
     async def _send(self, params: dict[str, Any], client_id: str) -> dict[str, Any]:
         """POST the order; on an ambiguous outcome look it up by client id; never resend blind."""
         try:
-            return await self.rest.request("POST", self.endpoint, params) or {}
+            payload = await self.rest.request("POST", self.endpoint, params)
         except BinanceHTTPError as exc:
             if exc.status in (418, 429):
                 if self.risk is not None:
@@ -263,22 +307,27 @@ class BinanceLiveExecutor:
                         return found
                 except BinanceHTTPError as lookup_exc:
                     if isinstance(lookup_exc.payload, dict) and lookup_exc.payload.get("code") == -2013:
-                        return {}  # "Order does not exist": it never arrived, nothing to reconcile
+                        raise OrderNeverArrived(f"{params['symbol']}: the venue never received order {client_id}") from exc
                 except Exception:
                     continue
             if self.risk is not None:
                 self.risk.halt(f"ambiguous order state for {client_id} ({params['symbol']}); reconcile manually", sticky=True)
             raise AmbiguousOrderState(f"ambiguous order state for {client_id} after {type(exc).__name__}: {exc or 'no response'}") from exc
+        if self.real_orders and not payload:
+            if self.risk is not None:
+                self.risk.halt(f"empty response for real order {client_id} ({params['symbol']}); reconcile manually", sticky=True)
+            raise AmbiguousOrderState(f"{params['symbol']}: empty response to a real order")
+        return payload or {}
 
-    async def execute(self, opp: Opportunity, now: float) -> TradeRecord:
-        if any(l.venue != BINANCE for l in opp.legs):
+    async def execute(self, opp: Opportunity, now: float, min_edge_bps: float = 0.0) -> TradeRecord:
+        if not self.can_execute(opp):
             self.rejected += 1
             return TradeRecord(opp, [], "rejected", "live execution supports Binance-only opportunities", 0.0, now)
         if self.rest.time_synced_at is None or time.time() - self.rest.time_synced_at > 600:
             try:
                 await self.rest.sync_time()
             except Exception as exc:
-                return self._abort(opp, [], now, f"cannot sync time: {exc}")
+                return self._abort(opp, [], {}, now, f"cannot sync time: {exc}")
         fills: list[Fill] = []
         deltas: dict[str, float] = defaultdict(float)
         carry: float | None = None  # units of this leg's input asset delivered by the previous leg
@@ -287,26 +336,30 @@ class BinanceLiveExecutor:
             if self.risk is not None:
                 ok, reason = self.risk.allow_leg(time.time())
                 if not ok:
-                    return self._abort(opp, fills, now, f"leg {i + 1}: {reason}")
-            ok, reason = self._edge_still_there(leg)
-            if not ok:
-                return self._abort(opp, fills, now, f"leg {i + 1}: {reason}")
+                    return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {reason}")
+            gate = self._gate_leg(opp, i, min_edge_bps)
+            if gate:
+                return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {gate}")
             market = self.book.market(BINANCE, leg.symbol)
             if market is None:
-                return self._abort(opp, fills, now, f"unknown market {leg.symbol}")
+                return self._abort(opp, fills, deltas, now, f"unknown market {leg.symbol}")
+            q = self.book.get(BINANCE, leg.symbol)
+            limit_price = (q.ask if leg.side == "buy" else q.bid) if q else leg.price
             if carry is None:
                 qty = leg.qty
             elif leg.side == "sell":
                 qty = min(leg.qty, carry)
             else:
-                q = self.book.get(BINANCE, leg.symbol)
-                qty = min(leg.qty, carry / (q.ask * (1.0 + fee_rate))) if q else leg.qty
-            _, q_dec, reason = size_order(market, leg.price, qty, leg.side)
+                qty = min(leg.qty, carry / (limit_price * (1.0 + fee_rate)))
+            p_dec, q_dec, reason = size_order(market, limit_price, qty, leg.side)
             if reason:
-                return self._abort(opp, fills, now, f"{leg.symbol}: {reason}")
+                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {reason}")
             client_id = f"arb{uuid.uuid4().hex[:24]}"
-            params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "MARKET",
-                      "quantity": format(q_dec, "f"), "newClientOrderId": client_id, "newOrderRespType": "FULL"}
+            # LIMIT + IOC at the current touch: fills what is there at that price or better,
+            # never chases a thin book the way a MARKET order would.
+            params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "LIMIT", "timeInForce": "IOC",
+                      "price": format(p_dec, "f"), "quantity": format(q_dec, "f"),
+                      "newClientOrderId": client_id, "newOrderRespType": "FULL"}
             self._journal({"ts": time.time(), "kind": "intent", "endpoint": self.endpoint, "real": self.real_orders,
                            "client_id": client_id, "params": params, "opportunity": opp.description})
             try:
@@ -316,27 +369,25 @@ class BinanceLiveExecutor:
                 raise
             except Exception as exc:
                 self._journal({"ts": time.time(), "kind": "error", "client_id": client_id, "error": str(exc)})
-                return self._abort(opp, fills, now, f"{leg.symbol}: {exc}")
+                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {exc}")
             self._journal({"ts": time.time(), "kind": "response", "client_id": client_id,
                            "payload": payload if isinstance(payload, dict) else str(payload)[:500]})
-            fill = self._fill_from(payload, leg, float(q_dec), now, client_id)
+            fill = self._fill_from(payload, leg, float(q_dec), float(p_dec), now, client_id)
+            if fill is None or fill.qty <= 0:
+                status = str((payload or {}).get("status", "unknown"))
+                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: IOC order filled nothing (status {status})")
             fills.append(fill)
             if fill.side == "buy":
                 deltas[leg.quote] -= fill.qty * fill.price
                 deltas[leg.base] += fill.qty
-                received = fill.qty - (fill.fee if fill.fee_asset == leg.base else 0.0)
-                carry = received
+                carry = fill.qty - fill.fee_in(leg.base)
             else:
                 deltas[leg.base] -= fill.qty
                 deltas[leg.quote] += fill.qty * fill.price
-                received = fill.qty * fill.price - (fill.fee if fill.fee_asset == leg.quote else 0.0)
-                carry = received
-            if fill.fee:
-                deltas[fill.fee_asset] -= fill.fee
-        realized = 0.0
-        for asset, d in deltas.items():
-            mark = self.book.usd_rate(asset, now) if asset in USD_FAMILY else self.book.usd_price(asset, now)
-            realized += d * (mark or 0.0)
+                carry = fill.qty * fill.price - fill.fee_in(leg.quote)
+            for asset, amount in fill.all_fees().items():
+                deltas[asset] -= amount
+        realized = self._mark_deltas(deltas, now)
         self.trades += 1
         status = "filled" if self.real_orders else "test"
         if not self.real_orders:
@@ -346,29 +397,54 @@ class BinanceLiveExecutor:
         return TradeRecord(opp, fills, status, "" if self.real_orders else "order/test: validated, not filled", realized, now,
                            promised_pnl_usd=opp.expected_profit_usd)
 
-    def _abort(self, opp: Opportunity, fills: list[Fill], now: float, reason: str) -> TradeRecord:
+    def _mark_deltas(self, deltas: dict[str, float], now: float) -> float:
+        realized = 0.0
+        for asset, d in deltas.items():
+            mark = self.book.usd_rate(asset, now) if asset in USD_FAMILY else self.book.usd_price(asset, now)
+            realized += d * (mark or 0.0)
+        return realized
+
+    def _abort(self, opp: Opportunity, fills: list[Fill], deltas: dict[str, float], now: float, reason: str) -> TradeRecord:
         self.rejected += 1
         status = "partial" if fills and self.real_orders else "rejected"
+        realized = 0.0
         if status == "partial":
+            realized = self._mark_deltas(deltas, now)  # the loss of a half-done cycle is real
+            self.realized_pnl_usd += realized
             log.error("LIVE: cycle aborted after %d filled leg(s): %s — inventory is now unbalanced", len(fills), reason)
             if self.risk is not None:
                 self.risk.halt(f"cycle aborted mid-way ({reason}); inventory unbalanced, reconcile manually", sticky=True)
-        return TradeRecord(opp, fills, status, reason, 0.0, now)
+        return TradeRecord(opp, fills, status, reason, realized, now, promised_pnl_usd=opp.expected_profit_usd if fills else 0.0)
 
-    def _fill_from(self, payload: dict[str, Any], leg: Leg, qty: float, now: float, client_id: str) -> Fill:
-        if not payload or "fills" not in payload:
-            # order/test returns {} : synthesize the expected fill for the record, with the
-            # commission in the received asset as Binance charges it (base for buys)
-            rate = self.fees.taker(BINANCE)
+    def _fill_from(self, payload: dict[str, Any], leg: Leg, qty: float, price: float, now: float, client_id: str) -> Fill | None:
+        """Turn the venue's answer into a Fill. In test mode the answer is `{}` and the
+        planned fill is synthesized (commission in the received asset, as Binance charges
+        it). In real mode only what the venue reports counts: a recovered order without
+        `fills` still carries executedQty/cummulativeQuoteQty, and zero executed is no fill."""
+        rate = self.fees.taker(BINANCE)
+        if not self.real_orders:
             if leg.side == "buy":
-                return Fill(BINANCE, leg.symbol, "buy", leg.price, qty, qty * rate, leg.base, now, f"test:{client_id}")
-            return Fill(BINANCE, leg.symbol, "sell", leg.price, qty, qty * leg.price * rate, leg.quote, now, f"test:{client_id}")
+                return Fill(BINANCE, leg.symbol, "buy", price, qty, qty * rate, leg.base, now, f"test:{client_id}",
+                            fees_by_asset={leg.base: qty * rate})
+            return Fill(BINANCE, leg.symbol, "sell", price, qty, qty * price * rate, leg.quote, now, f"test:{client_id}",
+                        fees_by_asset={leg.quote: qty * price * rate})
+        if not payload or "executedQty" not in payload:
+            return None
         executed = float(payload.get("executedQty", 0) or 0)
+        if executed <= 0:
+            return None
         quote_qty = float(payload.get("cummulativeQuoteQty", 0) or 0)
-        price = quote_qty / executed if executed else leg.price
-        fee = 0.0
-        fee_asset = leg.quote
-        for f in payload.get("fills", []):
-            fee += float(f.get("commission", 0) or 0)
-            fee_asset = f.get("commissionAsset", fee_asset)
-        return Fill(BINANCE, leg.symbol, leg.side, price, executed, fee, fee_asset, now, str(payload.get("orderId", client_id)))
+        avg_price = quote_qty / executed if quote_qty > 0 else price
+        fees: dict[str, float] = defaultdict(float)
+        if payload.get("fills"):
+            for f in payload["fills"]:
+                fees[str(f.get("commissionAsset", leg.quote))] += float(f.get("commission", 0) or 0)
+        else:
+            # query-order shape has no fills: assume the schedule rate in the received asset
+            if leg.side == "buy":
+                fees[leg.base] += executed * rate
+            else:
+                fees[leg.quote] += executed * avg_price * rate
+        main_asset = max(fees, key=fees.get) if fees else leg.quote
+        return Fill(BINANCE, leg.symbol, leg.side, avg_price, executed, fees.get(main_asset, 0.0), main_asset, now,
+                    str(payload.get("orderId", client_id)), fees_by_asset=dict(fees))

@@ -123,6 +123,26 @@ def test_cli_replay_writes_jsonl(tmp_path, capsys):
     assert trades.exists()  # min edge -1000 bps: everything gross-positive gets paper traded
 
 
+def test_replay_uses_the_tape_header_universe(tmp_path, capsys):
+    from arbbot.feeds.replay import read_tape_header, tape_header
+    from arbbot.models import Market
+
+    universe = [Market("binance", "BTCUSDT", "BTC", "USDT"), Market("kraken", "BTC/USD", "BTC", "USD")]
+    rows = FIXTURE.read_text().splitlines()
+    tape = tmp_path / "with_header.jsonl"
+    tape.write_text(tape_header(universe) + "\n" + "\n".join(rows) + "\n")
+    assert [m.key for m in read_tape_header(tape)] == [("binance", "BTCUSDT"), ("kraken", "BTC/USD")]
+    assert read_tape_header(FIXTURE) is None
+    args = build_parser().parse_args(["replay", str(tape), "--no-jsonl"])
+    rc = run(cmd_replay(args))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["malformed_rows"] == 0
+    assert out["unknown_symbol_rows"] > 100  # every other market on the tape is not in this universe
+    assert 0 < out["quotes"] < 100
+    args = build_parser().parse_args(["replay", str(tmp_path / "nope.jsonl"), "--no-jsonl"])
+    assert run(cmd_replay(args)) == 2
+
+
 def test_replay_skips_malformed_rows_and_reports_them(tmp_path, capsys):
     rows = FIXTURE.read_text().splitlines()
     bad = tmp_path / "bad.jsonl"
@@ -131,6 +151,7 @@ def test_replay_skips_malformed_rows_and_reports_them(tmp_path, capsys):
     rc = run(cmd_replay(args))
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["malformed_rows"] == 2 and out["quotes"] > 0 and out["feed_errors"] == {}
+    assert out["unknown_symbol_rows"] == 0
 
 
 def test_sweep_script_runs_a_small_grid(capsys):

@@ -219,6 +219,8 @@ class Engine:
         if change == CHANGE_NONE:
             self.stats.unchanged += 1
             return
+        if self._stop.is_set() and getattr(self.executor, "remote", False):
+            return  # shutting down: keep the book current, start nothing that reaches a venue
         t0 = time.perf_counter()
         for det in self.detectors:
             try:
@@ -250,9 +252,16 @@ class Engine:
         self.reporter.on_opportunity(opp, actionable)
         if not actionable:
             return
+        can = getattr(self.executor, "can_execute", None)
+        if can is not None and not can(opp):
+            self.reporter.on_rejected(opp, "not executable by this executor")
+            return
         ok, reason = self.risk.check(opp, now)
         if not ok:
             self.reporter.on_rejected(opp, reason)
+            return
+        if self._stop.is_set():
+            self.reporter.on_rejected(opp, "shutting down")
             return
         if getattr(self.executor, "remote", False):
             # Live orders take hundreds of ms of network time: never block the quote
@@ -278,7 +287,7 @@ class Engine:
 
     async def _run_remote(self, opp: Opportunity, now: float) -> None:
         try:
-            record = await self.executor.execute(opp, now)
+            record = await self.executor.execute(opp, now, min_edge_bps=self.cfg.detection.min_net_edge_bps)
         except asyncio.CancelledError:
             # Cancelled mid-order (interpreter teardown): we no longer know what the
             # venue holds. Halt sticky so nobody trades on top of an unknown position.

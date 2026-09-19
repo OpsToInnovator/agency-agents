@@ -55,7 +55,10 @@ class KrakenFeed(Feed):
         out: list[Quote] = []
         for d in msg.get("data", []):
             market = self.markets.get(d.get("symbol", ""))
-            if market is None or "bid" not in d or "ask" not in d:
+            if market is None:
+                self.unknown_symbols += 1
+                continue
+            if "bid" not in d or "ask" not in d:
                 continue
             out.append(
                 Quote(
