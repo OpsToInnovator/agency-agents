@@ -290,6 +290,96 @@ executor as a reference for signing, filters and idempotency, not as a productio
 trading system. None of it could be exercised from the machine this was written on:
 Binance's order endpoints and even its testnet answer HTTP 451 there.
 
+## Go-live protocol: measure first, then decide
+
+"Making it live" is three config switches (see the next section). "Making it profitable"
+is not something the code can do: on this repository's own evidence the strategy has no
+positive expectancy at any fee tier a retail account can reach, so the only honest
+path is a measurement run whose result decides. The tooling for that run ships here.
+
+Where the money would have to come from, and why it is not there today (all figures
+checked against the venues' published pages and this bot's own logs on 2026-09-19):
+
+| Item | Value |
+| --- | --- |
+| Cheapest Binance triangle fee floor, retail, paying fees in BNB | 22.5 bps (3 × 7.5) |
+| Cheapest cross-venue floor on venues licensed for Australians | 20 bps (Binance + OKX AU, USDT books; 17.5 with BNB) |
+| Gross triangle edge observed, 3,270 cycle observations | median −0.65 bps, max +2.04 bps |
+| Expected net per attempted cycle at the best legal floor | about −15.7 bps, before slippage and latency |
+| 10-minute live scan: gross-positive / net-positive / sent | 355,689 / 12 / 0 |
+
+Levers that look cheaper are not available to this strategy: 0 % maker fees exist only
+on Binance's FDUSD promo pairs (resting orders, i.e. market making with inventory and
+depeg risk), Kraken+ zero fees exclude Kraken Pro and API trades, OKX "global" tiers are
+not what an Australian account gets, and VIP tiers need US$4B of monthly volume.
+
+**Step 0, read your real fees (2 h).** Create read-only API keys with no withdrawal
+permission and run `scripts/read_fees.py` with the symbols you intend to trade. It
+prints a `[venues] taker_fee_bps` block from the account endpoints (Binance fees are
+per symbol). Paste it into `measure7d.toml`; configuring anything lower than what the
+APIs return reproduces the viral-post fee model.
+
+**Step 0b, measure your latency (24 h).** Run `scripts/rtt_probe.sh >> rtt.log &` on
+the machine that will trade. It logs the warm-connection round trip to each venue once a
+minute. Put the p90 of the slowest venue you trade into `paper.assumed_rtt_ms`, or the
+arrival model flatters you. Check `api.binance.com` answers HTTP 200 from that machine's
+IP before renting a VPS for it; do not use a VPN (it breaches the Binance terms).
+
+**Step 1, the 7-day paper run.** On an always-on machine:
+
+```bash
+while true; do python3 -m arbbot scan --config measure7d.toml --log-dir logs/measure7d 2>>measure7d.log; sleep 5; done
+```
+
+`measure7d.toml` differs from the defaults on purpose: arrival fill model, half the
+displayed size assumed fillable, 2 bps slippage, `min_profit_usd` lowered to 0.01 so
+small candidates are sent and their fill quality measured. Cover at least one weekend
+and one scheduled-news window; a calm week returns NO-GO for the wrong reason.
+
+**Step 2, roll up and score.** Once a day, and at the end:
+
+```bash
+python3 scripts/rollup.py logs/measure7d --scan-log measure7d.log --rtt-log rtt.log
+```
+
+It prints per UTC day and per kind what was observed, what the cooldown would let
+through, settled trades by status, realized and promised PnL, latency tax, fill and
+one-legged rates, dollar-weighted edge and PnL by asset, then scores the GO criteria on
+**triangular only**, because that is the only strategy the live path can send. All must
+pass over 7 complete UTC days: (G1) ≥ 140 settled paper trades; (G2) realized ≥ +US$2/day
+mean and ≥ 0 on at least 5 days; (G3) dollar-weighted realized edge ≥ +1 bps; (G4) fill
+rate ≥ 60 % and one-legged rate ≤ 10 %; (G5) realized ≥ half of promised; (G6) t-stat of
+daily PnL ≥ 2; (G7) no asset over 40 % of PnL, ≤ 20 % from assets flagged by the anomaly
+detector in the same hour, none from quarantined tickers; (G8) drawdown ≤ 2 % of paper
+capital and no daily-loss halts; (G9) fewer than 5 disconnects per venue per day, no
+handler errors, stale share under 30 %; (G10, manual) replaying recorded tapes with
+`scripts/sweep.py --fee-scale 1.25 --slippage 5` still shows positive realized PnL. Any
+single failure is NO-GO. The bar (US$2/day on about US$1,000 in play) is roughly 50 %
+annualised, the least that justifies exchange, key and operational risk over a savings
+account.
+
+**Step 3, only on GO: staged live on Binance triangles.** Stage A: KYC'd account, API key
+restricted to spot trading, IP-whitelisted, withdrawals off, `preflight` prints OK.
+Stage B, 3 days: `[live] enabled = true` with `--live`, every order hits the
+validation-only endpoint; pass on zero filter or timestamp rejections. Stage C: real
+orders at A$20 notional (`max_notional_per_trade_usd = 14`, `max_daily_loss_usd = 3`,
+`min_profit_usd = 0.005`, `cooldown_s = 5`) for 7 days or 100 settled trades, whichever
+is later; live realized per trade must be at least half the parallel paper run's, and
+every sticky halt reconciled by hand within the hour. Stage D: double the cap weekly
+while stage C holds, hard cap A$500 or 10 % of capital. Kill on any of: cumulative loss
+of one notional, a daily-loss halt twice in a week, any unreconciled halt, fill rate
+below 30 % over 50 sends, realized under a quarter of promised, HTTP 418/429, a fee-tier
+change, a venue-disagreement anomaly on an asset traded that day, clock drift over 1 s.
+Even a passing stage C is a fill-quality test, not income: the GO bar scales to about
+US$0.28/day at A$20, below the cost of the VPS.
+
+**What the measurement will not change.** Australian bank rails cap exchange payments
+(CommBank: A$10,000 per calendar month, no exemptions); moving AUD to USDT and back
+costs 0.8–1.8 % of the bankroll before the first trade; a USDT float carries unhedged
+AUD/USD exposure of about 1 % of capital per 1 % move; every triangle is three CGT events
+and a bot trading daily is likely a business for tax purposes. None of these is a
+blocker. Each is larger than any edge this strategy has shown.
+
 ## Limitations you should know about
 
 - **Top-of-book only.** Sizes are the displayed best bid/ask quantity. Real fills larger
@@ -353,6 +443,10 @@ arbbot/
   detectors/        cross_exchange.py, triangular.py, anomaly.py
   execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated)
 scripts/sweep.py    fee / haircut / slippage sensitivity sweep over a recorded tape
+scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block (read-only keys, env only)
+scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
+scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
+measure7d.toml      the 7-day measurement config (paper only)
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 
