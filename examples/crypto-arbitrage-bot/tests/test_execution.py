@@ -453,6 +453,7 @@ class FakeSession:
 
 
 TIME = ("/api/v3/time", 200, {"serverTime": 1789795661273})
+PING = ("/api/v3/ping", 200, {})
 
 
 def _live(book, session, real=False, cfg_real=False, risk=None, tmp_path=None):
@@ -779,6 +780,7 @@ def test_live_refuses_markets_without_filters(monkeypatch):
     assert rec.status == "rejected" and "no exchange filters" in rec.reason
     assert not [c for c in session.calls if c[0] == "POST"]
     problems = run(_live(book, FakeSession([
+        PING,
         ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
         ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
         ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
@@ -798,6 +800,7 @@ def test_live_preflight_reports_a_sticky_halt(monkeypatch, tmp_path):
     book.register(BTC_BINANCE)
     risk = RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0)
     session = FakeSession([
+        PING,
         ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
         ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
         ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
@@ -813,6 +816,7 @@ def test_live_preflight_reports_problems(monkeypatch):
     monkeypatch.setenv("BINANCE_API_SECRET", "s")
     book = QuoteBook()
     session = FakeSession([
+        PING,
         ("/api/v3/time", 200, {"serverTime": int(1e15)}),  # absurd skew
         ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "BREAK"}]}),
         ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": True, "enableSpotAndMarginTrading": True}),
@@ -824,6 +828,7 @@ def test_live_preflight_reports_problems(monkeypatch):
     joined = " | ".join(problems)
     assert "clock skew" in joined and "BTCUSDT: status BREAK" in joined and "WITHDRAW" in joined and "free USDT 12.50" in joined
     ok_session = FakeSession([
+        PING,
         ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
         ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
         ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
@@ -832,6 +837,65 @@ def test_live_preflight_reports_problems(monkeypatch):
     ])
     book.register(BTC_BINANCE)
     assert run(_live(book, ok_session).preflight(["BTCUSDT"])) == []
+
+
+def test_live_preflight_refuses_a_geo_blocked_machine_before_any_signed_call(monkeypatch, tmp_path):
+    """HTTP 451 from the TRADING host (the public mirror answers everywhere) is reported in
+    plain words, nothing signed leaves the machine, and the local checks still run."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook()
+    book.register(BTC_BINANCE)
+    session = FakeSession([("/api/v3/ping", 451, {"raw": "<html>Unavailable For Legal Reasons</html>"})])
+    (tmp_path / "STOP").write_text("")
+    risk = RiskManager(RiskConfig(kill_switch_file=str(tmp_path / "STOP")), DetectionConfig(), now=1000.0)
+    problems = run(_live(book, session, risk=risk).preflight(["BTCUSDT"]))
+    assert len(problems) == 2
+    assert "HTTP 451" in problems[0] and "VPN" in problems[0] and "api.example" in problems[0]
+    assert "kill switch" in problems[1]
+    assert [c[0] for c in session.calls] == ["GET"] and "/api/v3/ping" in session.calls[0][1]
+    assert "signature=" not in session.calls[0][1]
+
+
+def test_live_preflight_names_other_reachability_failures(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook()
+    book.register(BTC_BINANCE)
+    forbidden = run(_live(book, FakeSession([("/api/v3/ping", 403, {"raw": "blocked"})])).preflight(["BTCUSDT"]))
+    assert forbidden == [p for p in forbidden if "HTTP 403" in p] and len(forbidden) == 1
+    down = run(_live(book, FakeSession([("/api/v3/ping", 0, ConnectionError("no route to host"))])).preflight(["BTCUSDT"]))
+    assert len(down) == 1 and down[0].startswith("cannot reach https://api.example") and "no route to host" in down[0]
+    teapot = run(_live(book, FakeSession([("/api/v3/ping", 418, {"code": -1003, "msg": "banned"})])).preflight(["BTCUSDT"]))
+    assert len(teapot) == 1 and "HTTP 418" in teapot[0] and "banned" in teapot[0]
+
+
+def test_connectivity_check_needs_no_keys_and_no_live_section(monkeypatch, capsys):
+    """`arbbot preflight --connectivity` is the step-0b check: keyless, and honest about a 451."""
+    from arbbot.cli import build_parser, cmd_preflight, connectivity_check
+    from arbbot.config import load_config
+
+    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+    cfg = load_config(None, {"venues": {"binance_trade_rest": "https://trade.example", "binance_rest": "https://mirror.example"}})
+    ok = FakeSession([("/api/v3/ping", 200, {})])
+    rc, msg = run(connectivity_check(cfg, ok))
+    assert rc == 0 and msg.startswith("OK") and "trade.example" in msg
+    assert ok.calls[0][1].startswith("https://trade.example/api/v3/ping")  # the trading host, not the mirror
+    blocked = FakeSession([("/api/v3/ping", 451, {"raw": "<html>"})])
+    rc, msg = run(connectivity_check(cfg, blocked))
+    assert rc == 1 and msg.startswith("FAIL") and "HTTP 451" in msg and "VPN" in msg
+    # the CLI flag parses and does not demand [live] enabled or keys; a scripted session is injected
+    # by patching the check the command calls, so no real socket is opened
+    args = build_parser().parse_args(["preflight", "--connectivity"])
+    assert args.connectivity is True
+
+    async def fake_check(cfg, session=None):
+        return 1, "FAIL https://api.binance.com answered HTTP 451 (test)"
+
+    monkeypatch.setattr("arbbot.cli.connectivity_check", fake_check)
+    assert run(cmd_preflight(args)) == 1
+    assert "HTTP 451" in capsys.readouterr().err
 
 
 def test_live_executor_html_error_body_is_a_rejection_not_a_crash(monkeypatch):

@@ -71,6 +71,34 @@ UNKNOWN_STATUS_CODES = (-1006, -1007)  # UNEXPECTED_RESP / TIMEOUT: "execution s
 LOOKUP_ATTEMPTS = 3
 
 
+REACHABILITY_PATH = "/api/v3/ping"
+
+
+async def check_reachability(rest: "BinanceRest") -> str | None:
+    """Ask the TRADING host (not the public market-data mirror) whether it serves this
+    machine's own IP. Returns None when it answers 200, otherwise one reason not to arm.
+
+    The public mirror answers everywhere, so without this check a geo-blocked machine
+    passed the clock sync and only failed at the first signed call, with an error that
+    did not say why. HTTP 451 is "unavailable for legal reasons": the answer is to run
+    from a permitted region, never to tunnel around it.
+    """
+    host = rest.base_url
+    try:
+        await rest.request("GET", REACHABILITY_PATH, signed=False)
+    except BinanceHTTPError as exc:
+        if exc.status == 451:
+            return (f"{host} answered HTTP 451 (unavailable for legal reasons): Binance does not serve this "
+                    f"machine's IP region. Run the bot from a permitted region on its own IP; do not tunnel through "
+                    f"a VPN or proxy, which breaches the Binance terms and risks a frozen account")
+        if exc.status == 403:
+            return f"{host} answered HTTP 403: the request was refused (blocked IP or firewall); check the machine's IP before arming"
+        return f"{host} answered HTTP {exc.status} to {REACHABILITY_PATH}: {exc}"
+    except Exception as exc:
+        return f"cannot reach {host}: {type(exc).__name__}: {exc}"
+    return None
+
+
 def sign_query(params: dict[str, Any], secret: str) -> str:
     """Return the urlencoded query with Binance's HMAC-SHA256 signature appended."""
     query = urlencode(params, doseq=True)
@@ -195,6 +223,12 @@ class BinanceLiveExecutor:
     async def preflight(self, symbols: list[str]) -> list[str]:
         """Return a list of reasons NOT to arm live trading (empty = go)."""
         problems: list[str] = []
+        unreachable = await check_reachability(self.rest)
+        if unreachable:
+            # no signed call leaves the machine when the trading host will not serve it;
+            # the local checks at the bottom still run so the report is complete
+            problems.append(unreachable)
+            return self._local_preflight(symbols, problems)
         try:
             offset = await self.rest.sync_time()
             if abs(offset) > self.cfg.recv_window_ms / 2:
@@ -231,6 +265,10 @@ class BinanceLiveExecutor:
                 "symbol": symbols[0] if symbols else "BTCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": "10"})
         except Exception as exc:
             problems.append(f"order/test smoke call failed: {exc}")
+        return self._local_preflight(symbols, problems)
+
+    def _local_preflight(self, symbols: list[str], problems: list[str]) -> list[str]:
+        """The checks that need no network: exchange filters, kill switch, halt state."""
         missing = [s for s in symbols if (m := self.book.market(BINANCE, s)) is None or not m.step_size or not m.tick_size]
         if missing:
             problems.append(f"no exchange filters for {', '.join(missing[:6])}{'...' if len(missing) > 6 else ''} "

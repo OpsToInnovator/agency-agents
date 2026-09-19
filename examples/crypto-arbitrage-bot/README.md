@@ -270,7 +270,9 @@ machine, and even then it goes to Binance's **validation-only** endpoint:
 What the live path does to protect you:
 
 - `python3 -m arbbot preflight` (also run automatically by `scan --live`) refuses to arm
-  unless the clock offset to the exchange is small, the symbols are `TRADING`, the API
+  unless the trading host serves this machine's own IP (an HTTP 451 geo-block is reported
+  as such and no signed request is sent; `preflight --connectivity` runs just that check
+  without keys), the clock offset to the exchange is small, the symbols are `TRADING`, the API
   key **cannot withdraw**, free USDT covers two trades, and an `order/test` call succeeds.
 - Every order gets a `newClientOrderId`; its intent is appended to
   `logs/live_intents.jsonl` and flushed to disk **before** the request is sent.
@@ -322,8 +324,12 @@ APIs return reproduces the viral-post fee model.
 **Step 0b, measure your latency (24 h).** Run `bash scripts/rtt_probe.sh >> rtt.log &` on
 the machine that will trade. It logs the warm-connection round trip to each venue once a
 minute. Put the p90 of the slowest venue you trade into `paper.assumed_rtt_ms`, or the
-arrival model flatters you. Check `api.binance.com` answers HTTP 200 from that machine's
-IP before renting a VPS for it; do not use a VPN (it breaches the Binance terms).
+arrival model flatters you. On the same machine run `python3 -m arbbot preflight
+--connectivity`: it asks the Binance trading host, not the public market-data mirror,
+whether it serves the machine's own IP, and reports a geo-block (HTTP 451, "unavailable
+for legal reasons") in plain words. `scan --live` runs the same check first and refuses
+to arm on it. Do it before renting a VPS. Do not tunnel around a 451 with a VPN or proxy:
+it breaches the Binance terms and the usual outcome is a frozen account.
 
 **Step 1, the 7-day paper run.** On an always-on machine:
 
