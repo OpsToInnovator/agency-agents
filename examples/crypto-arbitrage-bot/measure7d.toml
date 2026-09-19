@@ -1,0 +1,61 @@
+# 7-day MEASUREMENT config for arbbot (paper only, no API keys needed). See README "Go-live protocol".
+# Run, on an always-on machine:
+#   while true; do python3 -m arbbot scan --config measure7d.toml --log-dir logs/measure7d 2>>measure7d.log; sleep 5; done
+# (the loop restarts after a crash or the planned 23 h Binance reconnect; risk state persists in state_file)
+# Roll up daily and score the GO criteria with:
+#   python3 scripts/rollup.py logs/measure7d --scan-log measure7d.log --rtt-log rtt.log
+
+[universe]
+top_n = 60
+auto_discover = true
+venues = ["binance", "coinbase", "kraken"]
+triangle_quotes = ["BTC", "ETH", "BNB"]
+track_stable_rates = true
+
+[venues]
+# REPLACE with the numbers printed by scripts/read_fees.py (your account's real taker fees, in bps).
+# Entry-tier published figures verified 2026-09-19: binance 10 (7.5 with BNB discount), coinbase 60 (AU Advanced entry, unverified
+# post-2026-09-16), kraken 80 (Tier 1, <$2.5K 30-day volume). Using anything lower than what read_fees.py returns is cheating.
+taker_fee_bps = { binance = 10.0, coinbase = 60.0, kraken = 80.0 }
+
+[detection]
+cross_exchange = true
+triangular = true
+anomaly = true
+min_net_edge_bps = 1.0
+max_quote_age_ms = 2000.0
+max_quote_age_ms_by_venue = { binance = 5000.0, kraken = 5000.0 }
+identity_mismatch_bps = 2000.0
+max_plausible_net_edge_bps = 200.0
+stable_haircut_bps = 5.0
+anomaly_threshold_bps = 50.0
+
+[risk]
+max_notional_per_trade_usd = 100.0
+max_daily_loss_usd = 25.0
+max_trades_per_minute = 30
+cooldown_s = 2.0
+max_detect_latency_ms = 250.0
+kill_switch_file = "STOP"
+min_profit_usd = 0.01          # lowered from 0.05 so small candidates are SENT and their fill quality measured;
+                               # the GO metric is dollar-weighted realized PnL, so dust cannot inflate it
+max_drawdown_pct = 5.0
+state_file = "logs/measure7d/risk_state.json"
+
+[paper]
+starting_quote_per_venue_usd = 1000.0
+starting_base_inventory_usd = 200.0
+slippage_bps = 2.0
+fill_fraction = 0.5            # assume only half the displayed top-of-book size is really there for you
+fill_model = "arrival"
+assumed_rtt_ms = 150.0         # REPLACE with the p90 warm_ms of the SLOWEST venue you trade (see scripts/rtt_probe.sh)
+
+[live]
+enabled = false
+real_orders = false
+
+[report]
+interval_s = 10.0
+log_dir = "logs/measure7d"     # --log-dir on the command line overrides this
+write_jsonl = true
+log_every_opportunity = false  # true would write ~30M rows/day; use --record for 1 h raw tapes instead
