@@ -40,7 +40,8 @@ class KrakenFeed(Feed):
         if not isinstance(msg, dict):
             return []
         if msg.get("method") == "subscribe" and msg.get("success") is False:
-            raise ValueError(f"kraken subscribe failed: {msg.get('error')}")
+            self.venue_error(f"subscribe failed: {msg.get('error')}", msg.get("symbol"))
+            return []
         channel = msg.get("channel")
         if channel == "status":
             for d in msg.get("data", []):

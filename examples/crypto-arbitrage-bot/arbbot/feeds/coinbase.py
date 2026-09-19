@@ -50,7 +50,13 @@ class CoinbaseFeed(Feed):
             return []
         mtype = msg.get("type")
         if mtype == "error":
-            raise ValueError(f"coinbase error: {msg.get('message')} {msg.get('reason', '')}")
+            reason = f"{msg.get('message')}: {msg.get('reason', '')}"
+            symbol = next((s for s in list(self.markets) if s in reason), None)
+            self.venue_error(reason, symbol)
+            return []
+        if mtype == "subscriptions" and not any(c.get("product_ids") for c in msg.get("channels", [])):
+            self.venue_error("subscribed to nothing: every product was rejected")
+            return []
         if mtype != "ticker":
             return []
         market = self.markets.get(msg.get("product_id", ""))

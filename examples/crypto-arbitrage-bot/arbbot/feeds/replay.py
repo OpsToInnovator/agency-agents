@@ -40,6 +40,7 @@ class ReplayFeed:
         self.clock_setter = clock_setter
         self.messages = 0
         self.quotes = 0
+        self.bad_rows = 0  # truncated/malformed lines (a recording cut mid-write)
         self.first_ts: float | None = None
         self.last_ts: float | None = None
         self._stop = asyncio.Event()
@@ -49,11 +50,20 @@ class ReplayFeed:
 
     def rows(self):
         with self.path.open(encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, 1):
                 line = line.strip()
                 if not line:
                     continue
-                yield json.loads(line)
+                try:
+                    row = json.loads(line)
+                    float(row["t"])
+                    row["venue"], row["raw"]
+                except (ValueError, KeyError, TypeError) as exc:
+                    self.bad_rows += 1
+                    if self.bad_rows <= 3:
+                        log.warning("replay: skipping malformed row %d of %s (%s)", lineno, self.path.name, type(exc).__name__)
+                    continue
+                yield row
 
     async def run(self, sink: Callable[[Quote], None]) -> None:
         prev_t: float | None = None
@@ -85,4 +95,4 @@ class ReplayFeed:
                 # order: replays must be deterministic, never coalesced.
                 await asyncio.sleep(0)
         await asyncio.sleep(0)
-        log.info("replay finished: %d messages, %d quotes", self.messages, self.quotes)
+        log.info("replay finished: %d messages, %d quotes, %d malformed rows skipped", self.messages, self.quotes, self.bad_rows)

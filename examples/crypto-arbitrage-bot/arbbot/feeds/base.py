@@ -30,6 +30,11 @@ class Feed:
     venue: str = ""
     # Reconnect proactively before the venue's own connection limit hits.
     max_connection_s: float | None = None
+    # Gap between subscribe frames (Binance allows 5 client messages per second).
+    subscribe_interval_s: float = 0.0
+    # A planned exit must not sit in the close handshake while the peer keeps
+    # streaming (the paused reader never sees the close frame): 10 s by default.
+    close_timeout_s: float = 1.0
 
     def __init__(
         self,
@@ -51,6 +56,7 @@ class Feed:
         self.messages = 0
         self.quotes = 0
         self.parse_errors = 0
+        self.venue_errors = 0  # the venue said no (bad symbol, bad subscription): not a parse problem
         self.reconnects = 0
         self.connected = False
         self._stop = asyncio.Event()
@@ -65,9 +71,26 @@ class Feed:
     def parse(self, raw: str, recv_ts: float) -> list[Quote]:
         raise NotImplementedError
 
+    def venue_error(self, message: str, symbol: str | None = None) -> None:
+        """The venue rejected something (unknown product, bad subscription). Logged
+        loudly, counted apart from parse errors, and the market is dropped so it does
+        not sit in the book as a permanently stale entry."""
+        self.venue_errors += 1
+        if symbol and symbol in self.markets:
+            del self.markets[symbol]
+            log.error("%s: venue rejected %s (%s); dropped from this feed", self.venue, symbol, message)
+        else:
+            log.error("%s: venue error: %s", self.venue, message)
+
     # -- lifetime ---------------------------------------------------------
     def stop(self) -> None:
         self._stop.set()
+
+    def _session_ended(self) -> None:
+        """Fire the disconnect hook the moment a session ends, before any backoff."""
+        if self.connected and self.on_disconnect is not None and not self._stop.is_set():
+            self.on_disconnect(self.venue)
+        self.connected = False
 
     async def run(self, sink: QuoteSink) -> None:
         """Keep a connection alive until stop() is called, feeding quotes to `sink`."""
@@ -75,20 +98,24 @@ class Feed:
             log.info("%s: no markets to subscribe, feed idle", self.venue)
             await self._stop.wait()
             return
-        backoff = self.reconnect_min_s
+        floor = max(0.1, self.reconnect_min_s)
+        backoff = floor
         while not self._stop.is_set():
             started = time.monotonic()
             try:
                 await self._session(sink)
-                backoff = self.reconnect_min_s  # clean session: reset backoff
+                self._session_ended()
+                backoff = floor  # clean session: reset backoff
             except asyncio.CancelledError:
+                self._session_ended()
                 raise
             except Exception as exc:  # network errors, protocol errors, parse crashes
+                self._session_ended()
                 if self._stop.is_set():
                     break
                 lived = time.monotonic() - started
                 if lived > 30:
-                    backoff = self.reconnect_min_s
+                    backoff = floor
                 log.warning("%s: connection ended after %.0fs (%s: %s); reconnecting in %.1fs",
                             self.venue, lived, type(exc).__name__, exc, backoff)
                 self.reconnects += 1
@@ -97,18 +124,19 @@ class Feed:
                     break
                 except asyncio.TimeoutError:
                     pass
-                backoff = min(self.reconnect_max_s, backoff * 2)
+                backoff = min(max(self.reconnect_max_s, floor), backoff * 2)
             finally:
-                if self.connected and self.on_disconnect is not None and not self._stop.is_set():
-                    self.on_disconnect(self.venue)
                 self.connected = False
 
     async def _session(self, sink: QuoteSink) -> None:
         url = self.url()
         log.info("%s: connecting to %s (%d markets)", self.venue, url.split("?")[0], len(self.markets))
-        async with websockets.connect(url, open_timeout=20, ping_interval=20, ping_timeout=20, max_size=2**22) as ws:
+        async with websockets.connect(url, open_timeout=20, ping_interval=20, ping_timeout=20, max_size=2**22,
+                                      close_timeout=self.close_timeout_s) as ws:
             self.connected = True
-            for msg in self.subscribe_messages():
+            for i, msg in enumerate(self.subscribe_messages()):
+                if i and self.subscribe_interval_s:
+                    await asyncio.sleep(self.subscribe_interval_s)
                 await ws.send(msg)
             opened = time.monotonic()
             stop_task = asyncio.ensure_future(self._stop.wait())

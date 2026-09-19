@@ -311,6 +311,9 @@ class BinanceLiveExecutor:
                            "client_id": client_id, "params": params, "opportunity": opp.description})
             try:
                 payload = await self._send(params, client_id)
+            except asyncio.CancelledError:
+                self._journal({"ts": time.time(), "kind": "error", "client_id": client_id, "error": "cancelled mid-send: state unknown"})
+                raise
             except Exception as exc:
                 self._journal({"ts": time.time(), "kind": "error", "client_id": client_id, "error": str(exc)})
                 return self._abort(opp, fills, now, f"{leg.symbol}: {exc}")

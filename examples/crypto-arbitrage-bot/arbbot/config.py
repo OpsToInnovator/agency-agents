@@ -176,6 +176,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("paper.fill_fraction must be in (0, 1]")
     if cfg.paper.slippage_bps < 0:
         raise ConfigError("paper.slippage_bps must be >= 0")
+    if not 0 < cfg.venues.reconnect_min_s <= cfg.venues.reconnect_max_s:
+        raise ConfigError("venues.reconnect_min_s must be > 0 and <= reconnect_max_s")
     if cfg.paper.fill_model not in ("arrival", "instant"):
         raise ConfigError("paper.fill_model must be 'arrival' or 'instant'")
     if cfg.paper.assumed_rtt_ms < 0:

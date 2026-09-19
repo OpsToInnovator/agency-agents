@@ -49,6 +49,7 @@ class Stats:
     pending: int = 0
     handler_errors: int = 0
     inflight_skipped: int = 0
+    feed_errors: dict = field(default_factory=dict)  # feed name -> exception text when a feed task died
     quotes_by_venue: Counter = field(default_factory=Counter)
     gross_by_kind: Counter = field(default_factory=Counter)
     actionable_by_kind: Counter = field(default_factory=Counter)
@@ -60,7 +61,7 @@ class Stats:
     detector_errors: Counter = field(default_factory=Counter)
     disconnects: Counter = field(default_factory=Counter)
 
-    def note(self, opp: Opportunity) -> None:
+    def note(self, opp: Opportunity, record_latency: bool = True) -> None:
         self.gross_by_kind[opp.kind] += 1
         g = self.best_gross.get(opp.kind)
         if g is None or opp.gross_edge_bps > g[0]:
@@ -68,7 +69,8 @@ class Stats:
         n = self.best_net.get(opp.kind)
         if n is None or opp.net_edge_bps > n[0]:
             self.best_net[opp.kind] = (opp.net_edge_bps, opp.description)
-        self.latencies_ms.append(opp.detect_latency_ms)
+        if record_latency:
+            self.latencies_ms.append(opp.detect_latency_ms)
 
     def latency_percentile(self, p: float) -> float | None:
         if not self.latencies_ms:
@@ -117,7 +119,7 @@ class Engine:
         consumer = asyncio.create_task(self._consume(pending, event), name="consumer")
         reporter_task = asyncio.create_task(self._report_loop(), name="reporter")
         stop_task = asyncio.create_task(self._stop.wait(), name="stop")
-        deadline = time.monotonic() + duration if duration else None
+        deadline = time.monotonic() + max(0.0, duration) if duration is not None else None
         waiting = set(feed_tasks)
         try:
             while waiting and not self._stop.is_set():
@@ -131,6 +133,7 @@ class Engine:
                     waiting.discard(t)
                     exc = t.exception() if not t.cancelled() else None
                     if exc:
+                        self.stats.feed_errors[t.get_name()] = f"{type(exc).__name__}: {exc}"
                         log.error("feed %s died: %s: %s", t.get_name(), type(exc).__name__, exc)
                     else:
                         log.info("feed %s finished", t.get_name())
@@ -147,17 +150,29 @@ class Engine:
             await asyncio.gather(consumer, reporter_task, return_exceptions=True)
             # anything the consumer had not reached yet
             for q in list(pending.values()):
-                await self.handle(q)
+                try:
+                    await self.handle(q)
+                except Exception:
+                    self.stats.handler_errors += 1
+                    log.exception("quote handler failed on %s during drain", q.key)
             pending.clear()
             if self._inflight is not None and not self._inflight.done():
-                await asyncio.wait({self._inflight}, timeout=15)
-            # Summarise as of the last quote we saw: after the feeds stop every quote
-            # ages past its venue's limit, which would read as "all stale, no marks".
-            end = self.stats.last_quote_ts or self.clock.now()
-            # orders still "in the air" in the paper arrival model settle against the last book
-            for rec in self._settle(end, final=True):
-                self._finish_trade(rec, end)
-            self.reporter.final(end)
+                # A live order may be mid-reconciliation: give it the executor's worst case,
+                # and never cancel it (a cancelled reconciliation is an unknown position).
+                log.warning("waiting for the in-flight live execution to finish")
+                await asyncio.wait({self._inflight}, timeout=90)
+            try:
+                # Summarise as of the last quote we saw: after the feeds stop every quote
+                # ages past its venue's limit, which would read as "all stale, no marks".
+                end = self.stats.last_quote_ts or self.clock.now()
+                # orders still "in the air" in the paper arrival model settle against the last book
+                for rec in self._settle(end, final=True):
+                    self._finish_trade(rec, end)
+                self.reporter.final(end)
+            finally:
+                close = getattr(self.reporter, "close", None)
+                if close:
+                    close()
         return self.stats
 
     async def _consume(self, pending: dict, event: asyncio.Event) -> None:
@@ -214,12 +229,17 @@ class Engine:
                     log.exception("detector %s failed on %s", det.name, q.key)
                 continue
             for opp in opps:
-                queue_ms = 0.0 if self.clock.override is not None else max(0.0, (wall - q.recv_ts) * 1e3)
-                opp.detect_latency_ms = (time.perf_counter() - t0) * 1e3 + queue_ms
+                compute_ms = (time.perf_counter() - t0) * 1e3
+                if self.clock.override is not None:
+                    # Replay must be deterministic: host speed cannot decide a trade.
+                    self.stats.latencies_ms.append(compute_ms)
+                    opp.detect_latency_ms = 0.0
+                else:
+                    opp.detect_latency_ms = compute_ms + max(0.0, (wall - q.recv_ts) * 1e3)
                 await self._process(opp, now)
 
     async def _process(self, opp: Opportunity, now: float) -> None:
-        self.stats.note(opp)
+        self.stats.note(opp, record_latency=self.clock.override is None)
         if opp.kind == "anomaly":
             self.stats.anomalies[opp.extra.get("subtype", "?")] += 1
             self.reporter.on_anomaly(opp)
@@ -259,6 +279,11 @@ class Engine:
     async def _run_remote(self, opp: Opportunity, now: float) -> None:
         try:
             record = await self.executor.execute(opp, now)
+        except asyncio.CancelledError:
+            # Cancelled mid-order (interpreter teardown): we no longer know what the
+            # venue holds. Halt sticky so nobody trades on top of an unknown position.
+            self.risk.halt("shutdown while an order was in flight; reconcile manually", sticky=True)
+            raise
         except Exception as exc:  # the executor halts itself on ambiguity; this is the last net
             log.exception("live execution crashed")
             record = TradeRecord(opp, [], "rejected", f"executor crashed: {exc}", 0.0, now)

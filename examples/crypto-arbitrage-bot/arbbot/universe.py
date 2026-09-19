@@ -79,7 +79,11 @@ def static_universe(cfg: Config) -> list[Market]:
     markets: list[Market] = []
     if BINANCE in venues:
         markets += _binance_markets(symbols)
-    bases = sorted({m.base for m in markets if m.quote in USD_FAMILY and m.base not in USD_FAMILY}) or STATIC_BASES
+    if cfg.universe.binance_symbols or BINANCE in venues:
+        # follow the Binance list (possibly empty when it holds only crosses)
+        bases = sorted({m.base for m in _binance_markets(symbols) if m.quote in USD_FAMILY and m.base not in USD_FAMILY})
+    else:
+        bases = STATIC_BASES[: cfg.universe.top_n]
     if COINBASE in venues:
         markets += [Market(COINBASE, f"{b}-USD", b, "USD") for b in bases if b not in STATIC_COINBASE_ONLY_MISSING]
         if cfg.universe.track_stable_rates:
@@ -158,7 +162,10 @@ async def discover(cfg: Config, session: Any | None = None) -> list[Market]:
             except Exception as exc:
                 log.warning("Binance discovery failed (%s: %s); using static list", type(exc).__name__, exc)
                 markets += [m for m in static_universe(cfg) if m.venue == BINANCE]
-        bases = sorted({m.base for m in markets if m.quote in USD_FAMILY and m.base not in USD_FAMILY}) or STATIC_BASES[: cfg.universe.top_n]
+        if cfg.universe.binance_symbols or BINANCE in venues:
+            bases = sorted({m.base for m in markets if m.quote in USD_FAMILY and m.base not in USD_FAMILY})
+        else:
+            bases = STATIC_BASES[: cfg.universe.top_n]
 
         if COINBASE in venues:
             try:

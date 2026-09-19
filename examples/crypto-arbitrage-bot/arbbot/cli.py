@@ -143,10 +143,23 @@ async def _markets(cfg: Config, static: bool) -> list[Market]:
 
 
 def _install_sigint(engine: Engine) -> None:
+    """First Ctrl-C stops the engine cleanly; a second one interrupts the shutdown."""
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    hits = {"n": 0}
+
+    def handler() -> None:
+        hits["n"] += 1
+        if hits["n"] == 1:
+            log.info("stopping (press Ctrl-C again to interrupt the shutdown)")
+            engine.stop()
+        elif main_task is not None:
+            log.warning("second interrupt: cancelling")
+            main_task.cancel()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, engine.stop)
+            loop.add_signal_handler(sig, handler)
         except (NotImplementedError, RuntimeError):
             pass
 
@@ -215,6 +228,8 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     ex = engine.executor
     print(json.dumps({
         "quotes": stats.quotes,
+        "malformed_rows": feed.bad_rows,
+        "feed_errors": stats.feed_errors,
         "gross_positive": dict(stats.gross_by_kind),
         "net_actionable": dict(stats.actionable_by_kind),
         "anomalies": dict(stats.anomalies),
@@ -224,7 +239,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         "realized_pnl_usd": round(getattr(ex, "realized_pnl_usd", 0.0), 6),
         "missed_legs": getattr(ex, "missed_legs", 0),
     }, indent=2))
-    return 0
+    return 1 if stats.feed_errors else 0
 
 
 async def cmd_preflight(args: argparse.Namespace) -> int:

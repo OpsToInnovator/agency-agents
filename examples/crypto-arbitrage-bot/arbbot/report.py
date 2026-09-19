@@ -40,7 +40,7 @@ class Reporter:
             return
         fh = self._files.get(name)
         if fh is None:
-            fh = (self._dir / f"{name}.jsonl").open("a", encoding="utf-8")
+            fh = (self._dir / f"{name}.jsonl").open("a", encoding="utf-8", buffering=1)  # line-buffered: tail -f works
             self._files[name] = fh
         fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
 
@@ -127,6 +127,8 @@ class Reporter:
                          f"latency tax {ex.latency_tax_usd:+.4f} USD, missed legs {ex.missed_legs}")
         if st.handler_errors or st.inflight_skipped:
             lines.append(f"  handler errors {st.handler_errors}, executions skipped while one was in flight {st.inflight_skipped}")
+        if st.feed_errors:
+            lines.append("  FEEDS DIED: " + "; ".join(f"{k}: {v}" for k, v in st.feed_errors.items()))
         if st.detector_errors:
             lines.append("  detector errors: " + ", ".join(f"{k}={v}" for k, v in st.detector_errors.items()))
         if self.book.quarantined:

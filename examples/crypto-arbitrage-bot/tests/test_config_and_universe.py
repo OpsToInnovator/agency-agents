@@ -69,6 +69,23 @@ def test_static_universe_shape():
     assert "x" not in summarize(markets)
 
 
+def test_static_universe_fallbacks_respect_top_n_and_explicit_symbols():
+    cfg = load_config(None, {"universe": {"venues": ["coinbase", "kraken"], "top_n": 5}})
+    markets = static_universe(cfg)
+    assert len({m.base for m in markets if m.base not in USD_FAMILY}) == 5
+    cfg = load_config(None, {"universe": {"binance_symbols": ["ETHBTC"]}})
+    markets = static_universe(cfg)
+    assert {m.symbol for m in markets if m.venue == BINANCE} == {"ETHBTC"}
+    assert not any(m.venue != BINANCE and m.base not in USD_FAMILY for m in markets)  # nothing the operator did not ask for
+
+
+def test_reconnect_settings_are_validated():
+    with pytest.raises(ConfigError):
+        load_config(None, {"venues": {"reconnect_min_s": 0}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"venues": {"reconnect_min_s": 10, "reconnect_max_s": 5}})
+
+
 def test_static_universe_respects_symbols_and_venues():
     cfg = load_config(None, {"universe": {"binance_symbols": ["btcusdt", "ethbtc"], "venues": ["binance", "kraken"]}})
     markets = static_universe(cfg)

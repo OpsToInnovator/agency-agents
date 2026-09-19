@@ -69,10 +69,15 @@ def test_coinbase_drops_out_of_order_sequence():
     assert feed.out_of_order == 2
 
 
-def test_coinbase_error_raises():
-    feed = CoinbaseFeed([BTC_COINBASE], "wss://x")
-    with pytest.raises(ValueError):
-        feed.parse(json.dumps({"type": "error", "message": "Failed to subscribe", "reason": "bad product"}), 1.0)
+def test_coinbase_error_is_a_venue_error_and_drops_the_product():
+    from tests.helpers import market
+    nope = market("coinbase", "NOPE-USD", "NOPE", "USD")
+    feed = CoinbaseFeed([BTC_COINBASE, nope], "wss://x")
+    out = feed.parse(json.dumps({"type": "error", "message": "Failed to subscribe", "reason": "NOPE-USD is not a valid product"}), 1.0)
+    assert out == [] and feed.venue_errors == 1 and feed.parse_errors == 0
+    assert "NOPE-USD" not in feed.markets and "BTC-USD" in feed.markets
+    feed.parse(json.dumps({"type": "subscriptions", "channels": [{"name": "ticker", "product_ids": []}]}), 1.0)
+    assert feed.venue_errors == 2  # subscribed to nothing
 
 
 def test_iso_ts_accepts_nanoseconds_and_z():
@@ -98,7 +103,28 @@ def test_kraken_ticker_bbo_subscription_and_parse():
     assert feed.system_status == "maintenance"
 
 
-def test_kraken_subscribe_failure_raises():
-    feed = KrakenFeed([BTC_KRAKEN], "wss://x")
-    with pytest.raises(ValueError):
-        feed.parse(json.dumps({"method": "subscribe", "success": False, "error": "Currency pair not supported XBT/USD"}), 0.0)
+def test_kraken_subscribe_failure_drops_the_symbol():
+    from tests.helpers import market
+    xbt = market("kraken", "XBT/USD", "BTC", "USD")
+    feed = KrakenFeed([BTC_KRAKEN, xbt], "wss://x")
+    out = feed.parse(json.dumps({"method": "subscribe", "success": False, "symbol": "XBT/USD",
+                                 "error": "Currency pair not supported XBT/USD"}), 0.0)
+    assert out == [] and feed.venue_errors == 1 and feed.parse_errors == 0
+    assert "XBT/USD" not in feed.markets and "BTC/USD" in feed.markets
+
+
+def test_binance_large_universe_subscribes_with_frames():
+    from arbbot.feeds.binance import MAX_STREAMS_PER_CONNECTION, SUBSCRIBE_BATCH, URL_STREAM_LIMIT
+    from tests.helpers import market
+    many = [market("binance", f"X{i}USDT", f"X{i}", "USDT") for i in range(URL_STREAM_LIMIT + 50)]
+    feed = BinanceFeed(many, "wss://x/stream")
+    assert feed.url() == "wss://x/stream"
+    frames = [json.loads(m) for m in feed.subscribe_messages()]
+    assert sum(len(f["params"]) for f in frames) == URL_STREAM_LIMIT + 50
+    assert all(len(f["params"]) <= SUBSCRIBE_BATCH and f["method"] == "SUBSCRIBE" for f in frames)
+    assert feed.subscribe_interval_s >= 0.2  # 5 client messages per second at Binance
+    assert feed.parse(json.dumps({"result": None, "id": 1}), 0.0) == []
+    feed.parse(json.dumps({"result": None, "id": 2, "error": {"code": 2, "msg": "Invalid request"}}), 0.0)
+    assert feed.venue_errors == 1
+    too_many = [market("binance", f"Y{i}USDT", f"Y{i}", "USDT") for i in range(MAX_STREAMS_PER_CONNECTION + 5)]
+    assert len(BinanceFeed(too_many, "wss://x/stream").markets) == MAX_STREAMS_PER_CONNECTION

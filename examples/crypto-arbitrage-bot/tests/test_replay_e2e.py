@@ -123,6 +123,16 @@ def test_cli_replay_writes_jsonl(tmp_path, capsys):
     assert trades.exists()  # min edge -1000 bps: everything gross-positive gets paper traded
 
 
+def test_replay_skips_malformed_rows_and_reports_them(tmp_path, capsys):
+    rows = FIXTURE.read_text().splitlines()
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("\n".join(rows[:50] + ['{"t": 1789794253.9, "venue": "binance", "raw": "{\\"stream\\": '] + rows[50:80] + ["not json at all"]) + "\n")
+    args = build_parser().parse_args(["replay", str(bad), "--no-jsonl"])
+    rc = run(cmd_replay(args))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["malformed_rows"] == 2 and out["quotes"] > 0 and out["feed_errors"] == {}
+
+
 def test_cli_refuses_live_without_config(tmp_path, capsys):
     from arbbot.cli import cmd_scan
 
