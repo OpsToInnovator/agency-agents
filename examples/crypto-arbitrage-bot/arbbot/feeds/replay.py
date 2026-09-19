@@ -38,8 +38,12 @@ def tape_header(markets: Iterable[Market]) -> str:
 
 def read_tape_header(path: str | Path) -> list[Market] | None:
     """Markets recorded in the tape's header line, or None for a headerless tape."""
+    first = ""
     with Path(path).open(encoding="utf-8") as fh:
-        first = fh.readline().strip()
+        for line in fh:
+            if line.strip():
+                first = line.strip()
+                break
     if not first:
         return None
     try:
@@ -77,7 +81,24 @@ class ReplayFeed:
         """Rows for markets the replay universe does not know (tape recorded with a different universe)."""
         return sum(p.unknown_symbols for p in self.parsers.values())
 
+    def first_row_ts(self) -> float | None:
+        """Timestamp of the first data row, without counting or logging bad rows."""
+        with self.path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict) and "universe" in row:
+                        continue
+                    return float(row["t"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+        return None
+
     def rows(self):
+        seen_data = False
         with self.path.open(encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
                 line = line.strip()
@@ -85,8 +106,9 @@ class ReplayFeed:
                     continue
                 try:
                     row = json.loads(line)
-                    if lineno == 1 and isinstance(row, dict) and "universe" in row:
-                        continue  # header
+                    if not seen_data and isinstance(row, dict) and "universe" in row:
+                        continue  # header (first non-blank line)
+                    seen_data = True
                     float(row["t"])
                     row["venue"], row["raw"]
                 except (ValueError, KeyError, TypeError) as exc:

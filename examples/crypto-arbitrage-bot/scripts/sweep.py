@@ -39,16 +39,19 @@ def run_once(fixture: Path, fee_scale: float, min_edge: float, haircut: float, s
         "venues": {"taker_fee_bps": {k: v * fee_scale for k, v in DEFAULT_TAKER_BPS.items()}},
         "detection": {"min_net_edge_bps": min_edge, "stable_haircut_bps": haircut},
         "risk": {"cooldown_s": 0.0, "max_trades_per_minute": 100000, "min_profit_usd": 0.0},
-        "paper": {"slippage_bps": slippage, "fill_model": fill_model},
+        # generous balances: the sweep is about fees, not about running out of paper inventory
+        "paper": {"slippage_bps": slippage, "fill_model": fill_model,
+                  "starting_quote_per_venue_usd": 1e6, "starting_base_inventory_usd": 1e5},
         "report": {"write_jsonl": False, "interval_s": 3600},
     })
     markets = read_tape_header(fixture)
     markets = static_universe(cfg) if markets is None else [m for m in markets if m.venue in cfg.enabled_venues()]
     clock = Clock()
     feed = ReplayFeed(fixture, markets, speed=0.0, clock_setter=clock.set)
-    for row in feed.rows():
-        clock.set(float(row["t"]))
-        break
+    first = feed.first_row_ts()
+    if first is not None:
+        clock.set(first)
+    cfg.risk.kill_switch_file = ""  # offline: a stray STOP file must not zero the sweep
     engine = make_engine(cfg, markets, [feed], clock, state_file=None)
     stats = asyncio.run(engine.run())
     ex = engine.executor

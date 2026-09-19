@@ -51,7 +51,8 @@ class CoinbaseFeed(Feed):
         mtype = msg.get("type")
         if mtype == "error":
             reason = f"{msg.get('message')}: {msg.get('reason', '')}"
-            symbol = next((s for s in list(self.markets) if s in reason), None)
+            ids = set(re.findall(r"\b[A-Z0-9]+-[A-Z]+\b", reason))  # whole product ids only (HBAR-USD is not AR-USD)
+            symbol = next((s for s in list(self.markets) if s in ids), None)
             self.venue_error(reason, symbol)
             return []
         if mtype == "subscriptions" and not any(c.get("product_ids") for c in msg.get("channels", [])):

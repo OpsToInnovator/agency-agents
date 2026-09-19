@@ -90,11 +90,14 @@ entirely, and even then two basis points of slippage turn the "profit" negative:
 | 1.00 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
 | 0.50 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
 | 0.25 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
-| 0.00 (no haircut) | 407 | 307 | 307 | 71–72 | −$0.52 | +$0.45 |
+| 0.00, 5 bps USDT haircut | 407 | 13 | 13 | 13 | −$0.22 | +$0.30 |
+| 0.00, no haircut | 407 | 307 | 307 | 296 | −$1.98 | +$5.45 |
 
-Every "this bot prints money" screenshot you will ever see lives in that last row: a fee
-assumption no retail account gets, no slippage, and fills that were never actually
-sent to a venue. Run it yourself: `python3 scripts/sweep.py`.
+(The sweep gives the paper desk effectively unlimited inventory so that fees, not
+running out of stock, decide the numbers.) Every "this bot prints money" screenshot you
+will ever see lives in that last row: a fee assumption no retail account gets, no
+slippage, and fills that were never actually sent to a venue. Run it yourself:
+`python3 scripts/sweep.py`.
 
 ### What our own first live run "earned"
 

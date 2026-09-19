@@ -225,6 +225,51 @@ def test_paper_arrival_triangle_aborts_after_missed_leg():
     assert ex.balance(BINANCE, "BTC") == pytest.approx(rec.fills[0].qty)  # stuck holding BTC
 
 
+def test_paper_arrival_rejects_unfundable_plans_up_front():
+    book, opp = book_with_cross_opp()
+    ex = PaperExecutor(PaperConfig(starting_base_inventory_usd=0.0), FEES, book, [BINANCE, KRAKEN])
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "rejected" and "no BTC on kraken" in rec.reason
+    assert not ex.pending and ex.rejected == 1 and ex.missed_legs == 0
+
+
+def test_paper_inventory_is_funded_once_and_tops_up_bought_holdings():
+    book, opp = book_with_cross_opp()
+    ex = PaperExecutor(PaperConfig(starting_quote_per_venue_usd=5000, starting_base_inventory_usd=2000, slippage_bps=0.0, **INSTANT),
+                       FEES, book, [BINANCE, KRAKEN])
+    run(ex.execute(opp, 1000.0))  # buys 0.01 BTC on binance, sells 0.01 from kraken stock
+    ex.balances[KRAKEN]["BTC"] = 0.0  # sold out later
+    ex._ensure_inventory(KRAKEN, "BTC", 1000.0)
+    assert ex.balance(KRAKEN, "BTC") == 0.0  # funded once: stays sold out
+    ex._ensure_inventory(BINANCE, "BTC", 1000.0)  # binance only ever bought BTC: gets its stock on top
+    assert ex.balance(BINANCE, "BTC") == pytest.approx(0.01 + 2000 / book.usd_price("BTC", 1000.0))
+    assert (BINANCE, "BTC") in ex.contributed
+
+
+def test_paper_equity_reports_sold_out_contributed_asset_as_unmarked_when_unpriceable():
+    book, opp = book_with_cross_opp()
+    ex = PaperExecutor(PaperConfig(starting_base_inventory_usd=2000, slippage_bps=0.0, **INSTANT), FEES, book, [BINANCE, KRAKEN])
+    run(ex.execute(opp, 1000.0))
+    ex.balances[KRAKEN]["BTC"] = 0.0
+    book.invalidate_venue(BINANCE)
+    book.invalidate_venue(KRAKEN)  # no BTC mark anywhere now
+    equity, unmarked = ex.equity_usd(1000.0)
+    assert "kraken:BTC" in unmarked  # so the engine skips the drawdown update instead of seeing phantom PnL
+
+
+def test_paper_arrival_displayed_size_is_shared_between_plans():
+    book, opp = book_with_cross_opp()
+    ex = PaperExecutor(PaperConfig(starting_quote_per_venue_usd=50000, starting_base_inventory_usd=20000, slippage_bps=0.0,
+                                   assumed_rtt_ms=100), FEES, book, [BINANCE, KRAKEN])
+    run(ex.execute(opp, 1000.0))
+    run(ex.execute(opp, 1000.01))
+    book.update(quote(BTC_BINANCE, 99999, 100000, ask_qty=0.015, ts=1000.05))  # only 0.015 displayed
+    book.update(quote(BTC_KRAKEN, 100600, 100601, bid_qty=1, ts=1000.05))
+    recs = ex.settle(1000.2)
+    buys = [f.qty for r in recs for f in r.fills if f.side == "buy"]
+    assert sorted(buys) == pytest.approx([0.005, 0.01])  # second plan gets what is left, not the full display
+
+
 def test_paper_arrival_final_settles_everything():
     book, opp = book_with_cross_opp()
     ex = PaperExecutor(PaperConfig(starting_quote_per_venue_usd=5000, starting_base_inventory_usd=2000, assumed_rtt_ms=5000),
@@ -521,8 +566,8 @@ def test_live_executor_ambiguous_send_recovers_by_client_id_or_halts(monkeypatch
     assert rec.fills[0].order_id == "42" and not risk.halted
     assert rec.fills[0].fee_asset == "BTC" and rec.fills[0].fee == pytest.approx(0.00999 * 0.001)  # schedule fee, received asset
     # 1b) real orders: the lookup says the order never existed -> nothing filled, nothing sent after it
-    session_never = FakeSession([TIME, ("/api/v3/order", 200, asyncio.TimeoutError()),
-                                 ("/api/v3/order?", 400, {"code": -2013, "msg": "Order does not exist."})])
+    session_never = FakeSession([TIME, ("/api/v3/order", 200, asyncio.TimeoutError())]
+                                + [("/api/v3/order?", 400, {"code": -2013, "msg": "Order does not exist."})] * 3)
     risk_never = RiskManager(RiskConfig(), DetectionConfig())
     ex_never = _live(book, session_never, real=True, cfg_real=True, risk=risk_never)
     rec = run(ex_never.execute(opp, 1000.0))
@@ -547,6 +592,109 @@ def test_live_executor_ambiguous_send_recovers_by_client_id_or_halts(monkeypatch
     assert sum(1 for c in session2.calls if c[0] == "POST") == 1  # never resent
 
 
+def test_live_unknown_status_answers_are_reconciled_not_dropped(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+
+    async def _instant(_s, *_a, **_k):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _instant)
+    # 502 on a real POST: looked up by client id, found FILLED -> cycle continues
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(), DetectionConfig())
+    session = FakeSession([TIME, ("/api/v3/order", 502, {"raw": "<html>bad gateway</html>"})])
+    real_ctx = session._ctx
+
+    def ctx(method, url, data):
+        if method == "GET" and "origClientOrderId=" in url:
+            cid = url.split("origClientOrderId=")[1].split("&")[0]
+            return FakeResponse(200, {"clientOrderId": cid, "status": "FILLED", "executedQty": "0.00999",
+                                      "cummulativeQuoteQty": "999", "orderId": 7})
+        return real_ctx(method, url, data)
+
+    session._ctx = ctx
+    session.script += [("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 8}),
+                       ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.00999", "fills": [], "orderId": 9})]
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "filled" and rec.fills[0].order_id == "7" and not risk.halted
+    assert sum(1 for c in session.calls if c[0] == "POST") == 3  # never resent
+    # -1007 on leg 2 with the lookup failing: partial, sticky halt, loss of leg 1 booked
+    book, opp = triangle_book_and_opp()
+    risk2 = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session2 = FakeSession([TIME, ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 1}),
+                            ("/api/v3/order", 504, {"code": -1007, "msg": "Send status unknown; execution status unknown."}),
+                            ("/api/v3/order?", 200, ConnectionError("x")), ("/api/v3/order?", 200, ConnectionError("x")),
+                            ("/api/v3/order?", 200, ConnectionError("x"))])
+    ex2 = _live(book, session2, real=True, cfg_real=True, risk=risk2)
+    rec = run(ex2.execute(opp, 1000.0))
+    assert rec.status == "partial" and risk2.halted and risk2.halt_sticky and "ambiguous" in rec.reason
+    assert rec.realized_pnl_usd < 0 and len(rec.fills) == 1
+    assert sum(1 for c in session2.calls if c[0] == "POST") == 2
+    # an early -2013 is not proof: only the last lookup attempt may conclude the order never arrived
+    book, opp = triangle_book_and_opp()
+    session3 = FakeSession([TIME, ("/api/v3/order", 200, asyncio.TimeoutError()),
+                            ("/api/v3/order?", 400, {"code": -2013, "msg": "Order does not exist."})])
+    real3 = session3._ctx
+
+    def ctx3(method, url, data):
+        if method == "GET" and "origClientOrderId=" in url and not any(m == "/api/v3/order?" for m, _, _ in session3.script):
+            cid = url.split("origClientOrderId=")[1].split("&")[0]
+            return FakeResponse(200, {"clientOrderId": cid, "status": "FILLED", "executedQty": "0.00999",
+                                      "cummulativeQuoteQty": "999", "orderId": 11})
+        return real3(method, url, data)
+
+    session3._ctx = ctx3
+    session3.script += [("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 12}),
+                        ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.00999", "fills": [], "orderId": 13})]
+    ex3 = _live(book, session3, real=True, cfg_real=True, risk=RiskManager(RiskConfig(), DetectionConfig()))
+    rec = run(ex3.execute(opp, 1000.0))
+    assert rec.status == "filled" and rec.fills[0].order_id == "11"  # the second lookup found it
+
+
+def test_live_failure_after_a_real_fill_halts_and_books(monkeypatch, tmp_path):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 1})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    orig = ex._journal
+
+    def flaky_journal(entry):
+        if entry.get("kind") == "response":
+            raise OSError(28, "No space left on device")
+        orig(entry)
+
+    ex._journal = flaky_journal
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "rejected" and "fill state unknown" in rec.reason
+    assert risk.halted and risk.halt_sticky and "fill state unknown" in risk.halt_reason
+    assert sum(1 for c in session.calls if c[0] == "POST") == 1
+
+
+def test_live_unpriceable_commission_is_booked_in_quote(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()  # no BNB market in this book
+    session = FakeSession([TIME,
+                           ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "orderId": 1,
+                                                   "fills": [{"commission": "0.001", "commissionAsset": "BNB"}]}),
+                           ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.00999", "orderId": 2,
+                                                   "fills": [{"commission": "0.00025", "commissionAsset": "ETH"}]}),
+                           ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "1000.2", "orderId": 3,
+                                                   "fills": [{"commission": "1.0", "commissionAsset": "USDT"}]})])
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "filled"
+    assert rec.fills[0].fees_by_asset == {"USDT": pytest.approx(999 * 0.001)}  # BNB fee booked at the schedule rate in USDT
+    assert rec.fills[0].fee_in("BTC") == 0.0  # so the whole 0.00999 BTC carries to leg 2
+    assert ex.unmarked_assets == {}
+    assert rec.realized_pnl_usd == pytest.approx(-999 + 1000.2 - 0.999 - 1.0 - 0.00025 * book.usd_price("ETH", 1000.0), rel=1e-6)
+
+
 def test_live_partial_cycle_books_its_loss_and_splits_commissions(monkeypatch):
     monkeypatch.setenv("BINANCE_API_KEY", "k")
     monkeypatch.setenv("BINANCE_API_SECRET", "s")
@@ -561,10 +709,11 @@ def test_live_partial_cycle_books_its_loss_and_splits_commissions(monkeypatch):
     ex = _live(book, session, real=True, cfg_real=True, risk=risk)
     rec = run(ex.execute(opp, 1000.0))
     assert rec.status == "partial" and risk.halted and risk.halt_sticky
-    assert rec.fills[0].fees_by_asset == {"BNB": 0.001, "BTC": 0.000005}
+    # BNB has no market in this universe: its commission is booked at the schedule rate in USDT
+    assert rec.fills[0].fees_by_asset == {"USDT": pytest.approx(999.0 * 0.001), "BTC": 0.000005}
     assert rec.fills[0].fee_in("BTC") == 0.000005  # only the BTC part reduces what we can sell on
-    # realized = -999 USDT + 0.00999 BTC marked at mid (99999.5) - 0.000005 BTC - 0.001 BNB (unmarkable -> 0)
-    expected = -999.0 + (0.00999 - 0.000005) * 99999.5
+    # realized = -999 USDT - 0.999 USDT fee + (0.00999 - 0.000005) BTC marked at mid (99999.5)
+    expected = -999.0 - 0.999 + (0.00999 - 0.000005) * 99999.5
     assert rec.realized_pnl_usd == pytest.approx(expected, rel=1e-9)
     assert ex.realized_pnl_usd == pytest.approx(expected, rel=1e-9)
     risk.on_settled(rec, 1000.0)
@@ -637,6 +786,26 @@ def test_live_refuses_markets_without_filters(monkeypatch):
         ("/api/v3/order/test", 200, {}),
     ])).preflight(["BTCUSDT"]))
     assert any("no exchange filters" in p for p in problems)
+
+
+def test_live_preflight_reports_a_sticky_halt(monkeypatch, tmp_path):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    state = tmp_path / "risk_state.json"
+    halted = RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0)
+    halted.halt("reconcile me", sticky=True)
+    book = QuoteBook()
+    book.register(BTC_BINANCE)
+    risk = RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0)
+    session = FakeSession([
+        ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+        ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+        ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+        ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "1000"}]}),
+        ("/api/v3/order/test", 200, {}),
+    ])
+    problems = run(_live(book, session, risk=risk).preflight(["BTCUSDT"]))
+    assert any("halted: reconcile me" in p and "sticky" in p for p in problems)
 
 
 def test_live_preflight_reports_problems(monkeypatch):

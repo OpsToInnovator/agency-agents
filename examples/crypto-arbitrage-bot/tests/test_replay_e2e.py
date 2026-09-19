@@ -88,7 +88,7 @@ def test_replay_arrival_fills_never_beat_their_limits():
     original = engine.reporter.on_trade
     engine.reporter.on_trade = lambda rec: (records.append(rec), original(rec))
     run(engine.run())
-    assert records and all(r.status in ("filled", "partial", "missed") for r in records)
+    assert records and all(r.status in ("filled", "partial", "missed", "rejected") for r in records)
     limits = {}
     for r in records:
         for leg in r.opportunity.legs:
@@ -99,9 +99,12 @@ def test_replay_arrival_fills_never_beat_their_limits():
                 assert f.price <= limit * (1 + 1e-12)
             else:
                 assert f.price >= limit * (1 - 1e-12)
-        if r.ts < engine.stats.last_quote_ts:  # settled at end of tape: orders still in flight settle early
+        if r.status != "rejected" and r.ts < engine.stats.last_quote_ts:  # end-of-tape settles in-flight orders early
             assert r.latency_ms >= 300 - 1e-6
-    assert engine.executor.missed_legs == sum(len([m for m in r.reason.split(";") if m.strip()]) for r in records if r.status != "filled")
+    # missed legs are counted per settled plan (rejected plans were never sent; "not sent" legs are not misses)
+    assert engine.executor.missed_legs == sum(
+        len([m for m in r.reason.split(";") if m.strip() and "not sent" not in m])
+        for r in records if r.status in ("partial", "missed"))
 
 
 def test_cli_replay_writes_jsonl(tmp_path, capsys):
@@ -131,7 +134,7 @@ def test_replay_uses_the_tape_header_universe(tmp_path, capsys):
     universe = [Market("binance", "BTCUSDT", "BTC", "USDT"), Market("kraken", "BTC/USD", "BTC", "USD")]
     rows = FIXTURE.read_text().splitlines()
     tape = tmp_path / "with_header.jsonl"
-    tape.write_text(tape_header(universe) + "\n" + "\n".join(rows) + "\n")
+    tape.write_text("\n" + tape_header(universe) + "\n" + "\n".join(rows) + "\n")  # header may follow a blank line
     assert [m.key for m in read_tape_header(tape)] == [("binance", "BTCUSDT"), ("kraken", "BTC/USD")]
     assert read_tape_header(FIXTURE) is None
     args = build_parser().parse_args(["replay", str(tape), "--no-jsonl"])
@@ -147,12 +150,23 @@ def test_replay_uses_the_tape_header_universe(tmp_path, capsys):
 def test_replay_skips_malformed_rows_and_reports_them(tmp_path, capsys):
     rows = FIXTURE.read_text().splitlines()
     bad = tmp_path / "bad.jsonl"
-    bad.write_text("\n".join(rows[:50] + ['{"t": 1789794253.9, "venue": "binance", "raw": "{\\"stream\\": '] + rows[50:80] + ["not json at all"]) + "\n")
+    # a malformed row BEFORE the first valid row must be counted once, not once more by the clock priming
+    bad.write_text("\n" + "garbage first\n" + "\n".join(rows[:50] + ['{"t": 1789794253.9, "venue": "binance", "raw": "{\\"stream\\": '] + rows[50:80] + ["not json at all"]) + "\n")
     args = build_parser().parse_args(["replay", str(bad), "--no-jsonl"])
     rc = run(cmd_replay(args))
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["malformed_rows"] == 2 and out["quotes"] > 0 and out["feed_errors"] == {}
+    assert rc == 0 and out["malformed_rows"] == 3 and out["quotes"] > 0 and out["feed_errors"] == {}
     assert out["unknown_symbol_rows"] == 0
+
+
+def test_replay_ignores_a_stray_stop_file(tmp_path, capsys):
+    (tmp_path / "STOP").write_text("")  # tests run from tmp_path
+    p = tmp_path / "nofloor.toml"
+    p.write_text("[risk]\nmin_profit_usd = -1e9\ncooldown_s = 0.0\nmax_trades_per_minute = 100000\n")
+    args = build_parser().parse_args(["replay", str(FIXTURE), "--no-jsonl", "--min-edge", "-1000", "--config", str(p)])
+    rc = run(cmd_replay(args))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and sum(out["trades"].values()) > 0
 
 
 def test_sweep_script_runs_a_small_grid(capsys):
@@ -168,7 +182,7 @@ def test_sweep_script_runs_a_small_grid(capsys):
     full_fee, no_fee = rows
     assert full_fee["net_positive"] == 0 and full_fee["filled"] == 0 and full_fee["gross_positive"] == 407
     # the README's sweep table quotes this row exactly: "profit" appears when the fees stop being real
-    assert (no_fee["net_positive"], no_fee["sent"], no_fee["filled"], no_fee["realized_usd"]) == (307, 307, 72, 0.445)
+    assert (no_fee["net_positive"], no_fee["sent"], no_fee["filled"], no_fee["realized_usd"]) == (307, 307, 296, 5.448)
     assert no_fee["unknown_symbol_rows"] == 0
 
 

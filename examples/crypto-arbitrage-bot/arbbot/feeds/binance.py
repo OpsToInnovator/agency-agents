@@ -63,7 +63,8 @@ class BinanceFeed(Feed):
         msg = loads(raw)
         if not isinstance(msg, dict):
             return []
-        if "result" in msg and "id" in msg:  # SUBSCRIBE ack: {"result": null, "id": 1}
+        if "id" in msg and ("result" in msg or "error" in msg):
+            # SUBSCRIBE ack {"result": null, "id": 1} or error {"error": {code, msg}, "id": 1}
             if msg.get("error"):
                 self.venue_error(f"subscribe failed: {msg['error']}")
             return []

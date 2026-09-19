@@ -66,6 +66,21 @@ def test_types_are_checked_and_tables_merge(tmp_path):
         load_config(tmp_path / "missing.toml")
 
 
+def test_per_venue_tables_are_case_insensitive_and_elements_typed():
+    cfg = load_config(None, {"detection": {"max_quote_age_ms_by_venue": {"Binance": 7000}}})
+    assert cfg.detection.max_quote_age_ms_by_venue == {"binance": 7000.0, "kraken": 5000.0}
+    cfg = load_config(None, {"venues": {"taker_fee_bps": {"KRAKEN": 26}}})
+    assert cfg.venues.taker_fee_bps["kraken"] == 26.0 and "KRAKEN" not in cfg.venues.taker_fee_bps
+    with pytest.raises(ConfigError):
+        load_config(None, {"venues": {"taker_fee_bps": {"kraken": 26, "Kraken": 27}}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"universe": {"venues": ["binance", 3]}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"venues": {"taker_fee_bps": {"binance": "ten"}}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"detection": {"stable_rate_band": ["a", "b"]}})
+
+
 def test_example_config_loads():
     cfg = load_config(ROOT / "config.example.toml")
     assert cfg.paper.fill_model == "arrival"
