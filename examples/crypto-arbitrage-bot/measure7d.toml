@@ -1,7 +1,8 @@
 # 7-day MEASUREMENT config for arbbot (paper only, no API keys needed). See README "Go-live protocol".
 # Run, on an always-on machine:
 #   while true; do python3 -m arbbot scan --config measure7d.toml --log-dir logs/measure7d 2>>measure7d.log; sleep 5; done
-# (the loop restarts after a crash or the planned 23 h Binance reconnect; risk state persists in state_file)
+# (the loop restarts only after a crash or exit; the planned 23 h Binance reconnect happens inside the process
+#  and shows up as one binance disconnect in the summary; risk state persists in state_file)
 # Roll up daily and score the GO criteria with:
 #   python3 scripts/rollup.py logs/measure7d --scan-log measure7d.log --rtt-log rtt.log
 
