@@ -1,0 +1,2 @@
+websockets>=12,<18
+aiohttp>=3.9,<4

@@ -1,0 +1,207 @@
+"""The event loop: feeds -> quote book -> detectors -> risk -> executor -> reporter."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from .config import Config
+from .detectors.base import Detector
+from .execution.risk import RiskManager
+from .models import Opportunity, Quote
+from .quotes import QuoteBook
+
+log = logging.getLogger(__name__)
+
+
+class Clock:
+    """Wall clock in live mode; the fixture's clock in replay mode."""
+
+    def __init__(self) -> None:
+        self.override: float | None = None
+
+    def now(self) -> float:
+        return self.override if self.override is not None else time.time()
+
+    def set(self, t: float) -> None:
+        self.override = t
+
+
+class FeedLike(Protocol):
+    def stop(self) -> None: ...
+    async def run(self, sink) -> None: ...
+
+
+class ExecutorLike(Protocol):
+    async def execute(self, opp: Opportunity, now: float): ...
+
+
+@dataclass
+class Stats:
+    started: float
+    quotes: int = 0
+    coalesced: int = 0
+    quotes_by_venue: Counter = field(default_factory=Counter)
+    gross_by_kind: Counter = field(default_factory=Counter)
+    actionable_by_kind: Counter = field(default_factory=Counter)
+    anomalies: Counter = field(default_factory=Counter)
+    trades_by_status: Counter = field(default_factory=Counter)
+    best_gross: dict[str, tuple[float, str]] = field(default_factory=dict)
+    best_net: dict[str, tuple[float, str]] = field(default_factory=dict)
+    latencies_ms: deque = field(default_factory=lambda: deque(maxlen=20000))
+    detector_errors: Counter = field(default_factory=Counter)
+    disconnects: Counter = field(default_factory=Counter)
+
+    def note(self, opp: Opportunity) -> None:
+        self.gross_by_kind[opp.kind] += 1
+        g = self.best_gross.get(opp.kind)
+        if g is None or opp.gross_edge_bps > g[0]:
+            self.best_gross[opp.kind] = (opp.gross_edge_bps, opp.description)
+        n = self.best_net.get(opp.kind)
+        if n is None or opp.net_edge_bps > n[0]:
+            self.best_net[opp.kind] = (opp.net_edge_bps, opp.description)
+        self.latencies_ms.append(opp.detect_latency_ms)
+
+    def latency_percentile(self, p: float) -> float | None:
+        if not self.latencies_ms:
+            return None
+        data = sorted(self.latencies_ms)
+        idx = min(len(data) - 1, int(round(p / 100.0 * (len(data) - 1))))
+        return data[idx]
+
+
+class Engine:
+    def __init__(self, cfg: Config, book: QuoteBook, feeds: list[Any], detectors: list[Detector],
+                 risk: RiskManager, executor: ExecutorLike, reporter: Any, clock: Clock | None = None):
+        self.cfg = cfg
+        self.book = book
+        self.feeds = feeds
+        self.detectors = detectors
+        self.risk = risk
+        self.executor = executor
+        self.reporter = reporter
+        self.clock = clock or Clock()
+        self.stats = Stats(started=self.clock.now())
+        self._stop = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def on_disconnect(self, venue: str) -> None:
+        dropped = self.book.invalidate_venue(venue)
+        self.stats.disconnects[venue] += 1
+        log.warning("%s disconnected: dropped %d quotes until it reconnects", venue, dropped)
+
+    async def run(self, duration: float | None = None) -> Stats:
+        pending: dict[tuple[str, str], Quote] = {}
+        event = asyncio.Event()
+        stats = self.stats
+
+        def sink(q: Quote) -> None:
+            if q.key in pending:
+                stats.coalesced += 1
+            pending[q.key] = q
+            event.set()
+
+        feed_tasks = {asyncio.create_task(f.run(sink), name=f"feed:{getattr(f, 'venue', 'replay')}"): f for f in self.feeds}
+        consumer = asyncio.create_task(self._consume(pending, event), name="consumer")
+        reporter_task = asyncio.create_task(self._report_loop(), name="reporter")
+        stop_task = asyncio.create_task(self._stop.wait(), name="stop")
+        deadline = time.monotonic() + duration if duration else None
+        waiting = set(feed_tasks)
+        try:
+            while waiting and not self._stop.is_set():
+                timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                if deadline is not None and timeout <= 0:
+                    break
+                done, _ = await asyncio.wait(waiting | {stop_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    if t is stop_task:
+                        continue
+                    waiting.discard(t)
+                    exc = t.exception() if not t.cancelled() else None
+                    if exc:
+                        log.error("feed %s died: %s: %s", t.get_name(), type(exc).__name__, exc)
+                    else:
+                        log.info("feed %s finished", t.get_name())
+        finally:
+            self._stop.set()
+            for f in self.feeds:
+                f.stop()
+            await asyncio.wait(list(feed_tasks) + [stop_task], timeout=5)
+            for t in list(feed_tasks) + [stop_task]:
+                if not t.done():
+                    t.cancel()
+            consumer.cancel()
+            reporter_task.cancel()
+            await asyncio.gather(consumer, reporter_task, return_exceptions=True)
+            # anything the consumer had not reached yet
+            for q in list(pending.values()):
+                await self.handle(q)
+            pending.clear()
+            self.reporter.final(self.clock.now())
+        return self.stats
+
+    async def _consume(self, pending: dict, event: asyncio.Event) -> None:
+        while True:
+            await event.wait()
+            event.clear()
+            batch = list(pending.values())
+            pending.clear()
+            for q in batch:
+                await self.handle(q)
+            await asyncio.sleep(0)
+
+    async def _report_loop(self) -> None:
+        interval = max(1.0, self.cfg.report.interval_s)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.reporter.periodic(self.clock.now())
+            except Exception:  # reporting must never take the engine down
+                log.exception("reporter failed")
+
+    async def handle(self, q: Quote) -> None:
+        now = self.clock.now()
+        wall = time.time()
+        self.book.update(q)
+        self.stats.quotes += 1
+        self.stats.quotes_by_venue[q.venue] += 1
+        t0 = time.perf_counter()
+        for det in self.detectors:
+            try:
+                opps = det.on_quote(q, self.book, now)
+            except Exception:
+                self.stats.detector_errors[det.name] += 1
+                if self.stats.detector_errors[det.name] <= 3:
+                    log.exception("detector %s failed on %s", det.name, q.key)
+                continue
+            for opp in opps:
+                queue_ms = 0.0 if self.clock.override is not None else max(0.0, (wall - q.recv_ts) * 1e3)
+                opp.detect_latency_ms = (time.perf_counter() - t0) * 1e3 + queue_ms
+                await self._process(opp, now)
+
+    async def _process(self, opp: Opportunity, now: float) -> None:
+        self.stats.note(opp)
+        if opp.kind == "anomaly":
+            self.stats.anomalies[opp.extra.get("subtype", "?")] += 1
+            self.reporter.on_anomaly(opp)
+            return
+        actionable = opp.net_edge_bps >= self.cfg.detection.min_net_edge_bps
+        if actionable:
+            self.stats.actionable_by_kind[opp.kind] += 1
+        self.reporter.on_opportunity(opp, actionable)
+        if not actionable:
+            return
+        ok, reason = self.risk.check(opp, now)
+        if not ok:
+            self.reporter.on_rejected(opp, reason)
+            return
+        record = await self.executor.execute(opp, now)
+        record.ts = now
+        self.risk.on_trade(record, now)
+        self.stats.trades_by_status[record.status] += 1
+        self.reporter.on_trade(record)

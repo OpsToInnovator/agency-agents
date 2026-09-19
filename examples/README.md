@@ -39,6 +39,14 @@ These examples answer the question: *"What does it actually look like when the f
 
 **Key takeaway:** All 8 agents ran in parallel and produced coherent, cross-referencing plans without coordination overhead. The output demonstrates the agency's ability to go from "find an opportunity" to "here's the full blueprint" in a single session.
 
+### [crypto-arbitrage-bot/](./crypto-arbitrage-bot/)
+
+**What:** A working Python bot that reproduces the viral "built a trading bot with Claude Code in 2 days, $68 → $750,000" post, and then shows you why the money part is impossible.
+
+**The scenario:** The post claims a bot that scans 50+ markets, syncs live Binance data, spots "price errors" and executes on mispricing. This example does all of that for real: WebSocket feeds from Binance, Coinbase and Kraken (~190 markets), cross-exchange and triangular arbitrage detectors, anomaly detection, a fee-aware paper trader, a risk manager with a kill switch, and a gated, validation-only live path. It also ships a recorded tape, an offline test suite, and a README that walks through the fee schedules, the return arithmetic and the academic evidence.
+
+**Key takeaway:** Thousands of gross-positive spreads per minute, zero or single digits net of fees, and the first "profit" it ever reported was a ticker collision (Binance `ONE` vs Kraken `ONE`). Build the scanner, learn the microstructure, keep your $68.
+
 ## Adding New Examples
 
 If you run an interesting multi-agent exercise, consider adding it here. Good examples show:

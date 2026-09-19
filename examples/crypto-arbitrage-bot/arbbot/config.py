@@ -1,0 +1,173 @@
+"""Configuration: dataclasses with safe defaults, optionally loaded from TOML.
+
+Unknown keys are an error so a typo like `min_net_edge_bp` cannot silently
+leave a default in place.
+"""
+from __future__ import annotations
+
+import dataclasses
+import os
+import tomllib
+from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
+from typing import Any
+
+from .models import BINANCE, COINBASE, KRAKEN
+
+
+@dataclass
+class UniverseConfig:
+    # Explicit Binance symbols (e.g. ["BTCUSDT", "ETHBTC"]). Empty = discover top_n by volume.
+    binance_symbols: list[str] = field(default_factory=list)
+    top_n: int = 60
+    auto_discover: bool = True
+    venues: list[str] = field(default_factory=lambda: [BINANCE, COINBASE, KRAKEN])
+    # Quote assets to add cross pairs for (X/BTC, X/ETH ...) so triangles exist.
+    triangle_quotes: list[str] = field(default_factory=lambda: ["BTC", "ETH", "BNB"])
+    # Subscribe to USDT-USD style markets so USDT prices can be converted to USD.
+    track_stable_rates: bool = True
+
+
+@dataclass
+class VenuesConfig:
+    taker_fee_bps: dict[str, float] = field(default_factory=dict)  # overrides fees.DEFAULT_TAKER_BPS
+    # Public market-data endpoints. api.binance.com answers HTTP 451 in some
+    # regions; the binance.vision mirror serves the same public data.
+    binance_ws: str = "wss://data-stream.binance.vision/stream"
+    binance_rest: str = "https://data-api.binance.vision"
+    binance_trade_rest: str = "https://api.binance.com"  # signed endpoints (live mode only)
+    coinbase_ws: str = "wss://ws-feed.exchange.coinbase.com"
+    coinbase_rest: str = "https://api.exchange.coinbase.com"
+    kraken_ws: str = "wss://ws.kraken.com/v2"
+    kraken_rest: str = "https://api.kraken.com"
+    reconnect_min_s: float = 1.0
+    reconnect_max_s: float = 60.0
+
+
+@dataclass
+class DetectionConfig:
+    cross_exchange: bool = True
+    triangular: bool = True
+    anomaly: bool = True
+    min_net_edge_bps: float = 1.0  # act only when net-of-fee edge is at least this
+    max_quote_age_ms: float = 2000.0  # ignore quotes older than this
+    # Binance bookTicker and Kraken (bbo trigger) push on every top-of-book
+    # change, so silence means "unchanged"; Coinbase's ticker only fires on
+    # trades, so silence means "unknown". Quotes are dropped on disconnect.
+    max_quote_age_ms_by_venue: dict[str, float] = field(default_factory=lambda: {"binance": 5000.0, "kraken": 5000.0})
+    # A cross-venue gap this wide is not a price error, it is two different
+    # assets sharing a ticker (Binance ONE vs Kraken ONE). The asset is
+    # quarantined from cross-exchange comparison for the rest of the run.
+    identity_mismatch_bps: float = 2000.0
+    # Net edges above this are treated as bad data and never traded.
+    max_plausible_net_edge_bps: float = 200.0
+    anchor_venue: str = "binance"  # marks for quarantined assets come from here
+    stable_haircut_bps: float = 5.0  # extra edge demanded when USDT is compared with USD
+    anomaly_threshold_bps: float = 50.0  # |deviation| from reference to call it a "price error"
+    anomaly_ewma_halflife_s: float = 10.0
+    anomaly_cooldown_s: float = 5.0
+    triangle_start_assets: list[str] = field(default_factory=lambda: ["USDT"])
+
+
+@dataclass
+class RiskConfig:
+    max_notional_per_trade_usd: float = 100.0
+    max_daily_loss_usd: float = 25.0
+    max_trades_per_minute: int = 30
+    cooldown_s: float = 2.0  # per opportunity key
+    max_detect_latency_ms: float = 250.0
+    kill_switch_file: str = "STOP"
+
+
+@dataclass
+class PaperConfig:
+    starting_quote_per_venue_usd: float = 1000.0
+    starting_base_inventory_usd: float = 200.0  # lazily funded per base asset per venue
+    slippage_bps: float = 2.0
+    fill_fraction: float = 1.0  # fraction of displayed top-of-book size assumed fillable
+
+
+@dataclass
+class LiveConfig:
+    # Both must be true AND the CLI must be run with --live for orders to be sent.
+    enabled: bool = False
+    real_orders: bool = False  # false = POST /api/v3/order/test (validates, never fills)
+    api_key_env: str = "BINANCE_API_KEY"
+    api_secret_env: str = "BINANCE_API_SECRET"
+    recv_window_ms: int = 5000
+
+
+@dataclass
+class ReportConfig:
+    interval_s: float = 10.0
+    log_dir: str = "logs"
+    write_jsonl: bool = True
+    log_every_opportunity: bool = False
+
+
+@dataclass
+class Config:
+    universe: UniverseConfig = field(default_factory=UniverseConfig)
+    venues: VenuesConfig = field(default_factory=VenuesConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    paper: PaperConfig = field(default_factory=PaperConfig)
+    live: LiveConfig = field(default_factory=LiveConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)
+
+    def enabled_venues(self) -> list[str]:
+        return [v.lower() for v in self.universe.venues]
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def _apply(obj: Any, data: dict[str, Any], path: str = "") -> None:
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path or 'root'}: expected a table, got {type(data).__name__}")
+    known = {f.name: f for f in fields(obj)}
+    for key, value in data.items():
+        if key not in known:
+            raise ConfigError(f"unknown config key {path + key!r}")
+        current = getattr(obj, key)
+        if is_dataclass(current) and not isinstance(current, type):
+            _apply(current, value, f"{path}{key}.")
+        else:
+            setattr(obj, key, value)
+
+
+def load_config(path: str | os.PathLike[str] | None = None, overrides: dict[str, Any] | None = None) -> Config:
+    """Build a Config from defaults, then a TOML file, then a dict of overrides."""
+    cfg = Config()
+    if path:
+        text = Path(path).read_text(encoding="utf-8")
+        _apply(cfg, tomllib.loads(text))
+    if overrides:
+        _apply(cfg, overrides)
+    _validate(cfg)
+    return cfg
+
+
+def _validate(cfg: Config) -> None:
+    for v in cfg.universe.venues:
+        if v.lower() not in (BINANCE, COINBASE, KRAKEN):
+            raise ConfigError(f"unknown venue {v!r}")
+    if cfg.detection.max_quote_age_ms <= 0:
+        raise ConfigError("detection.max_quote_age_ms must be positive")
+    if cfg.detection.anchor_venue.lower() not in (BINANCE, COINBASE, KRAKEN):
+        raise ConfigError(f"unknown anchor_venue {cfg.detection.anchor_venue!r}")
+    if cfg.detection.max_plausible_net_edge_bps <= cfg.detection.min_net_edge_bps:
+        raise ConfigError("detection.max_plausible_net_edge_bps must exceed min_net_edge_bps")
+    if cfg.risk.max_notional_per_trade_usd <= 0:
+        raise ConfigError("risk.max_notional_per_trade_usd must be positive")
+    if not 0 < cfg.paper.fill_fraction <= 1:
+        raise ConfigError("paper.fill_fraction must be in (0, 1]")
+    if cfg.paper.slippage_bps < 0:
+        raise ConfigError("paper.slippage_bps must be >= 0")
+    if cfg.universe.top_n <= 0:
+        raise ConfigError("universe.top_n must be positive")
+
+
+def to_dict(cfg: Config) -> dict[str, Any]:
+    return dataclasses.asdict(cfg)
