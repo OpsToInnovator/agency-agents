@@ -985,6 +985,72 @@ def test_live_preflight_wants_the_declared_stake_on_the_exchange(monkeypatch):
         assert ex.capital_usd == 500.0
         return ex
 
-    short = run(staked(session("300")).preflight(["BTCUSDT"]))
-    assert len(short) == 1 and "below live.capital_usd (500.00)" in short[0]
-    assert run(staked(session("500")).preflight(["BTCUSDT"])) == []
+    # inside the 10% kill budget the stake may be down and still re-arm: a losing day, a crash,
+    # a reconciled halt or BNB held for fees must not lock the operator out
+    for free in ("500", "499.92", "495", "490", "460", "450"):
+        assert run(staked(session(free)).preflight(["BTCUSDT"])) == [], free
+    for free in ("449.98", "440", "300"):
+        short = run(staked(session(free)).preflight(["BTCUSDT"]))
+        assert len(short) == 1 and "below the kill floor 450.00" in short[0] and "do not restart" in short[0], free
+    # the message can never read "500.00 is below ... 500.00"
+    ex = BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=500.0, max_cumulative_loss_pct=0.0), "https://api.example",
+                             FEES, book, real_orders=False, session=session("499.999"), max_notional_usd=50.0)
+    assert run(ex.preflight(["BTCUSDT"])) == []
+
+
+def test_live_pre_send_failure_after_a_fill_books_the_half_cycle(monkeypatch, tmp_path):
+    """A full disk under the intent journal on leg 2 must not escape as a crash that books
+    nothing: the leg-1 fill is marked, the record is partial and the halt is sticky."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 1})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    orig = ex._journal
+    intents = []
+
+    def flaky_journal(entry):
+        if entry.get("kind") == "intent":
+            intents.append(entry)
+            if len(intents) == 2:
+                raise OSError(28, "No space left on device")
+        orig(entry)
+
+    ex._journal = flaky_journal
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "partial" and "before send" in rec.reason and len(rec.fills) == 1
+    assert rec.realized_pnl_usd == pytest.approx(-1.004, abs=0.01)  # the bought BTC marked, less the scheduled fee
+    assert ex.realized_pnl_usd == rec.realized_pnl_usd
+    assert risk.halted and risk.halt_sticky and "cycle aborted mid-way" in risk.halt_reason
+    assert sum(1 for c in session.calls if c[0] == "POST") == 1
+    # the same failure on the FIRST leg sent nothing: rejected, nothing booked, no halt
+    risk2 = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    ex2 = _live(book, FakeSession([TIME]), real=True, cfg_real=True, risk=risk2, tmp_path=tmp_path)
+
+    def dead_journal(entry):
+        raise OSError(28, "No space left on device")
+
+    ex2._journal = dead_journal
+    rec2 = run(ex2.execute(opp, 1000.0))
+    assert rec2.status == "rejected" and rec2.fills == [] and rec2.realized_pnl_usd == 0.0 and not risk2.halted
+
+
+def test_risk_drawdown_budget_counts_the_first_loss_and_rebases_each_day():
+    rm = RiskManager(RiskConfig(max_drawdown_pct=5.0, max_daily_loss_usd=1e9), DetectionConfig(), now=1000.0)
+    rm._roll_day(1000.0)
+    assert rm.note_pnl(-13.0, 500.0) is False and rm.peak_pnl_usd == 0.0  # the curve starts at zero
+    assert rm.note_pnl(-26.0, 500.0) is True and rm.halted and not rm.halt_sticky  # 26 > 5% of 500
+    # a first loss past the budget halts at once
+    fresh = RiskManager(RiskConfig(max_drawdown_pct=5.0, max_daily_loss_usd=1e9), DetectionConfig())
+    assert fresh.note_pnl(-30.0, 500.0) is True
+    # the UTC day rolls: the halt lifts and the budget re-bases to the day's opening PnL,
+    # exactly what a restart (executor PnL back to 0, peak seeded at 0) would grant
+    rm._roll_day(1000.0 + 86400)
+    assert not rm.halted and rm.peak_pnl_usd == -26.0
+    assert rm.note_pnl(-40.0, 500.0) is False  # 14 below the day's opening PnL
+    assert rm.note_pnl(-52.0, 500.0) is True  # 26 below it
+    # a run-up inside the day raises the peak as before
+    rm2 = RiskManager(RiskConfig(max_drawdown_pct=5.0, max_daily_loss_usd=1e9), DetectionConfig())
+    assert rm2.note_pnl(40.0, 500.0) is False and rm2.peak_pnl_usd == 40.0
+    assert rm2.note_pnl(16.0, 500.0) is False and rm2.note_pnl(14.0, 500.0) is True

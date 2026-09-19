@@ -216,6 +216,7 @@ class BinanceLiveExecutor:
         self.real_orders = bool(real_orders and cfg.real_orders)
         self.max_notional_usd = max_notional_usd
         self.capital_usd = float(cfg.capital_usd or 0.0)  # the engine measures the drawdown cap against this
+        self.max_cumulative_loss_pct = float(cfg.max_cumulative_loss_pct)
         self.intent_log = Path(intent_log) if intent_log else None
         self.trades = 0
         self.rejected = 0
@@ -271,9 +272,19 @@ class BinanceLiveExecutor:
             usdt = free.get("USDT", 0.0)
             if usdt < 2 * self.max_notional_usd:
                 problems.append(f"free USDT {usdt:.2f} is below 2x max notional ({2 * self.max_notional_usd:.2f})")
-            if self.capital_usd and usdt < self.capital_usd:
-                problems.append(f"free USDT {usdt:.2f} is below live.capital_usd ({self.capital_usd:.2f}): the stake the "
-                                f"drawdown cap is measured against is not on the exchange")
+            if self.capital_usd:
+                # The stake may be down by the kill budget and still re-arm (a restart after a
+                # losing day, a crash, or a reconciled halt); below that floor the cumulative
+                # loss rule has fired and the settings, not the balance, are what to change.
+                floor = self.capital_usd * (1.0 - self.max_cumulative_loss_pct / 100.0)
+                if usdt < floor - 0.01:
+                    problems.append(f"free USDT {usdt:.2f} is below the kill floor {floor:.2f} (live.capital_usd "
+                                    f"{self.capital_usd:.2f} less {self.max_cumulative_loss_pct:g}% max_cumulative_loss_pct): "
+                                    f"the cumulative loss budget is spent; do not restart on the same settings")
+                elif usdt < self.capital_usd - 0.01:
+                    log.warning("LIVE preflight: free USDT %.2f is %.2f below live.capital_usd %.2f (inside the %g%% kill "
+                                "budget); the drawdown cap is measured against the declared stake",
+                                usdt, self.capital_usd - usdt, self.capital_usd, self.max_cumulative_loss_pct)
         except Exception as exc:
             problems.append(f"cannot read account balances: {exc}")
         try:
@@ -418,37 +429,43 @@ class BinanceLiveExecutor:
         carry: float | None = None  # units of this leg's input asset delivered by the previous leg
         fee_rate = self.fees.taker(BINANCE)
         for i, leg in enumerate(opp.legs):
-            if self.risk is not None:
-                ok, reason = self.risk.allow_leg(time.time())
-                if not ok:
-                    return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {reason}")
-            gate = self._gate_leg(opp, i, min_edge_bps, now)
-            if gate:
-                return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {gate}")
-            market = self.book.market(BINANCE, leg.symbol)
-            if market is None:
-                return self._abort(opp, fills, deltas, now, f"unknown market {leg.symbol}")
-            q = self._current(leg.symbol, now)
-            limit_price = (q.ask if leg.side == "buy" else q.bid) if q else leg.price
-            if carry is None:
-                qty = leg.qty
-            elif leg.side == "sell":
-                qty = min(leg.qty, carry)
-            else:
-                # Binance takes the buy commission from the received asset, so the whole
-                # carry can be spent; round_step's ROUND_DOWN is the safety margin.
-                qty = min(leg.qty, carry / limit_price)
-            p_dec, q_dec, reason = size_order(market, limit_price, qty, leg.side)
-            if reason:
-                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {reason}")
-            client_id = f"arb{uuid.uuid4().hex[:24]}"
-            # LIMIT + IOC at the current touch: fills what is there at that price or better,
-            # never chases a thin book the way a MARKET order would.
-            params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "LIMIT", "timeInForce": "IOC",
-                      "price": format(p_dec, "f"), "quantity": format(q_dec, "f"),
-                      "newClientOrderId": client_id, "newOrderRespType": "FULL"}
-            self._journal({"ts": time.time(), "kind": "intent", "endpoint": self.endpoint, "real": self.real_orders,
-                           "client_id": client_id, "params": params, "opportunity": opp.description})
+            # Everything before the send is wrapped: after a filled leg, a failure here (a full
+            # disk under the intent journal, a sizing error) must book the known fills through
+            # _abort, never escape as a crash that books nothing.
+            try:
+                if self.risk is not None:
+                    ok, reason = self.risk.allow_leg(time.time())
+                    if not ok:
+                        return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {reason}")
+                gate = self._gate_leg(opp, i, min_edge_bps, now)
+                if gate:
+                    return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {gate}")
+                market = self.book.market(BINANCE, leg.symbol)
+                if market is None:
+                    return self._abort(opp, fills, deltas, now, f"unknown market {leg.symbol}")
+                q = self._current(leg.symbol, now)
+                limit_price = (q.ask if leg.side == "buy" else q.bid) if q else leg.price
+                if carry is None:
+                    qty = leg.qty
+                elif leg.side == "sell":
+                    qty = min(leg.qty, carry)
+                else:
+                    # Binance takes the buy commission from the received asset, so the whole
+                    # carry can be spent; round_step's ROUND_DOWN is the safety margin.
+                    qty = min(leg.qty, carry / limit_price)
+                p_dec, q_dec, reason = size_order(market, limit_price, qty, leg.side)
+                if reason:
+                    return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {reason}")
+                client_id = f"arb{uuid.uuid4().hex[:24]}"
+                # LIMIT + IOC at the current touch: fills what is there at that price or better,
+                # never chases a thin book the way a MARKET order would.
+                params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "LIMIT", "timeInForce": "IOC",
+                          "price": format(p_dec, "f"), "quantity": format(q_dec, "f"),
+                          "newClientOrderId": client_id, "newOrderRespType": "FULL"}
+                self._journal({"ts": time.time(), "kind": "intent", "endpoint": self.endpoint, "real": self.real_orders,
+                               "client_id": client_id, "params": params, "opportunity": opp.description})
+            except Exception as exc:  # the journal may be what failed: do not try to journal the error
+                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {exc!r} before send")
             try:
                 payload = await self._send(params, client_id)
             except asyncio.CancelledError:

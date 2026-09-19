@@ -5,10 +5,10 @@
 #
 #   day 0   python3 -m arbbot preflight --connectivity --config live.toml      (from the trading machine)
 #           python3 -m arbbot preflight --config live.toml                     (keys, balance, order/test)
-#   stage B python3 -m arbbot scan --live --config live.toml                   (validation-only orders, 1 day)
+#   stage B python3 -m arbbot scan --live --config live.toml 2>>live.log       (validation-only orders, 1 day)
 #   stage C set real_orders = true, then
-#           python3 -m arbbot scan --live --i-know-this-sends-real-orders --config live.toml
-#   weekly  python3 scripts/rollup.py logs/live --scan-log live.log            (the same scorecard, on live fills)
+#           python3 -m arbbot scan --live --i-know-this-sends-real-orders --config live.toml 2>>live.log
+#   weekly  python3 scripts/rollup.py logs/live --scan-log live.log --capital-usd 500 --cooldown-s 5
 
 [universe]
 top_n = 60
@@ -35,13 +35,15 @@ cooldown_s = 5.0
 max_detect_latency_ms = 250.0
 kill_switch_file = "STOP"           # touch STOP to stop trading; the kill rule below says when
 min_profit_usd = 0.005              # 1 bps of a US$50 trade; below that a fill is three CGT events for nothing
-max_drawdown_pct = 5.0              # US$25 below the session's peak realized PnL, measured against live.capital_usd
+max_drawdown_pct = 5.0              # US$25 below the day's opening realized PnL or its intraday peak, against live.capital_usd;
+                                    # a fresh budget each UTC day and each process start
 state_file = "logs/live/risk_state.json"
 
 [live]
 enabled = true
 real_orders = false                 # stage B first (POST /api/v3/order/test); set true for stage C
 capital_usd = 500.0                 # the stake at risk: the drawdown cap is a percentage of this
+max_cumulative_loss_pct = 10.0      # the kill rule: preflight refuses to re-arm once free USDT is below 450
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

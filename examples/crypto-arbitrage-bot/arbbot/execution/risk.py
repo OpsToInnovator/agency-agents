@@ -36,8 +36,12 @@ class RiskManager:
         self.halt_sticky = False  # sticky halts (live errors) survive the day roll; daily-cap halts do not
         # Drawdown is measured on this session's own PnL curve against the capital
         # in play, so it is comparable across restarts (equity is not: paper runs
-        # restart from their configured balances). Not persisted on purpose.
+        # restart from their configured balances). The budget is per UTC day and per
+        # process: the curve starts at 0 when a process starts and re-bases to the
+        # day's opening PnL when the day rolls, so a restart and a day roll agree.
+        # Not persisted on purpose.
         self.peak_pnl_usd: float | None = None
+        self.last_pnl_usd: float | None = None
         self.rejections: Counter[str] = Counter()
         if self.state_file is not None:
             self._load_state(now)
@@ -89,6 +93,8 @@ class RiskManager:
             if self.halted and not self.halt_sticky:
                 self.halted = False
                 self.halt_reason = ""
+            if self.peak_pnl_usd is not None:
+                self.peak_pnl_usd = self.last_pnl_usd  # a fresh drawdown budget from the day's opening PnL
             self._save_state()
 
     def halt(self, reason: str, sticky: bool = True) -> None:
@@ -169,8 +175,12 @@ class RiskManager:
 
     def note_pnl(self, pnl_usd: float, capital_usd: float) -> bool:
         """Track the peak of the session PnL curve; halt (non-sticky, lifts with the
-        UTC day) when PnL has fallen max_drawdown_pct of the capital below that peak."""
-        if self.peak_pnl_usd is None or pnl_usd > self.peak_pnl_usd:
+        UTC day) when PnL has fallen max_drawdown_pct of the capital below that peak.
+        The curve starts at zero, so a first loss counts against the budget."""
+        self.last_pnl_usd = pnl_usd
+        if self.peak_pnl_usd is None:
+            self.peak_pnl_usd = 0.0
+        if pnl_usd > self.peak_pnl_usd:
             self.peak_pnl_usd = pnl_usd
             return False
         pct = self.cfg.max_drawdown_pct

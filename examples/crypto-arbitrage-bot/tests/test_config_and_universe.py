@@ -160,3 +160,26 @@ def test_live_example_config_is_a_stage_b_start_sized_to_the_stake():
     assert cfg.universe.auto_discover is True  # live orders need exchange filters
     with pytest.raises(ConfigError):
         load_config(None, {"live": {"capital_usd": -1.0}})
+
+
+def test_example_config_lists_every_key():
+    """config.example.toml promises "every key ... these are the defaults": keep it true."""
+    import tomllib
+    from dataclasses import fields, is_dataclass
+
+    from arbbot.config import Config
+
+    data = tomllib.loads((ROOT / "config.example.toml").read_text(encoding="utf-8"))
+    for section in fields(Config):
+        sub = getattr(Config(), section.name)
+        assert is_dataclass(sub)
+        assert set(data[section.name]) == {f.name for f in fields(sub)}, section.name
+
+
+def test_live_cumulative_loss_budget_validates():
+    from arbbot.config import ConfigError, load_config
+
+    assert load_config(None, {"live": {"max_cumulative_loss_pct": 0.0}}).live.max_cumulative_loss_pct == 0.0
+    for bad in (-1.0, 100.5):
+        with pytest.raises(ConfigError):
+            load_config(None, {"live": {"max_cumulative_loss_pct": bad}})

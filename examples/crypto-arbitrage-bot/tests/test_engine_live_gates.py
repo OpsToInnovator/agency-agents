@@ -159,10 +159,10 @@ def _drive(ex, cfg_overrides):
 def test_live_drawdown_cap_measures_realized_pnl_against_the_configured_stake():
     ex = StakedExecutor(13.0)
     rep, risk = _drive(ex, {})
-    # the peak is set by the first fill (-13); the third fill sits 26 below it, past 5% of US$500
-    assert [t.status for t in rep.trades] == ["filled", "filled", "filled"]
+    # the curve starts at 0; the second fill sits 26 below it, past 5% of US$500
+    assert [t.status for t in rep.trades] == ["filled", "filled"]
     assert risk.halted and "drawdown cap hit" in risk.halt_reason and "5.20% of capital" in risk.halt_reason
-    assert len(ex.executed) == 3 and any("drawdown cap hit" in r[1] for r in rep.rejected)  # the fourth was refused
+    assert len(ex.executed) == 2 and any("drawdown cap hit" in r[1] for r in rep.rejected)  # the rest were refused
 
 
 def test_live_drawdown_cap_stays_off_without_a_configured_stake():
