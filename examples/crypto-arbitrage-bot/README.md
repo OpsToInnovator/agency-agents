@@ -314,12 +314,12 @@ depeg risk), Kraken+ zero fees exclude Kraken Pro and API trades, OKX "global" t
 not what an Australian account gets, and VIP tiers need US$4B of monthly volume.
 
 **Step 0, read your real fees (2 h).** Create read-only API keys with no withdrawal
-permission and run `scripts/read_fees.py` with the symbols you intend to trade. It
+permission and run `python3 scripts/read_fees.py` with the symbols you intend to trade. It
 prints a `[venues] taker_fee_bps` block from the account endpoints (Binance fees are
 per symbol). Paste it into `measure7d.toml`; configuring anything lower than what the
 APIs return reproduces the viral-post fee model.
 
-**Step 0b, measure your latency (24 h).** Run `scripts/rtt_probe.sh >> rtt.log &` on
+**Step 0b, measure your latency (24 h).** Run `bash scripts/rtt_probe.sh >> rtt.log &` on
 the machine that will trade. It logs the warm-connection round trip to each venue once a
 minute. Put the p90 of the slowest venue you trade into `paper.assumed_rtt_ms`, or the
 arrival model flatters you. Check `api.binance.com` answers HTTP 200 from that machine's
@@ -345,18 +345,24 @@ python3 scripts/rollup.py logs/measure7d --scan-log measure7d.log --rtt-log rtt.
 It prints per UTC day and per kind what was observed, what the cooldown would let
 through, settled trades by status, realized and promised PnL, latency tax, fill and
 one-legged rates, dollar-weighted edge and PnL by asset, then scores the GO criteria on
-**triangular only**, because that is the only strategy the live path can send. All must
-pass over 7 complete UTC days: (G1) ≥ 140 settled paper trades; (G2) realized ≥ +US$2/day
+**triangular only**, because that is the only strategy the live path can send. A day
+counts only when the runs were up for at least 95 % of it, so a short sample is never
+scored as a day, and a venue that answers the latency probe with HTTP 451 or 403 is
+reported as blocked rather than fast. All must pass over 7 complete, consecutive UTC
+days: (G1) ≥ 140 settled paper trades; (G2) realized ≥ +US$2/day
 mean and ≥ 0 on at least 5 days; (G3) dollar-weighted realized edge ≥ +1 bps; (G4) fill
 rate ≥ 60 % and one-legged rate ≤ 10 %; (G5) realized ≥ half of promised; (G6) t-stat of
-daily PnL ≥ 2; (G7) no asset over 40 % of PnL, ≤ 20 % from assets flagged by the anomaly
-detector in the same hour, none from quarantined tickers; (G8) drawdown ≤ 2 % of paper
+daily PnL ≥ 2; (G7) no asset over 40 % of PnL, ≤ 20 % from assets the anomaly detector
+flagged as price_error, venue_disagreement, crossed_book, identity_mismatch or
+implausible_edge in the same UTC hour (a jump is a price move, not bad data, so it does not
+count), none from quarantined tickers; (G8) drawdown ≤ 2 % of paper
 capital and no daily-loss halts; (G9) fewer than 5 disconnects per venue per day, no
-handler errors, stale share under 30 %; (G10, manual) replaying recorded tapes with
-`scripts/sweep.py --fee-scale 1.25 --slippage 5` still shows positive realized PnL. Any
-single failure is NO-GO. The bar (US$2/day on about US$1,000 in play) is roughly 50 %
-annualised, the least that justifies exchange, key and operational risk over a savings
-account.
+handler errors, stale share under 30 %; (G10, manual) replaying the run's recorded tapes
+with `python3 scripts/sweep.py <tape> --config measure7d.toml --fee-scale 1.25 --slippage 5`
+(the run's own fees, fill fraction and RTT, stressed by 25 % more fee and 5 bps slippage)
+still shows positive realized PnL. Any single failure is NO-GO. The bar (US$2/day on about
+US$1,000 in play) is roughly 70 % annualised, the least that justifies exchange, key and
+operational risk over a savings account.
 
 **Step 3, only on GO: staged live on Binance triangles.** Stage A: KYC'd account, API key
 restricted to spot trading, IP-whitelisted, withdrawals off, `preflight` prints OK.

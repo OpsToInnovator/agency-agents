@@ -184,6 +184,36 @@ def test_sweep_script_runs_a_small_grid(capsys):
     # the README's sweep table quotes this row exactly: "profit" appears when the fees stop being real
     assert (no_fee["net_positive"], no_fee["sent"], no_fee["filled"], no_fee["realized_usd"]) == (307, 307, 296, 5.448)
     assert no_fee["unknown_symbol_rows"] == 0
+    assert full_fee["taker_fee_bps"] == {"binance": 10.0, "coinbase": 60.0, "kraken": 80.0}
+
+
+def test_sweep_with_a_config_scales_that_runs_fees_and_keeps_its_settings(tmp_path, capsys):
+    """The README's G10 check replays the measurement run's own fees and fill fraction, stressed."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sweep", Path(__file__).resolve().parents[1] / "scripts" / "sweep.py")
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+    cfg = tmp_path / "run.toml"
+    cfg.write_text("[venues]\ntaker_fee_bps = { binance = 20 }\n[paper]\nfill_fraction = 0.5\nslippage_bps = 3.0\n"
+                   "[detection]\nmin_net_edge_bps = 4.0\n", encoding="utf-8")
+    rc = sweep.main([str(FIXTURE), "--config", str(cfg), "--fee-scale", "1.25", "--json"])
+    assert rc == 0
+    rows = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+    assert len(rows) == 1
+    row = rows[0]
+    # the config's table is what gets scaled, venues the file omits included
+    assert row["taker_fee_bps"] == {"binance": 25.0, "coinbase": 75.0, "kraken": 100.0}
+    # settings the flags did not name come from the file, not from the sweep's generous defaults
+    assert row["slippage_bps"] == 3.0 and row["min_edge_bps"] == 4.0 and row["haircut_bps"] == 5.0
+    assert row["gross_positive"] == 407 and row["net_positive"] == 0
+    # explicit flags still override the file
+    rc = sweep.main([str(FIXTURE), "--config", str(cfg), "--fee-scale", "0", "--slippage", "0", "--min-edge", "1", "--json"])
+    assert rc == 0
+    row = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")][0]
+    assert row["slippage_bps"] == 0.0 and row["min_edge_bps"] == 1.0 and row["taker_fee_bps"]["binance"] == 0.0
+    # half the displayed size is fillable under this config, so fewer paper trades fill than in the no-config zero-fee row
+    assert row["filled"] < 296
 
 
 def test_cli_refuses_live_without_config(tmp_path, capsys):

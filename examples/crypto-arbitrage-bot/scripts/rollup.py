@@ -2,16 +2,21 @@
 """Daily roll-up and GO / NO-GO scorecard for a multi-day paper measurement run.
 
     python3 scripts/rollup.py logs/measure7d [--scan-log measure7d.log] [--rtt-log rtt.log]
-                              [--days 7] [--cooldown-s 2] [--capital-usd 1000] [--include-today] [--json]
+                              [--days 7] [--cooldown-s 2] [--capital-usd 1000]
+                              [--min-day-coverage 0.95] [--include-today] [--json]
 
 Every `scan` invocation writes <log_dir>/<run_id>/{opportunities,anomalies,trades}.jsonl. This
 script pools all run directories under the given path and prints, per UTC day and per
 opportunity kind: net-positive observations, opportunities that would be SENT after the
 per-key cooldown, settled paper trades by status, realized and promised PnL, the latency
 tax (promised - realized), fill rate, one-legged rate, dollar-weighted realized edge in
-bps, PnL by asset and the share of PnL on assets the anomaly detector flagged in the
-same UTC hour. It then scores the GO criteria from the README on TRIANGULAR only (the
-only strategy the live path can execute) over the last N complete UTC days.
+bps, PnL by asset and the share of PnL on assets the anomaly detector flagged as bad data
+(price_error, venue_disagreement, crossed_book, identity_mismatch or implausible_edge; a
+"jump" is a price move, not evidence of bad data) in the same UTC hour. It then scores the
+GO criteria from the README on TRIANGULAR only (the only strategy the live path can
+execute) over the last N complete, consecutive UTC days. A day counts as complete only when
+the runs' uptime covers at least --min-day-coverage of it, so a 10-minute sample is never
+scored as a day.
 
 Nothing here is a profit forecast: it reports what the paper executor booked.
 """
@@ -25,14 +30,21 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 SETTLED = ("filled", "partial", "missed")
-FLAG_SUBTYPES = frozenset({"venue_disagreement", "price_error", "identity_mismatch", "implausible_edge"})
+# Subtypes that mean "bad data on this asset". "jump" is left out on purpose: a move against an
+# asset's own EWMA is a price move, and excluding it would hide every volatile asset from G7.
+FLAG_SUBTYPES = frozenset({"venue_disagreement", "price_error", "crossed_book", "identity_mismatch", "implausible_edge"})
+TRIANGLE_QUOTES = frozenset({"BTC", "ETH", "BNB"})  # cfg.universe.triangle_quotes default
+STABLES = frozenset({"USD", "USDT", "USDC", "FDUSD"})  # models.USD_FAMILY
 QUOTE_SUFFIXES = ("USDT", "FDUSD", "USDC", "USD", "BTC", "ETH", "BNB", "EUR", "GBP", "AUD")
+DAY_S = 86400.0
 MANUAL = None  # criterion outcome: not measurable from the logs
+# engine._process rewrites an over-threshold opportunity as "<kind> net <x> bps is implausible: <original>"
+_IMPLAUSIBLE = re.compile(r"^(triangular|cross_exchange) net \S+ bps is implausible: ")
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +83,38 @@ def find_runs(root: Path) -> list[Path]:
     return sorted(d for d in root.iterdir() if d.is_dir() and any((d / n).exists() for n in names))
 
 
+def run_interval(run: Path, row_ts: list[float]) -> tuple[float, float] | None:
+    """[start, end] of one scan process: the run id is its UTC start time (report.py), the end
+    is the last row it wrote. A directory with an unparseable name starts at its first row."""
+    try:
+        start = datetime.strptime(run.name, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        start = min(row_ts) if row_ts else None
+    if start is None:
+        return None
+    end = max(row_ts) if row_ts else start
+    return (start, max(start, end))
+
+
+def day_coverage(intervals: list[tuple[float, float]]) -> dict[str, float]:
+    """Seconds of each UTC day covered by the union of the run intervals."""
+    merged: list[list[float]] = []
+    for s, e in sorted(intervals):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    cov: dict[str, float] = defaultdict(float)
+    for s, e in merged:
+        cur = s
+        while cur < e:
+            day_end = cur - (cur % DAY_S) + DAY_S
+            seg_end = min(e, day_end)
+            cov[utc_day(cur)] += seg_end - cur
+            cur = seg_end
+    return dict(cov)
+
+
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
@@ -102,8 +146,12 @@ def base_of_symbol(symbol: str) -> str:
 def assets_of(opp: dict[str, Any]) -> list[str]:
     """Assets an opportunity is exposed to; the first one is the attribution asset.
 
-    cross_exchange: "AR: buy kraken AR/USD @ ..."          -> ["AR"]
-    triangular:     "binance USDT -> UNI -> BTC -> USDT: ..." -> ["UNI", "BTC"] (start asset excluded)
+    cross_exchange: "AR: buy kraken AR/USD @ ..."             -> ["AR"]
+    triangular:     "binance USDT -> UNI -> BTC -> USDT: ..."  -> ["UNI", "BTC"]
+                    "binance USDT -> BTC -> UNI -> USDT: ..."  -> ["UNI", "BTC"]
+    The detector enumerates both directions of a triangle as separate cycles, so the
+    attribution asset is chosen independently of direction: the non-quote asset, or for a
+    quote-only triangle (BTC/ETH) the alphabetically first member.
     """
     desc = opp.get("description", "") or ""
     kind = opp.get("kind")
@@ -115,7 +163,9 @@ def assets_of(opp: dict[str, Any]) -> list[str]:
             start = path[0]
             middle = [a for a in path[1:-1] if a and a != start]
             if middle:
-                return middle
+                alts = [a for a in middle if a not in TRIANGLE_QUOTES and a not in STABLES]
+                pick = alts[0] if alts else min(middle)
+                return [pick] + [a for a in middle if a != pick]
     m = re.match(r"([A-Z0-9]+):", desc)
     if m:
         return [m.group(1)]
@@ -125,16 +175,32 @@ def assets_of(opp: dict[str, Any]) -> list[str]:
     return ["?"]
 
 
-def anomaly_asset(row: dict[str, Any]) -> str | None:
-    """"binance UNIBTC jump: ..." -> UNI ; "ONE identity_mismatch: ..." -> ONE."""
+def anomaly_assets(row: dict[str, Any]) -> list[str]:
+    """Every asset an anomaly row exposes.
+
+    "binance UNIBTC jump: ..."                                  -> ["UNI"]
+    "ONE identity_mismatch: ..."                                -> ["ONE"]
+    "triangular net +480.0 bps is implausible: binance USDT -> UNI -> BTC -> USDT: ..." -> ["UNI", "BTC"]
+    (the engine rewrites the whole opportunity as an anomaly with kind="anomaly" and no legs,
+    so the kind and assets come from the wrapped description)
+    """
     desc = row.get("description", "") or ""
+    m = _IMPLAUSIBLE.match(desc)
+    if m:
+        assets = assets_of({"kind": m.group(1), "description": desc[m.end():], "legs": []})
+        return [a for a in assets if a != "?"]
     m = re.match(r"([A-Z0-9]+) identity_mismatch", desc)
     if m:
-        return m.group(1)
+        return [m.group(1)]
     m = re.match(r"(?:binance|coinbase|kraken) (\S+) ", desc)
     if m:
-        return base_of_symbol(m.group(1))
-    return None
+        return [base_of_symbol(m.group(1))]
+    return []
+
+
+def anomaly_asset(row: dict[str, Any]) -> str | None:
+    assets = anomaly_assets(row)
+    return assets[0] if assets else None
 
 
 def sendable(opps: list[dict[str, Any]], cooldown_s: float) -> list[dict[str, Any]]:
@@ -240,12 +306,13 @@ def rollup(opps: list[dict[str, Any]], trades: list[dict[str, Any]], anomalies: 
     quarantined: set[str] = set()
     for a in anomalies:
         subtype = (a.get("extra") or {}).get("subtype")
-        asset = anomaly_asset(a)
-        if not asset or subtype not in FLAG_SUBTYPES:
+        if subtype not in FLAG_SUBTYPES:
             continue
-        flagged_hours[asset].add(utc_hour(float(a.get("ts", 0.0))))
-        if subtype == "identity_mismatch":
-            quarantined.add(asset)
+        hour = utc_hour(float(a.get("ts", 0.0)))
+        for asset in anomaly_assets(a):
+            flagged_hours[asset].add(hour)
+            if subtype == "identity_mismatch":
+                quarantined.add(asset)
 
     for t in sorted(trades, key=lambda r: r.get("ts", 0.0)):
         opp = t.get("opportunity") or {}
@@ -274,6 +341,7 @@ def rollup(opps: list[dict[str, Any]], trades: list[dict[str, Any]], anomalies: 
 # ---------------------------------------------------------------------------
 # scan-log and rtt-log parsing (optional inputs)
 # ---------------------------------------------------------------------------
+_START = re.compile(r"arbbot \S+ starting in .*? mode")
 _SUMMARY = re.compile(r"\[\s*(\d+)s\] quotes=.*?markets=(\d+) stale=(\d+) \| gross>0: (.*?) \|")
 _DISCONNECTS = re.compile(r"disconnects: (.*)$")
 _HANDLER = re.compile(r"handler errors (\d+)")
@@ -281,20 +349,29 @@ _HALT = re.compile(r"TRADING HALTED: (.*)$")
 
 
 def parse_scan_log(path: Path) -> dict[str, Any]:
-    """Cumulative counters from the scan's stderr. Runs restart, so a counter that goes
-    backwards starts a new segment and segments are summed."""
+    """Counters from the scan's stderr. Each process logs one "arbbot ... starting in ... mode"
+    line, which starts a new segment; cumulative counters are taken at their maximum within a
+    segment and summed across segments. Logs without start lines (rotated or truncated) fall
+    back to "elapsed went backwards" as the segment boundary."""
     gross: Counter = Counter()
     seg_gross: Counter = Counter()
     last_elapsed = -1
+    saw_start = False
     stale_shares: list[float] = []
     disconnects: Counter = Counter()
     handler_errors = 0
     halts: list[str] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if _START.search(line):
+            gross.update(seg_gross)
+            seg_gross = Counter()
+            last_elapsed = -1
+            saw_start = True
+            continue
         m = _SUMMARY.search(line)
         if m:
             elapsed = int(m.group(1))
-            if elapsed < last_elapsed:
+            if not saw_start and elapsed < last_elapsed:
                 gross.update(seg_gross)
                 seg_gross = Counter()
             last_elapsed = elapsed
@@ -305,7 +382,7 @@ def parse_scan_log(path: Path) -> dict[str, Any]:
                 if "=" in part:
                     k, v = part.split("=", 1)
                     if v.isdigit():
-                        seg_gross[k] = int(v)  # cumulative within the segment: keep the latest
+                        seg_gross[k] = max(seg_gross[k], int(v))  # cumulative within a run
             continue
         m = _DISCONNECTS.search(line)
         if m:
@@ -334,19 +411,38 @@ def parse_scan_log(path: Path) -> dict[str, Any]:
     }
 
 
-def parse_rtt_log(path: Path) -> dict[str, dict[str, float]]:
-    """rtt_probe.sh lines: `<ts> <venue> warm_ms <n> total_ms <n> http <code>`."""
+def parse_rtt_log(path: Path) -> dict[str, dict[str, Any]]:
+    """rtt_probe.sh lines: `<ts> <venue> warm_ms <n> total_ms <n> http <code>`.
+
+    Only a 2xx answer is a round trip to the API. A numeric time with a 451/403 code is the
+    edge refusing the request (counted as `blocked`); nan or 000 is a curl failure (`failed`).
+    Every venue seen is returned, so a fully blocked venue shows up with n=0.
+    """
     warm: dict[str, list[float]] = defaultdict(list)
+    blocked: Counter = Counter()
+    failed: Counter = Counter()
+    seen: list[str] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.split()
-        if len(parts) >= 4 and parts[2] == "warm_ms":
-            try:
-                value = float(parts[3])
-            except ValueError:
-                continue
-            if not math.isnan(value):  # "nan" = the probe failed
-                warm[parts[1]].append(value)
-    return {v: {"n": len(xs), "p50_ms": percentile(xs, 0.5), "p90_ms": percentile(xs, 0.9)} for v, xs in warm.items() if xs}
+        if len(parts) < 4 or parts[2] != "warm_ms":
+            continue
+        venue = parts[1]
+        if venue not in seen:
+            seen.append(venue)
+        code = parts[7] if len(parts) >= 8 and parts[6] == "http" else "200"  # older probe lines had no code
+        try:
+            value = float(parts[3])
+        except ValueError:
+            failed[venue] += 1
+            continue
+        if math.isnan(value) or code == "000":
+            failed[venue] += 1
+        elif not code.startswith("2"):
+            blocked[venue] += 1
+        else:
+            warm[venue].append(value)
+    return {v: {"n": len(warm[v]), "p50_ms": percentile(warm[v], 0.5), "p90_ms": percentile(warm[v], 0.9),
+                "blocked": blocked[v], "failed": failed[v]} for v in seen}
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +458,10 @@ class Criterion:
     @property
     def label(self) -> str:
         return {True: "PASS", False: "FAIL", None: "NOT MEASURED"}[self.passed]
+
+
+G7_TEXT = ("no asset > 40% of PnL, <= 20% from assets flagged price_error / venue_disagreement / crossed_book / "
+           "identity_mismatch / implausible_edge in the same hour, 0 from quarantined tickers")
 
 
 def scorecard(days: list[DayKind], capital_usd: float, n_days: int, ops: dict[str, Any] | None,
@@ -416,7 +516,7 @@ def scorecard(days: list[DayKind], capital_usd: float, n_days: int, ops: dict[st
     flagged = sum(d.flagged_pnl for d in days)
     flagged_share = flagged / total if total > 0 else float("nan")
     quarantined = sum(d.quarantined_pnl for d in days)
-    crit.append(Criterion("G7", "no asset > 40% of PnL, <= 20% from assets flagged the same hour, 0 from quarantined tickers",
+    crit.append(Criterion("G7", G7_TEXT,
                           total > 0 and top_share <= 0.40 and flagged_share <= 0.20 and abs(quarantined) < 1e-9,
                           f"top asset {top_asset} {top_share:.0%}, flagged {flagged_share:.0%}, quarantined {quarantined:+.4f} USD"
                           if total > 0 else "no positive PnL to attribute"))
@@ -439,8 +539,8 @@ def scorecard(days: list[DayKind], capital_usd: float, n_days: int, ops: dict[st
         crit.append(Criterion("G9", "ops: < 5 disconnects/day/venue, 0 handler errors, stale share < 30%", ok,
                               f"worst venue {worst_venue:.1f} disconnects/day, {ops['handler_errors']} handler errors, "
                               f"stale share {stale:.0%}" if not math.isnan(stale) else "no summary lines found in the scan log"))
-    crit.append(Criterion("G10", "replaying the recorded 1 h tapes at slippage 5 bps and fees +25% still shows positive realized PnL",
-                          MANUAL, "run: python3 scripts/sweep.py <tape> --fee-scale 1.25 --slippage 5"))
+    crit.append(Criterion("G10", "replaying the run's recorded tapes at fees +25% and slippage 5 bps still shows positive realized PnL",
+                          MANUAL, "run: python3 scripts/sweep.py <tape> --config measure7d.toml --fee-scale 1.25 --slippage 5"))
     if any(c.passed is False for c in crit):
         verdict = "NO-GO"
     elif any(c.passed is None and c.code != "G10" for c in crit):
@@ -453,34 +553,66 @@ def scorecard(days: list[DayKind], capital_usd: float, n_days: int, ops: dict[st
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def _consecutive(days: list[str]) -> bool:
+    ords = [date.fromisoformat(d).toordinal() for d in days]
+    return all(b - a == 1 for a, b in zip(ords, ords[1:]))
+
+
 def build_report(root: Path, days: int, cooldown_s: float, capital_usd: float, include_today: bool,
-                 scan_log: Path | None, rtt_log: Path | None, today: str | None = None) -> dict[str, Any]:
+                 scan_log: Path | None, rtt_log: Path | None, today: str | None = None,
+                 min_day_coverage: float = 0.95) -> dict[str, Any]:
     runs = find_runs(root)
     opps: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []
     anomalies: list[dict[str, Any]] = []
+    intervals: list[tuple[float, float]] = []
     malformed = 0
     for run in runs:
+        row_ts: list[float] = []
         for name, sink in (("opportunities.jsonl", opps), ("trades.jsonl", trades), ("anomalies.jsonl", anomalies)):
             rows, bad = load_jsonl(run / name)
             sink.extend(rows)
             malformed += bad
+            row_ts.extend(float(r["ts"]) for r in rows if isinstance(r.get("ts"), (int, float)))
+        iv = run_interval(run, row_ts)
+        if iv is not None:
+            intervals.append(iv)
     table = rollup(opps, trades, anomalies, cooldown_s)
     ops = parse_scan_log(scan_log) if scan_log else None
     rtt = parse_rtt_log(rtt_log) if rtt_log else None
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    all_days = sorted({d for d, _ in table})
-    complete = [d for d in all_days if include_today or d < today]
+    coverage = day_coverage(intervals)
+    all_days = sorted({d for d, _ in table} | set(coverage))
+    complete: list[str] = []
+    partial: dict[str, float] = {}
+    for d in all_days:
+        if d > today:
+            continue
+        if d == today:
+            if include_today:
+                complete.append(d)
+            continue
+        if coverage.get(d, 0.0) >= min_day_coverage * DAY_S:
+            complete.append(d)
+        else:
+            partial[d] = round(coverage.get(d, 0.0) / 3600.0, 2)
     window = complete[-days:]
     tri = [dk for (d, k), dk in table.items() if k == "triangular" and d in window]
     crit, verdict = scorecard(tri, capital_usd, days, ops)
+    if len(window) < days:
+        verdict = f"INCOMPLETE: {len(window)} of {days} complete UTC day(s) so far"
+        if partial:
+            verdict += " (partial days excluded: " + ", ".join(f"{d} {h:g} h" for d, h in partial.items()) + ")"
+    elif not _consecutive(window):
+        verdict = "INCOMPLETE: the last " + str(days) + " complete days are not consecutive (" + ", ".join(window) + ")"
     return {
         "runs": [str(r) for r in runs], "malformed_rows": malformed,
-        "days_seen": all_days, "window": window, "days_required": days,
+        "days_seen": all_days, "coverage_hours": {d: round(s / 3600.0, 2) for d, s in sorted(coverage.items())},
+        "partial_days": partial, "window": window, "days_required": days,
         "daily": [table[k].to_dict() for k in sorted(table)],
         "ops": ops, "rtt": rtt,
         "scorecard": [{"code": c.code, "criterion": c.text, "result": c.label, "detail": c.detail} for c in crit],
-        "verdict": verdict if len(window) >= days else f"INCOMPLETE: {len(window)} of {days} complete UTC day(s) so far",
+        "verdict": verdict,
     }
 
 
@@ -488,10 +620,23 @@ def _fmt(x: float, spec: str = ".4f") -> str:
     return "n/a" if isinstance(x, float) and math.isnan(x) else format(x, spec)
 
 
+def _jsonable(x: Any) -> Any:
+    """NaN and inf are not JSON; emit null so --json output parses everywhere."""
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
+    if isinstance(x, dict):
+        return {k: _jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_jsonable(v) for v in x]
+    return x
+
+
 def print_report(rep: dict[str, Any]) -> None:
     print(f"runs: {len(rep['runs'])}   malformed rows skipped: {rep['malformed_rows']}   "
           f"days seen: {', '.join(rep['days_seen']) or '-'}")
     print(f"scoring window ({rep['days_required']} complete UTC days): {', '.join(rep['window']) or '-'}")
+    if rep["partial_days"]:
+        print("excluded as partial (uptime hours): " + ", ".join(f"{d} {h:g} h" for d, h in rep["partial_days"].items()))
     print()
     hdr = f"{'day':10} {'kind':14} {'obs':>7} {'sendable':>8} {'settled':>7} {'filled':>6} {'partial':>7} {'missed':>6} " \
           f"{'realized':>10} {'promised':>10} {'lat.tax':>9} {'fill%':>6} {'1-leg%':>6} {'bps':>7} {'flagged$':>9}"
@@ -514,8 +659,13 @@ def print_report(rep: dict[str, Any]) -> None:
               f"disconnects {o['disconnects']}, handler errors {o['handler_errors']}, halts {len(o['halts'])} "
               f"({o['daily_loss_halts']} daily-loss)")
     if rep["rtt"]:
-        print("rtt (warm, ms): " + ", ".join(f"{v} p50={r['p50_ms']:.0f} p90={r['p90_ms']:.0f} (n={r['n']})"
-                                             for v, r in sorted(rep["rtt"].items())))
+        print("rtt (warm, ms): " + ", ".join(
+            f"{v} p50={_fmt(r['p50_ms'], '.0f')} p90={_fmt(r['p90_ms'], '.0f')} (n={r['n']}, blocked={r['blocked']}, failed={r['failed']})"
+            for v, r in sorted(rep["rtt"].items())))
+        for v, r in sorted(rep["rtt"].items()):
+            if r["blocked"]:
+                print(f"WARNING: {v} answered non-2xx on {r['blocked']} probe(s); this machine may be geo-blocked "
+                      f"and its p90 is not a usable assumed_rtt_ms", file=sys.stderr)
     print()
     print("GO / NO-GO scorecard (triangular only, the strategy the live path can send):")
     for c in rep["scorecard"]:
@@ -534,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cooldown-s", type=float, default=2.0, help="risk.cooldown_s used in the run (default 2)")
     ap.add_argument("--capital-usd", type=float, default=1000.0,
                     help="paper capital in play for the drawdown test (default 1000 = one venue's starting quote)")
+    ap.add_argument("--min-day-coverage", type=float, default=0.95,
+                    help="fraction of a UTC day the runs must have been up for it to count as complete (default 0.95)")
     ap.add_argument("--include-today", action="store_true", help="score the current, incomplete UTC day too")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
@@ -545,9 +697,10 @@ def main(argv: list[str] | None = None) -> int:
         if p is not None and not p.exists():
             print(f"missing file: {p}", file=sys.stderr)
             return 2
-    rep = build_report(root, args.days, args.cooldown_s, args.capital_usd, args.include_today, args.scan_log, args.rtt_log)
+    rep = build_report(root, args.days, args.cooldown_s, args.capital_usd, args.include_today, args.scan_log, args.rtt_log,
+                       min_day_coverage=args.min_day_coverage)
     if args.json:
-        print(json.dumps(rep, indent=2, default=str))
+        print(json.dumps(_jsonable(rep), indent=2, default=str, allow_nan=False))
     else:
         print_report(rep)
     return 0
