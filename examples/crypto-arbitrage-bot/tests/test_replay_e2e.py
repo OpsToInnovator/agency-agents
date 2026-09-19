@@ -133,6 +133,21 @@ def test_replay_skips_malformed_rows_and_reports_them(tmp_path, capsys):
     assert rc == 0 and out["malformed_rows"] == 2 and out["quotes"] > 0 and out["feed_errors"] == {}
 
 
+def test_sweep_script_runs_a_small_grid(capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sweep", Path(__file__).resolve().parents[1] / "scripts" / "sweep.py")
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+    rc = sweep.main([str(FIXTURE), "--fee-scale", "1", "0", "--haircut", "0", "--slippage", "0", "--json"])
+    assert rc == 0
+    rows = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+    assert len(rows) == 2
+    full_fee, no_fee = rows
+    assert full_fee["net_positive"] == 0 and full_fee["filled"] == 0
+    assert no_fee["net_positive"] > 0  # "profit" appears exactly when the fees stop being real
+
+
 def test_cli_refuses_live_without_config(tmp_path, capsys):
     from arbbot.cli import cmd_scan
 

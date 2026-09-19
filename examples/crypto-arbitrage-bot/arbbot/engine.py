@@ -292,6 +292,11 @@ class Engine:
     def _finish_trade(self, record: TradeRecord, now: float) -> None:
         if not record.ts:
             record.ts = now
-        self.risk.on_settled(record, now)
+        equity = None
+        equity_fn = getattr(self.executor, "equity_usd", None)
+        if equity_fn is not None and record.status in ("filled", "partial"):
+            value, unmarked = equity_fn(now)
+            equity = value if not unmarked else None  # an unmarkable asset would fake a drawdown
+        self.risk.on_settled(record, now, equity_usd=equity)
         self.stats.trades_by_status[record.status] += 1
         self.reporter.on_trade(record)

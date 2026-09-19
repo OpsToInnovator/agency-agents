@@ -48,6 +48,7 @@ cooldown_s = 2.0              # per opportunity (same venues/symbols/sides)
 max_detect_latency_ms = 250.0
 kill_switch_file = "STOP"     # create this file to stop all trading instantly
 min_profit_usd = 0.05         # dust-sized "opportunities" are not actionable
+max_drawdown_pct = 5.0        # halt when equity is this far below its running peak (0 = off)
 state_file = "logs/risk_state.json"  # daily loss + halt state survive a restart (replay never uses it)
 
 [paper]

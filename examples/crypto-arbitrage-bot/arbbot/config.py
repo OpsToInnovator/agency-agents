@@ -80,6 +80,9 @@ class RiskConfig:
     max_detect_latency_ms: float = 250.0
     kill_switch_file: str = "STOP"
     min_profit_usd: float = 0.05  # dust-sized "opportunities" are not actionable
+    # Halt when equity falls this far below its running peak (a slow bleed that stays
+    # under the daily cap). 0 disables. Peak persists with the daily state.
+    max_drawdown_pct: float = 5.0
     # Daily realized loss and halt state persist here so a restart cannot reset the cap.
     state_file: str = "logs/risk_state.json"
 

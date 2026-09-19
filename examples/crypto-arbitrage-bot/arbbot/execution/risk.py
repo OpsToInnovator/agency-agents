@@ -34,6 +34,7 @@ class RiskManager:
         self.halted = False
         self.halt_reason = ""
         self.halt_sticky = False  # sticky halts (live errors) survive the day roll; daily-cap halts do not
+        self.peak_equity_usd: float | None = None
         self.rejections: Counter[str] = Counter()
         if self.state_file is not None:
             self._load_state(now)
@@ -51,6 +52,8 @@ class RiskManager:
         if data.get("day") == today:
             self.daily_realized_usd = float(data.get("daily_realized_usd", 0.0))
             self._day = today
+        if data.get("peak_equity_usd") is not None:
+            self.peak_equity_usd = float(data["peak_equity_usd"])
         if data.get("halt_sticky"):
             self.halted = True
             self.halt_sticky = True
@@ -66,7 +69,8 @@ class RiskManager:
         if self.state_file is None:
             return
         payload = {"day": self._day, "daily_realized_usd": round(self.daily_realized_usd, 8), "halted": self.halted,
-                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason}
+                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason,
+                   "peak_equity_usd": self.peak_equity_usd}
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".risk_state", dir=str(self.state_file.parent))
@@ -150,9 +154,28 @@ class RiskManager:
         self._trade_times.append(now)
         self._last_by_key[opp.key] = now
 
-    def on_settled(self, record: TradeRecord, now: float) -> None:
-        """Fills are known: book the realized PnL against the daily cap."""
+    def on_settled(self, record: TradeRecord, now: float, equity_usd: float | None = None) -> None:
+        """Fills are known: book the realized PnL against the daily cap and the
+        equity against the drawdown-from-peak cap."""
         self._roll_day(now)
+        changed = False
         if record.status in ("filled", "partial"):
             self.daily_realized_usd += record.realized_pnl_usd
+            changed = True
+        if equity_usd is not None and equity_usd > 0:
+            changed = self.note_equity(equity_usd) or changed
+        if changed:
             self._save_state()
+
+    def note_equity(self, equity_usd: float) -> bool:
+        """Track the running peak; halt (non-sticky, lifts with the UTC day) when
+        equity has fallen max_drawdown_pct below it. Returns True when state changed."""
+        if self.peak_equity_usd is None or equity_usd > self.peak_equity_usd:
+            self.peak_equity_usd = equity_usd
+            return True
+        pct = self.cfg.max_drawdown_pct
+        if pct > 0 and not self.halted and equity_usd < self.peak_equity_usd * (1.0 - pct / 100.0):
+            self.halt(f"drawdown cap hit: equity {equity_usd:,.2f} is {100 * (1 - equity_usd / self.peak_equity_usd):.2f}% "
+                      f"below peak {self.peak_equity_usd:,.2f}", sticky=False)
+            return True
+        return False

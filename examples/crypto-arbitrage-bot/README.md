@@ -79,6 +79,23 @@ The firms that do capture these gaps (Wintermute, Jump and friends) run co-locat
 market-making systems with sub-millisecond hedging and pay 0.02–0.05% in fees, not
 0.1–0.9%.
 
+### Where the "profit" comes from: the fee sweep
+
+`scripts/sweep.py` replays the bundled tape with the taker fees scaled down and
+prints what happens. Nothing is net-positive until the fees are switched off
+entirely, and even then two basis points of slippage turn the "profit" negative:
+
+| Taker fees (× retail) | Gross-positive | Net-positive | Paper orders sent | Filled | Realized (2 bps slippage) | Realized (no slippage) |
+|---|---|---|---|---|---|---|
+| 1.00 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
+| 0.50 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
+| 0.25 | 407 | 0 | 0 | 0 | $0.00 | $0.00 |
+| 0.00 (no haircut) | 407 | 307 | 341 | 67 | −$0.43 | +$0.40 |
+
+Every "this bot prints money" screenshot you will ever see lives in that last row: a fee
+assumption no retail account gets, no slippage, and fills that were never actually
+sent to a venue. Run it yourself: `python3 scripts/sweep.py`.
+
 ### What our own first live run "earned"
 
 The first 30-second paper-trading run of this bot reported **+$385 realized profit**.
@@ -129,10 +146,10 @@ kraken ticker(bbo) ─┘    + USDT→USD rate        anomaly (report only)     
   add `slippage_bps`. If paper mode is not profitable, live will not be.
 - **Risk manager** (runs before any executor): minimum net edge, maximum plausible edge,
   minimum profit in dollars, quote staleness, detection latency, per-trade notional cap,
-  daily realized-loss cap (halts for the UTC day, persisted to `logs/risk_state.json`
-  so a restart cannot reset it), trades-per-minute limit, per-opportunity cooldown, and
-  a kill-switch file (`STOP` in the working directory stops all trading instantly,
-  checked again before every live leg).
+  daily realized-loss cap and drawdown-from-peak cap (both halt trading for the UTC
+  day and persist to `logs/risk_state.json` so a restart cannot reset them),
+  trades-per-minute limit, per-opportunity cooldown, and a kill-switch file (`STOP` in
+  the working directory stops all trading instantly, checked again before every live leg).
 - **Feeds**: one WebSocket connection per venue, exponential backoff with jitter on
   reconnect, quotes dropped when a venue disconnects, Binance's 24-hour connection limit
   and `serverShutdown` handled, Kraken's 1 s heartbeat used as a liveness check.
@@ -222,6 +239,7 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `detection.max_plausible_net_edge_bps` | 200 | Larger "edges" are bad data |
 | `risk.max_notional_per_trade_usd` | 100 | Per-trade size cap (also caps detector sizing) |
 | `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
+| `risk.max_drawdown_pct` | 5.0 | Equity this far below its running peak halts for the day (0 = off) |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -327,6 +345,7 @@ arbbot/
   feeds/            binance.py, coinbase.py, kraken.py, replay.py, base.py (reconnects)
   detectors/        cross_exchange.py, triangular.py, anomaly.py
   execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated)
+scripts/sweep.py    fee / haircut / slippage sensitivity sweep over a recorded tape
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 
