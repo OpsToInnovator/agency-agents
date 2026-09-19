@@ -59,6 +59,16 @@ def test_coinbase_ticker():
     assert feed.parse(json.dumps({"type": "heartbeat", "product_id": "BTC-USD"}), 1.0) == []
 
 
+def test_coinbase_drops_out_of_order_sequence():
+    feed = CoinbaseFeed([BTC_COINBASE], "wss://x")
+    base = {"type": "ticker", "product_id": "BTC-USD", "best_bid": "1", "best_bid_size": "1", "best_ask": "2", "best_ask_size": "1"}
+    assert len(feed.parse(json.dumps({**base, "sequence": 10}), 1.0)) == 1
+    assert feed.parse(json.dumps({**base, "sequence": 9}), 1.0) == []
+    assert feed.parse(json.dumps({**base, "sequence": 10}), 1.0) == []
+    assert len(feed.parse(json.dumps({**base, "sequence": 11}), 1.0)) == 1
+    assert feed.out_of_order == 2
+
+
 def test_coinbase_error_raises():
     feed = CoinbaseFeed([BTC_COINBASE], "wss://x")
     with pytest.raises(ValueError):

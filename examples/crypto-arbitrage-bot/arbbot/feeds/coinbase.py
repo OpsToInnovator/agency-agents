@@ -32,6 +32,15 @@ def _iso_ts(s: str | None) -> float | None:
 class CoinbaseFeed(Feed):
     venue = COINBASE
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_seq: dict[str, int] = {}
+        self.out_of_order = 0
+
+    async def _session(self, sink) -> None:
+        self._last_seq.clear()  # sequence numbers are per connection
+        await super()._session(sink)
+
     def subscribe_messages(self) -> list[str]:
         return [json.dumps({"type": "subscribe", "product_ids": list(self.markets), "channels": ["ticker"]})]
 
@@ -47,6 +56,12 @@ class CoinbaseFeed(Feed):
         market = self.markets.get(msg.get("product_id", ""))
         if market is None or "best_bid" not in msg:
             return []
+        seq = msg.get("sequence")
+        if isinstance(seq, int):
+            if seq <= self._last_seq.get(market.symbol, -1):
+                self.out_of_order += 1
+                return []
+            self._last_seq[market.symbol] = seq
         return [
             Quote(
                 venue=COINBASE,

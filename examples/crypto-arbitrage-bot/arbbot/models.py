@@ -159,10 +159,12 @@ class Fill:
 class TradeRecord:
     opportunity: Opportunity
     fills: list[Fill]
-    status: str  # "filled" | "rejected" | "partial" | "test"
+    status: str  # "filled" | "partial" | "missed" | "rejected" | "pending" | "test"
     reason: str = ""
     realized_pnl_usd: float = 0.0
     ts: float = 0.0
+    promised_pnl_usd: float = 0.0  # what the detector expected at the sizes that were sent
+    latency_ms: float = 0.0  # detection -> last leg resolved (paper arrival model)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +172,8 @@ class TradeRecord:
             "status": self.status,
             "reason": self.reason,
             "realized_pnl_usd": round(self.realized_pnl_usd, 6),
+            "promised_pnl_usd": round(self.promised_pnl_usd, 6),
+            "latency_ms": round(self.latency_ms, 1),
             "fills": [
                 {
                     "venue": f.venue,

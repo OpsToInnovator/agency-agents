@@ -46,7 +46,7 @@ def test_replay_with_zero_fees_trades_on_paper():
     cfg = load_config(None, {
         "venues": {"taker_fee_bps": {"binance": 0.0, "coinbase": 0.0, "kraken": 0.0}},
         "detection": {"min_net_edge_bps": 0.5, "stable_haircut_bps": 0.0},
-        "risk": {"cooldown_s": 0.0, "max_trades_per_minute": 10000},
+        "risk": {"cooldown_s": 0.0, "max_trades_per_minute": 10000, "min_profit_usd": 0.0},
         "paper": {"slippage_bps": 0.0},
         "report": {"write_jsonl": False, "interval_s": 3600},
     })
@@ -57,21 +57,63 @@ def test_replay_with_zero_fees_trades_on_paper():
     engine = make_engine(cfg, markets, [feed], clock)
     stats = run(engine.run())
     assert stats.actionable_by_kind["cross_exchange"] > 0
-    assert stats.trades_by_status.get("filled", 0) + stats.trades_by_status.get("partial", 0) > 0
+    settled = sum(stats.trades_by_status.get(k, 0) for k in ("filled", "partial", "missed"))
+    assert settled > 0 and stats.pending == settled  # every sent order settled by the end of the tape
     ex = engine.executor
-    assert ex.realized_pnl_usd > 0
+    assert not ex.pending
     equity, _ = ex.equity_usd(clock.now())
+    # accounting identity holds whatever the fills did
     assert equity == pytest.approx(ex.contributions_usd + ex.realized_pnl_usd, rel=1e-4)
+    # the arrival model is never more generous than the promise on a moving tape
+    assert ex.realized_pnl_usd <= ex.promised_pnl_usd + 1e-6
+
+
+def test_replay_arrival_fills_never_beat_their_limits():
+    """Every arrival-model fill is an IOC at the detection price: buys never pay
+    more than the limit, sells never receive less, and misses are recorded."""
+    cfg = load_config(None, {
+        "venues": {"taker_fee_bps": {"binance": 0.0, "coinbase": 0.0, "kraken": 0.0}},
+        "detection": {"min_net_edge_bps": 0.5, "stable_haircut_bps": 0.0},
+        "risk": {"cooldown_s": 0.0, "max_trades_per_minute": 10000, "min_profit_usd": 0.0},
+        "paper": {"slippage_bps": 0.0, "fill_model": "arrival", "assumed_rtt_ms": 300},
+        "report": {"write_jsonl": False, "interval_s": 3600},
+    })
+    markets = static_universe(cfg)
+    clock = Clock()
+    feed = ReplayFeed(FIXTURE, markets, speed=0.0, clock_setter=clock.set)
+    clock.set(float(json.loads(FIXTURE.read_text().splitlines()[0])["t"]))
+    engine = make_engine(cfg, markets, [feed], clock)
+    records = []
+    original = engine.reporter.on_trade
+    engine.reporter.on_trade = lambda rec: (records.append(rec), original(rec))
+    run(engine.run())
+    assert records and all(r.status in ("filled", "partial", "missed") for r in records)
+    limits = {}
+    for r in records:
+        for leg in r.opportunity.legs:
+            limits[(leg.venue, leg.symbol, leg.side, r.opportunity.ts)] = leg.price
+        for f in r.fills:
+            limit = limits[(f.venue, f.symbol, f.side, r.opportunity.ts)]
+            if f.side == "buy":
+                assert f.price <= limit * (1 + 1e-12)
+            else:
+                assert f.price >= limit * (1 - 1e-12)
+        if r.ts < engine.stats.last_quote_ts:  # settled at end of tape: orders still in flight settle early
+            assert r.latency_ms >= 300 - 1e-6
+    assert engine.executor.missed_legs == sum(len([m for m in r.reason.split(";") if m.strip()]) for r in records if r.status != "filled")
 
 
 def test_cli_replay_writes_jsonl(tmp_path, capsys):
     parser = build_parser()
-    args = parser.parse_args(["replay", str(FIXTURE), "--log-dir", str(tmp_path), "--min-edge", "-1000"])
+    cfg_file = tmp_path / "c.toml"
+    cfg_file.write_text("[risk]\nmin_profit_usd = -1e9\ncooldown_s = 0.0\nmax_trades_per_minute = 100000\n")
+    args = parser.parse_args(["replay", str(FIXTURE), "--log-dir", str(tmp_path / "logs"), "--min-edge", "-1000",
+                              "--config", str(cfg_file)])
     rc = run(cmd_replay(args))
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["quotes"] > 300
-    runs = list(Path(tmp_path).iterdir())
+    runs = list(Path(tmp_path / "logs").iterdir())
     assert len(runs) == 1
     opp_file = runs[0] / "opportunities.jsonl"
     assert opp_file.exists()

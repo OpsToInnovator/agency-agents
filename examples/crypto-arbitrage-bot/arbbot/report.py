@@ -66,16 +66,21 @@ class Reporter:
         self.rejections_seen += 1
         log.info("SKIP (%s) %s net %+.2f bps", reason, opp.kind, opp.net_edge_bps)
 
+    def on_pending(self, record: TradeRecord) -> None:
+        log.debug("SENT %s (%s) | %s", record.opportunity.kind, record.reason, record.opportunity.description)
+
     def on_trade(self, record: TradeRecord) -> None:
         self._write("trades", record.to_dict())
         opp = record.opportunity
-        log.info("TRADE %s %s pnl %+.4f USD (expected %+.4f) %s | %s", record.status.upper(), opp.kind,
-                 record.realized_pnl_usd, opp.expected_profit_usd, record.reason, opp.description)
+        log.info("TRADE %s %s pnl %+.4f USD (promised %+.4f, %.0f ms) %s | %s", record.status.upper(), opp.kind,
+                 record.realized_pnl_usd, record.promised_pnl_usd, record.latency_ms, record.reason, opp.description)
 
     # -- summaries --------------------------------------------------------
     def _pnl_bits(self, now: float) -> str:
         ex = self.executor
         bits = [f"trades={getattr(ex, 'trades', 0)}", f"realized={getattr(ex, 'realized_pnl_usd', 0.0):+.4f}"]
+        if hasattr(ex, "latency_tax_usd"):
+            bits.append(f"promised={ex.promised_pnl_usd:+.4f} missed_legs={ex.missed_legs} pending={len(ex.pending)}")
         if hasattr(ex, "equity_usd"):
             equity, unmarked = ex.equity_usd(now)
             contrib = getattr(ex, "contributions_usd", 0.0)
@@ -93,7 +98,7 @@ class Reporter:
         p50 = st.latency_percentile(50)
         p99 = st.latency_percentile(99)
         lat = f"detect p50={p50:.2f}ms p99={p99:.2f}ms" if p50 is not None else "detect n/a"
-        return (f"[{elapsed:6.0f}s] quotes={st.quotes} ({venues}) {st.quotes / elapsed:.0f}/s coalesced={st.coalesced} "
+        return (f"[{elapsed:6.0f}s] quotes={st.quotes} ({venues}) {st.quotes / elapsed:.0f}/s unchanged={st.unchanged} "
                 f"markets={self.book.count()} stale={self.book.stale_count(now)} | gross>0: {gross} | "
                 f"net>={self.min_net_edge_bps:g}bps: {net} | anomalies={sum(st.anomalies.values())} | "
                 f"{self._pnl_bits(now)} | {lat}")
@@ -116,6 +121,12 @@ class Reporter:
             lines.append("  risk rejections: " + ", ".join(f"{k}={v}" for k, v in self.risk.rejections.most_common(6)))
         if st.trades_by_status:
             lines.append("  trades: " + ", ".join(f"{k}={v}" for k, v in sorted(st.trades_by_status.items())))
+        ex = self.executor
+        if hasattr(ex, "latency_tax_usd") and getattr(ex, "trades", 0):
+            lines.append(f"  paper fills: promised {ex.promised_pnl_usd:+.4f} USD, realized {ex.realized_pnl_usd:+.4f} USD, "
+                         f"latency tax {ex.latency_tax_usd:+.4f} USD, missed legs {ex.missed_legs}")
+        if st.handler_errors or st.inflight_skipped:
+            lines.append(f"  handler errors {st.handler_errors}, executions skipped while one was in flight {st.inflight_skipped}")
         if st.detector_errors:
             lines.append("  detector errors: " + ", ".join(f"{k}={v}" for k, v in st.detector_errors.items()))
         if self.book.quarantined:

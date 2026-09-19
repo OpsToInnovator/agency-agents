@@ -1,6 +1,7 @@
 import pytest
 
 from arbbot.config import ConfigError, load_config
+from tests.conftest import ROOT
 from arbbot.models import BINANCE, COINBASE, KRAKEN, USD_FAMILY
 from arbbot.universe import STATIC_BASES, split_binance_symbol, static_universe, summarize
 
@@ -33,6 +34,16 @@ def test_unknown_key_is_an_error(tmp_path):
         load_config(None, {"paper": {"fill_fraction": 0}})
     with pytest.raises(ConfigError):
         load_config(None, {"detection": {"max_plausible_net_edge_bps": 0.5}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"paper": {"fill_model": "magic"}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"detection": {"stable_rate_band": [1.1, 1.2]}})
+
+
+def test_example_config_loads():
+    cfg = load_config(ROOT / "config.example.toml")
+    assert cfg.paper.fill_model == "arrival"
+    assert cfg.live.enabled is False
 
 
 def test_split_binance_symbol():

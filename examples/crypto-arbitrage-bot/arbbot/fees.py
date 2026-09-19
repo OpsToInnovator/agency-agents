@@ -7,6 +7,9 @@ conservative — a scanner that flatters its own fees "finds" free money.
 """
 from __future__ import annotations
 
+# When the defaults below were last checked against the venues' published schedules.
+FEES_VERIFIED_ON = "2026-09-19"
+
 # taker fee in basis points (1 bps = 0.01%)
 DEFAULT_TAKER_BPS: dict[str, float] = {
     "binance": 10.0,  # 0.10% VIP 0 (0.075% when paying fees in BNB; 0.095% on USDC pairs)
@@ -77,3 +80,15 @@ def cycle_rate(rates: list[float], fees: list[float], sides: list[str]) -> tuple
 
 def bps(multiplier: float) -> float:
     return (multiplier - 1.0) * 1e4
+
+
+def cross_break_even_bps(buy_fee: float, sell_fee: float, haircut_bps: float = 0.0) -> float:
+    """Gross spread (bps of the buy price) at which a cross-venue trade nets zero:
+    bid/ask = (1+f_buy)/(1-f_sell), plus the stablecoin haircut."""
+    return ((1.0 + buy_fee) / (1.0 - sell_fee) - 1.0) * 1e4 + haircut_bps
+
+
+def triangle_break_even_bps(fee: float, legs: int = 3) -> float:
+    """Gross cycle multiplier (bps) at which a same-venue cycle nets zero; the exact
+    figure depends on the buy/sell mix, this is the all-sell (1-f)^n form."""
+    return (1.0 / (1.0 - fee) ** legs - 1.0) * 1e4

@@ -32,9 +32,16 @@ Taker fees are the floor an arbitrage trade must clear. Lowest public tiers, ver
 | Coinbase | 0.60% (60 bps) | fresh retail Advanced accounts pay 0.90–1.20% |
 | Kraken | 0.80% (80 bps) | restructured July 2026; older references still say 0.40% |
 
-So the fee floor for a two-leg cross-exchange trade is **90 bps** (Binance↔Kraken) to
-**100–170 bps** (anything involving Coinbase retail), and **30 bps** for a triangular
-cycle inside Binance (three legs at 10 bps).
+So the gross spread a trade must show before it nets zero, with these fees (the bot
+prints this table at startup from whatever fees you configure):
+
+| Trade | Break-even gross spread |
+|---|---|
+| Buy Binance, sell Coinbase (60 bps) + 5 bps USDT haircut | 75.4 bps |
+| Buy Binance, sell Kraken (80 bps) + 5 bps haircut | 95.7 bps |
+| Buy Coinbase, sell Kraken | 141.1 bps |
+| Buy Kraken, sell Coinbase | 141.3 bps |
+| Three-leg triangle inside Binance (3 × 10 bps) | 30.1 bps |
 
 Against that, here is what the market actually offered while this was being written:
 
@@ -43,8 +50,8 @@ Against that, here is what the market actually offered while this was being writ
   gap: **2.97 bps**. Convert Binance's USDT price to dollars at the live USDT/USD rate
   (0.99965) and the "Binance premium" becomes **−0.5 bps before any fees**.
 - The recorded fixture in `tests/fixtures/` (10 s of live quotes, 10 assets on all
-  three venues): 386 gross-positive cross-exchange observations, 27 gross-positive
-  triangles, **0** net-positive. Best net edge: −51 bps (cross-exchange), −30 bps
+  three venues): 380 gross-positive cross-exchange observations, 27 gross-positive
+  triangles, **0** net-positive. Best net edge: −70 bps (cross-exchange), −30 bps
   (triangular).
 - Academic results say the same. Muck, Schmidl & Wolf (2025) implemented triangular
   arbitrage on Binance for a week: 4,879 candidates, most with gross returns of
@@ -111,14 +118,21 @@ kraken ticker(bbo) ─┘    + USDT→USD rate        anomaly (report only)     
 - **Fee model**: taker fees on every leg, charged on the notional in the quote asset, at
   the rates in `[venues] taker_fee_bps`. Gross and net edge are always reported side by
   side.
-- **Paper execution**: fills at the quoted price plus `slippage_bps`, for the displayed
-  size times `fill_fraction`, on every leg simultaneously; scaled down when the paper
-  balance is short. These assumptions are generous. If paper mode is not profitable,
-  live will not be.
+- **Paper execution**, two models. `arrival` (default): the order reaches the venue
+  `assumed_rtt_ms` (150 ms) after detection and is an IOC limit at the detection price
+  against the book *at that time*; if the touch moved away the leg is **missed**,
+  cross-exchange legs travel in parallel (so one side can fill while the other misses,
+  leaving you holding inventory), and a triangle's legs are sequential. The summary
+  prints promised vs realized PnL and the difference, the **latency tax**. `instant`:
+  fills at detection, all legs at once, the generous model. Both charge taker fees on
+  every leg, cap size at the displayed top-of-book quantity times `fill_fraction`, and
+  add `slippage_bps`. If paper mode is not profitable, live will not be.
 - **Risk manager** (runs before any executor): minimum net edge, maximum plausible edge,
-  quote staleness, detection latency, per-trade notional cap, daily realized-loss cap
-  (halts for the UTC day), trades-per-minute limit, per-opportunity cooldown, and a
-  kill-switch file (`STOP` in the working directory stops all trading instantly).
+  minimum profit in dollars, quote staleness, detection latency, per-trade notional cap,
+  daily realized-loss cap (halts for the UTC day, persisted to `logs/risk_state.json`
+  so a restart cannot reset it), trades-per-minute limit, per-opportunity cooldown, and
+  a kill-switch file (`STOP` in the working directory stops all trading instantly,
+  checked again before every live leg).
 - **Feeds**: one WebSocket connection per venue, exponential backoff with jitter on
   reconnect, quotes dropped when a venue disconnects, Binance's 24-hour connection limit
   and `serverShutdown` handled, Kraken's 1 s heartbeat used as a liveness check.
@@ -174,9 +188,14 @@ trades=1 realized=+0.1790 equity=3,199.83/3,200.00 | detect p50=0.08ms p99=0.34m
   because dollar quotes on three venues always differ by a few bps.
 - `net>=1bps`: observations that were still positive after all fees, the stablecoin
   haircut, and the minimum edge. This is the number that matters.
-- `trades` / `realized`: paper fills and the mark-to-market PnL they produced.
-  `equity` is portfolio value / what was contributed (paper balances are funded lazily
-  per asset per venue).
+- `trades` / `realized` / `promised` / `missed_legs` / `pending`: paper orders sent,
+  the mark-to-market PnL they produced once they "arrived", what the detector promised
+  at detection time, legs that missed because the touch moved, and orders still in
+  flight. `equity` is portfolio value / what was contributed (paper balances are funded
+  lazily per asset per venue, and USDT is marked at its live dollar rate, so equity can
+  sit a few dollars under contributions before any trade). The `stable_haircut_bps`
+  safety margin is demanded at detection but is not a cost, so realized PnL on a filled
+  trade can exceed the promise by that margin.
 - `stale`: markets whose last quote is older than the venue's `max_quote_age_ms`.
   Coinbase's `ticker` channel only fires on trades, so illiquid Coinbase products are
   often stale; stale quotes are never traded.
@@ -202,8 +221,10 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `detection.identity_mismatch_bps` | 2000 | Venues this far apart are quoting different assets |
 | `detection.max_plausible_net_edge_bps` | 200 | Larger "edges" are bad data |
 | `risk.max_notional_per_trade_usd` | 100 | Per-trade size cap (also caps detector sizing) |
-| `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day |
+| `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
+| `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
+| `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
 | `paper.slippage_bps` / `fill_fraction` | 2.0 / 1.0 | How generous the fill simulation is |
 
 ## Live trading (off by default, and mostly not implemented on purpose)
@@ -217,16 +238,32 @@ machine, and even then it goes to Binance's **validation-only** endpoint:
    balance check). `TradeRecord.status` is `"test"` and PnL is zero.
 2. Additionally `[live] real_orders = true` **and** `--i-know-this-sends-real-orders`
    → `POST /api/v3/order` with market orders. Keys come from the environment
-   (`BINANCE_API_KEY`, `BINANCE_API_SECRET`); they are never read from the config file.
+   (`BINANCE_API_KEY`, `BINANCE_API_SECRET`); they are never read from the config file
+   and never written to any log.
 3. The risk manager still applies: kill switch, daily loss cap, notional cap, plausibility.
+
+What the live path does to protect you:
+
+- `python3 -m arbbot preflight` (also run automatically by `scan --live`) refuses to arm
+  unless the clock offset to the exchange is small, the symbols are `TRADING`, the API
+  key **cannot withdraw**, free USDT covers two trades, and an `order/test` call succeeds.
+- Every order gets a `newClientOrderId`; its intent is appended to
+  `logs/live_intents.jsonl` and flushed to disk **before** the request is sent.
+- A timeout or ambiguous response is never retried blind. The order is looked up by
+  client id; if that fails, trading halts with a sticky reason (persisted, survives
+  restarts) until a human reconciles.
+- Before every leg: kill switch, halt flag and the current book are re-checked; a
+  cycle whose edge decayed is not sent. HTTP 418/429 halt trading.
+- Live executions run one at a time, off the quote path.
 
 Only single-venue (triangular) opportunities can be sent live. Cross-exchange
 execution would need order placement on Coinbase and Kraken as well; this project does
 not implement that, because a bot that can fire market orders on three exchanges from a
-2-day-old codebase is a liability, not a feature. Live mode also does not rebalance
-inventory or handle a cycle that fails halfway (it logs the unbalanced position and
-stops). Treat the live executor as a reference for signing and filters, not as a
-production trading system.
+2-day-old codebase is a liability, not a feature. Live mode does not rebalance
+inventory or unwind a cycle that fails halfway (it halts and tells you). Treat the live
+executor as a reference for signing, filters and idempotency, not as a production
+trading system. None of it could be exercised from the machine this was written on:
+Binance's order endpoints and even its testnet answer HTTP 451 there.
 
 ## Limitations you should know about
 
@@ -278,7 +315,7 @@ affiliation with any exchange.
 
 ```
 arbbot/
-  cli.py            scan / replay / markets commands
+  cli.py            scan / replay / markets / preflight commands
   config.py         dataclasses + TOML loader (unknown keys are errors)
   models.py         Market, Quote, Leg, Opportunity, Fill, TradeRecord
   quotes.py         QuoteBook: latest top-of-book, staleness, USDT→USD rate, marks, quarantine
@@ -289,7 +326,7 @@ arbbot/
   report.py         periodic and final summaries, JSONL logs
   feeds/            binance.py, coinbase.py, kraken.py, replay.py, base.py (reconnects)
   detectors/        cross_exchange.py, triangular.py, anomaly.py
-  execution/        paper.py, risk.py, live.py (Binance, gated)
+  execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated)
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 

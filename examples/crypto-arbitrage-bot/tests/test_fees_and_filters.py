@@ -3,7 +3,8 @@ from decimal import Decimal
 
 import pytest
 
-from arbbot.fees import DEFAULT_TAKER_BPS, FeeSchedule, bps, cross_edge, cycle_rate, leg_net_rate
+from arbbot.fees import (DEFAULT_TAKER_BPS, FEES_VERIFIED_ON, FeeSchedule, bps, cross_break_even_bps, cross_edge,
+                         cycle_rate, leg_net_rate, triangle_break_even_bps)
 from arbbot.filters import parse_binance_filters, round_step, round_tick, size_order
 from tests.helpers import BTC_BINANCE
 
@@ -30,6 +31,17 @@ def test_cycle_rate_three_fees():
     gross, net = cycle_rate([1 / 100.0, 50.0, 2.0], [0.001] * 3, ["buy", "sell", "sell"])
     assert gross == pytest.approx(1.0)
     assert bps(net) == pytest.approx(-30.0, abs=0.05)
+
+
+def test_break_evens():
+    # 10 + 60 bps: bid/ask must reach 1.001/0.994 -> 70.42 bps gross; the cross_edge net is zero there
+    be = cross_break_even_bps(0.001, 0.006)
+    assert be == pytest.approx(70.42, abs=0.01)
+    _, net, _ = cross_edge(100.0, 0.001, 100.0 * (1 + be / 1e4), 0.006)
+    assert net == pytest.approx(0.0, abs=1e-9)
+    assert cross_break_even_bps(0.001, 0.006, haircut_bps=5.0) == pytest.approx(be + 5.0)
+    assert triangle_break_even_bps(0.001) == pytest.approx(30.06, abs=0.01)
+    assert FEES_VERIFIED_ON.startswith("20")
 
 
 def test_default_fees_are_conservative():

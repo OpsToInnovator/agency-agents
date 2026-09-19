@@ -2,9 +2,11 @@
 
 Three checks, all report-only (an anomaly that is genuinely tradable shows up
 as a cross-exchange opportunity anyway):
-  * crossed_book  - bid >= ask on one venue: bad data, never a free lunch
-  * cross_venue   - a venue's mid is far from the median of the other venues
-  * jump          - a venue's mid jumped far from its own recent EWMA
+  * crossed_book       - bid >= ask on one venue: bad data, never a free lunch
+  * price_error        - a venue's mid is far from the median of >= 2 other venues
+  * venue_disagreement - same, but only one other venue is fresh (two data points
+                         cannot say which side is wrong)
+  * jump               - a venue's mid jumped far from its own recent EWMA
 """
 from __future__ import annotations
 
@@ -87,7 +89,8 @@ class AnomalyDetector(Detector):
                 mine = mid * (book.usd_rate(q.quote) or 1.0)
                 dev = (mine / ref - 1.0) * 1e4
                 if abs(dev) >= self.cfg.anomaly_threshold_bps:
-                    opp = self._flag(q, "cross_venue", dev, now, ref)
+                    subtype = "price_error" if len(others) >= 2 else "venue_disagreement"
+                    opp = self._flag(q, subtype, dev, now, ref)
                     if opp:
                         out.append(opp)
         return out

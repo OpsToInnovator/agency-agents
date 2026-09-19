@@ -5,7 +5,7 @@ from arbbot.detectors import AnomalyDetector, CrossExchangeDetector, TriangularD
 from arbbot.detectors.triangular import build_cycles
 from arbbot.fees import FeeSchedule
 from arbbot.models import BINANCE, COINBASE, KRAKEN, Market, Quote
-from arbbot.quotes import QuoteBook
+from arbbot.quotes import CHANGE_NEW, CHANGE_NONE, CHANGE_PRICE, CHANGE_SIZE, QuoteBook
 from tests.helpers import (BTC_BINANCE, BTC_COINBASE, BTC_KRAKEN, ETH_BINANCE, ETHBTC_BINANCE, USDT_COINBASE,
                            market, quote)
 
@@ -27,6 +27,24 @@ def test_quote_sanity_and_staleness():
     cb = quote(BTC_COINBASE, 100, 101, ts=1000.0)
     assert book.is_fresh(cb, 1001.9) and not book.is_fresh(cb, 1002.1)
     assert not quote(BTC_COINBASE, 101, 100).is_sane
+
+
+def test_update_reports_what_changed():
+    book = make_book()
+    assert book.update(quote(BTC_BINANCE, 100, 101, 1, 1)) == CHANGE_NEW
+    assert book.update(quote(BTC_BINANCE, 100, 101, 1, 1, ts=1001)) == CHANGE_NONE
+    assert book.update(quote(BTC_BINANCE, 100, 101, 2, 1, ts=1002)) == CHANGE_SIZE
+    assert book.update(quote(BTC_BINANCE, 100, 102, 2, 1, ts=1003)) == CHANGE_PRICE
+    assert book.get(BINANCE, "BTCUSDT").recv_ts == 1003
+
+
+def test_stable_rate_outside_band_is_ignored():
+    book = make_book()
+    book.update(quote(USDT_COINBASE, 0.9995, 0.9997, ts=1000.0))
+    assert book.usd_rate("USDT") == pytest.approx(0.9996)
+    book.update(quote(USDT_COINBASE, 0.50, 0.51, ts=1001.0))  # fat finger / bad print
+    assert book.usd_rate("USDT") == pytest.approx(0.9996)
+    assert book.stable_rate_rejections == 1
 
 
 def test_usd_rate_and_marks_from_stable_market():
@@ -175,8 +193,15 @@ def test_anomaly_detector_flags_jump_cross_venue_and_crossed_book():
     cb = quote(BTC_COINBASE, 100000, 100001, ts=1000.2)
     book.update(cb)
     flags = det.on_quote(cb, book, 1000.2)
-    assert [f.extra["subtype"] for f in flags] == ["cross_venue"]
+    assert [f.extra["subtype"] for f in flags] == ["venue_disagreement"]  # one peer: cannot say who is wrong
     assert flags[0].extra["deviation_bps"] == pytest.approx(-99.0, abs=0.1)
+    kr = quote(BTC_KRAKEN, 101000, 101001, ts=1000.3)
+    book.update(kr)
+    det.on_quote(kr, book, 1000.3)
+    cb2 = quote(BTC_COINBASE, 100000, 100001, ts=1001.5)
+    book.update(cb2)
+    flags = det.on_quote(cb2, book, 1001.5)
+    assert [f.extra["subtype"] for f in flags] == ["price_error"]  # two peers agree Coinbase is the outlier
     crossed = Quote(BINANCE, "BTCUSDT", "BTC", "USDT", 100002, 1, 100001, 1, 1002.0)
     flags = det.on_quote(crossed, book, 1002.0)
     assert [f.extra["subtype"] for f in flags] == ["crossed_book"]

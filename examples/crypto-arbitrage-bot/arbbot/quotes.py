@@ -10,12 +10,20 @@ from .models import BINANCE, USD_FAMILY, Market, Quote
 log = logging.getLogger(__name__)
 
 
+CHANGE_NONE = 0  # same top of book as before (Coinbase resends it on every trade)
+CHANGE_SIZE = 1  # only displayed sizes moved
+CHANGE_PRICE = 2  # best bid or ask price moved
+CHANGE_NEW = 3  # first quote for this market (or first after invalidation)
+
+
 class QuoteBook:
     def __init__(self, max_age_s: float = 2.0, max_age_by_venue: dict[str, float] | None = None,
-                 anchor_venue: str = BINANCE):
+                 anchor_venue: str = BINANCE, stable_rate_band: tuple[float, float] = (0.97, 1.03)):
         self.max_age_s = float(max_age_s)
         self.max_age_by_venue = {k.lower(): float(v) for k, v in (max_age_by_venue or {}).items()}
         self.anchor_venue = anchor_venue.lower()
+        self.stable_rate_band = (float(stable_rate_band[0]), float(stable_rate_band[1]))
+        self.stable_rate_rejections = 0
         self.quarantined: dict[str, str] = {}  # base asset -> reason
         self.markets: dict[tuple[str, str], Market] = {}
         self._by_key: dict[tuple[str, str], Quote] = {}
@@ -34,8 +42,8 @@ class QuoteBook:
         return self.markets.get((venue, symbol))
 
     # -- updates ----------------------------------------------------------
-    def update(self, q: Quote) -> Quote | None:
-        """Store a quote; returns the previous quote for the same market."""
+    def update(self, q: Quote) -> int:
+        """Store a quote; returns what changed versus the previous one (CHANGE_*)."""
         prev = self._by_key.get(q.key)
         self._by_key[q.key] = q
         self._by_venue[q.venue][q.symbol] = q
@@ -43,9 +51,19 @@ class QuoteBook:
             self._usd_by_base[q.base][q.key] = q
             if q.base in USD_FAMILY and q.quote == "USD" and q.is_sane:
                 # e.g. Coinbase USDT-USD: how many dollars one USDT is worth
-                self._stable_rates[q.base] = q.mid
+                lo, hi = self.stable_rate_band
+                if lo <= q.mid <= hi:
+                    self._stable_rates[q.base] = q.mid
+                else:
+                    self.stable_rate_rejections += 1
         self.updates += 1
-        return prev
+        if prev is None:
+            return CHANGE_NEW
+        if prev.bid != q.bid or prev.ask != q.ask:
+            return CHANGE_PRICE
+        if prev.bid_qty != q.bid_qty or prev.ask_qty != q.ask_qty:
+            return CHANGE_SIZE
+        return CHANGE_NONE
 
     # -- lookups ----------------------------------------------------------
     def get(self, venue: str, symbol: str) -> Quote | None:

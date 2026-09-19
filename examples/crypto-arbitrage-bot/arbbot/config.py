@@ -62,6 +62,8 @@ class DetectionConfig:
     # Net edges above this are treated as bad data and never traded.
     max_plausible_net_edge_bps: float = 200.0
     anchor_venue: str = "binance"  # marks for quarantined assets come from here
+    # A learned USDT/USD rate outside this band is bad data: keep the last sane one.
+    stable_rate_band: list[float] = field(default_factory=lambda: [0.97, 1.03])
     stable_haircut_bps: float = 5.0  # extra edge demanded when USDT is compared with USD
     anomaly_threshold_bps: float = 50.0  # |deviation| from reference to call it a "price error"
     anomaly_ewma_halflife_s: float = 10.0
@@ -77,6 +79,9 @@ class RiskConfig:
     cooldown_s: float = 2.0  # per opportunity key
     max_detect_latency_ms: float = 250.0
     kill_switch_file: str = "STOP"
+    min_profit_usd: float = 0.05  # dust-sized "opportunities" are not actionable
+    # Daily realized loss and halt state persist here so a restart cannot reset the cap.
+    state_file: str = "logs/risk_state.json"
 
 
 @dataclass
@@ -85,6 +90,11 @@ class PaperConfig:
     starting_base_inventory_usd: float = 200.0  # lazily funded per base asset per venue
     slippage_bps: float = 2.0
     fill_fraction: float = 1.0  # fraction of displayed top-of-book size assumed fillable
+    # "arrival": an order reaches the venue assumed_rtt_ms after detection and fills as an
+    # IOC limit at the detection price against the book AT THAT TIME (misses if the touch
+    # moved away). "instant": fills at detection, the generous model.
+    fill_model: str = "arrival"
+    assumed_rtt_ms: float = 150.0  # detection -> venue, per leg; triangle legs are sequential
 
 
 @dataclass
@@ -95,6 +105,7 @@ class LiveConfig:
     api_key_env: str = "BINANCE_API_KEY"
     api_secret_env: str = "BINANCE_API_SECRET"
     recv_window_ms: int = 5000
+    intent_log: str = "logs/live_intents.jsonl"  # every order intent is journaled here before it is sent
 
 
 @dataclass
@@ -165,6 +176,13 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("paper.fill_fraction must be in (0, 1]")
     if cfg.paper.slippage_bps < 0:
         raise ConfigError("paper.slippage_bps must be >= 0")
+    if cfg.paper.fill_model not in ("arrival", "instant"):
+        raise ConfigError("paper.fill_model must be 'arrival' or 'instant'")
+    if cfg.paper.assumed_rtt_ms < 0:
+        raise ConfigError("paper.assumed_rtt_ms must be >= 0")
+    band = cfg.detection.stable_rate_band
+    if len(band) != 2 or not 0 < band[0] < 1 < band[1]:
+        raise ConfigError("detection.stable_rate_band must be [low, high] around 1.0")
     if cfg.universe.top_n <= 0:
         raise ConfigError("universe.top_n must be positive")
 

@@ -11,8 +11,8 @@ from typing import Any, Protocol
 from .config import Config
 from .detectors.base import Detector
 from .execution.risk import RiskManager
-from .models import Opportunity, Quote
-from .quotes import QuoteBook
+from .models import Opportunity, Quote, TradeRecord
+from .quotes import CHANGE_NONE, QuoteBook
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,11 @@ class Stats:
     started: float
     quotes: int = 0
     coalesced: int = 0
+    unchanged: int = 0  # quote repeated the previous top of book (no detection run)
+    last_quote_ts: float | None = None
+    pending: int = 0
+    handler_errors: int = 0
+    inflight_skipped: int = 0
     quotes_by_venue: Counter = field(default_factory=Counter)
     gross_by_kind: Counter = field(default_factory=Counter)
     actionable_by_kind: Counter = field(default_factory=Counter)
@@ -86,6 +91,8 @@ class Engine:
         self.clock = clock or Clock()
         self.stats = Stats(started=self.clock.now())
         self._stop = asyncio.Event()
+        self._inflight: asyncio.Task | None = None  # remote (live) executions run one at a time
+        self._tasks: set[asyncio.Task] = set()
 
     def stop(self) -> None:
         self._stop.set()
@@ -142,7 +149,13 @@ class Engine:
             for q in list(pending.values()):
                 await self.handle(q)
             pending.clear()
-            self.reporter.final(self.clock.now())
+            if self._inflight is not None and not self._inflight.done():
+                await asyncio.wait({self._inflight}, timeout=15)
+            end = self.stats.last_quote_ts if self.clock.override is not None and self.stats.last_quote_ts else self.clock.now()
+            # orders still "in the air" in the paper arrival model settle against the last book
+            for rec in self._settle(end, final=True):
+                self._finish_trade(rec, end)
+            self.reporter.final(end)
         return self.stats
 
     async def _consume(self, pending: dict, event: asyncio.Event) -> None:
@@ -152,7 +165,14 @@ class Engine:
             batch = list(pending.values())
             pending.clear()
             for q in batch:
-                await self.handle(q)
+                try:
+                    await self.handle(q)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # one bad quote must not stop the consumer for good
+                    self.stats.handler_errors += 1
+                    if self.stats.handler_errors <= 3:
+                        log.exception("quote handler failed on %s", q.key)
             await asyncio.sleep(0)
 
     async def _report_loop(self) -> None:
@@ -164,12 +184,24 @@ class Engine:
             except Exception:  # reporting must never take the engine down
                 log.exception("reporter failed")
 
+    def _settle(self, now: float, final: bool = False) -> list[TradeRecord]:
+        settle = getattr(self.executor, "settle", None)
+        if settle is None:
+            return []
+        return settle(now, final=final)
+
     async def handle(self, q: Quote) -> None:
         now = self.clock.now()
         wall = time.time()
-        self.book.update(q)
+        change = self.book.update(q)
         self.stats.quotes += 1
         self.stats.quotes_by_venue[q.venue] += 1
+        self.stats.last_quote_ts = q.recv_ts
+        for rec in self._settle(now):
+            self._finish_trade(rec, now)
+        if change == CHANGE_NONE:
+            self.stats.unchanged += 1
+            return
         t0 = time.perf_counter()
         for det in self.detectors:
             try:
@@ -200,8 +232,39 @@ class Engine:
         if not ok:
             self.reporter.on_rejected(opp, reason)
             return
+        if getattr(self.executor, "remote", False):
+            # Live orders take hundreds of ms of network time: never block the quote
+            # path on them, and never have two cycles in flight at once.
+            if self._inflight is not None and not self._inflight.done():
+                self.stats.inflight_skipped += 1
+                self.reporter.on_rejected(opp, "execution in flight")
+                return
+            self.risk.on_submitted(opp, now)
+            task = asyncio.create_task(self._run_remote(opp, now), name="live-exec")
+            self._inflight = task
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return
+        self.risk.on_submitted(opp, now)
         record = await self.executor.execute(opp, now)
         record.ts = now
-        self.risk.on_trade(record, now)
+        if record.status == "pending":
+            self.stats.pending += 1
+            self.reporter.on_pending(record)
+            return
+        self._finish_trade(record, now)
+
+    async def _run_remote(self, opp: Opportunity, now: float) -> None:
+        try:
+            record = await self.executor.execute(opp, now)
+        except Exception as exc:  # the executor halts itself on ambiguity; this is the last net
+            log.exception("live execution crashed")
+            record = TradeRecord(opp, [], "rejected", f"executor crashed: {exc}", 0.0, now)
+        self._finish_trade(record, self.clock.now())
+
+    def _finish_trade(self, record: TradeRecord, now: float) -> None:
+        if not record.ts:
+            record.ts = now
+        self.risk.on_settled(record, now)
         self.stats.trades_by_status[record.status] += 1
         self.reporter.on_trade(record)
