@@ -99,9 +99,9 @@ class Opportunity:
     ts: float
     legs: list[Leg]
     gross_edge_bps: float
-    net_edge_bps: float
+    net_edge_bps: float  # the DECISION edge: fee-net minus any stablecoin haircut
     notional_usd: float  # size of the first leg in USD terms
-    expected_profit_usd: float  # net of fees, at the sizes in `legs`
+    expected_profit_usd: float  # fee-net profit at the sizes in `legs` (no haircut: it is a margin, not a cost)
     description: str
     detect_latency_ms: float = 0.0
     quote_ages_ms: list[float] = field(default_factory=list)

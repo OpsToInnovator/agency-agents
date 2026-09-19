@@ -83,8 +83,8 @@ class Reporter:
             bits.append(f"promised={ex.promised_pnl_usd:+.4f} missed_legs={ex.missed_legs} pending={len(ex.pending)}")
         if hasattr(ex, "equity_usd"):
             equity, unmarked = ex.equity_usd(now)
-            contrib = getattr(ex, "contributions_usd", 0.0)
-            bits.append(f"equity={equity:,.2f}/{contrib:,.2f}")
+            contrib = ex.contributions_value_usd(now) if hasattr(ex, "contributions_value_usd") else getattr(ex, "contributions_usd", 0.0)
+            bits.append(f"equity={equity:,.2f} contributed={contrib:,.2f} unrealized={equity - contrib - getattr(ex, 'realized_pnl_usd', 0.0):+.4f}")
             if unmarked:
                 bits.append(f"unmarked={len(unmarked)}")
         return " ".join(bits)

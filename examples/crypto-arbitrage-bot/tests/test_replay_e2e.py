@@ -63,7 +63,7 @@ def test_replay_with_zero_fees_trades_on_paper():
     assert not ex.pending
     equity, _ = ex.equity_usd(clock.now())
     # accounting identity holds whatever the fills did
-    assert equity == pytest.approx(ex.contributions_usd + ex.realized_pnl_usd, rel=1e-4)
+    assert equity == pytest.approx(ex.contributions_value_usd(clock.now()) + ex.realized_pnl_usd, rel=1e-4)
     # the arrival model is never more generous than the promise on a moving tape
     assert ex.realized_pnl_usd <= ex.promised_pnl_usd + 1e-6
 

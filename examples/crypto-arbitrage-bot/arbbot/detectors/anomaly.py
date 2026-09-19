@@ -85,8 +85,8 @@ class AnomalyDetector(Detector):
         if q.quote in USD_FAMILY and q.base not in USD_FAMILY:
             others = [o for o in book.usd_quotes_for_base(q.base, now) if o.venue != q.venue]
             if others:
-                ref = median(o.mid * (book.usd_rate(o.quote) or 1.0) for o in others)
-                mine = mid * (book.usd_rate(q.quote) or 1.0)
+                ref = median(o.mid * (book.usd_rate(o.quote, now) or 1.0) for o in others)
+                mine = mid * (book.usd_rate(q.quote, now) or 1.0)
                 dev = (mine / ref - 1.0) * 1e4
                 if abs(dev) >= self.cfg.anomaly_threshold_bps:
                     subtype = "price_error" if len(others) >= 2 else "venue_disagreement"

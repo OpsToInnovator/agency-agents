@@ -332,7 +332,7 @@ class BinanceLiveExecutor:
                 deltas[fill.fee_asset] -= fill.fee
         realized = 0.0
         for asset, d in deltas.items():
-            mark = self.book.usd_rate(asset) if asset in USD_FAMILY else self.book.usd_price(asset, now)
+            mark = self.book.usd_rate(asset, now) if asset in USD_FAMILY else self.book.usd_price(asset, now)
             realized += d * (mark or 0.0)
         self.trades += 1
         status = "filled" if self.real_orders else "test"
@@ -354,9 +354,12 @@ class BinanceLiveExecutor:
 
     def _fill_from(self, payload: dict[str, Any], leg: Leg, qty: float, now: float, client_id: str) -> Fill:
         if not payload or "fills" not in payload:
-            # order/test returns {} : synthesize the expected fill for the record
-            return Fill(BINANCE, leg.symbol, leg.side, leg.price, qty, qty * leg.price * self.fees.taker(BINANCE),
-                        leg.quote, now, f"test:{client_id}")
+            # order/test returns {} : synthesize the expected fill for the record, with the
+            # commission in the received asset as Binance charges it (base for buys)
+            rate = self.fees.taker(BINANCE)
+            if leg.side == "buy":
+                return Fill(BINANCE, leg.symbol, "buy", leg.price, qty, qty * rate, leg.base, now, f"test:{client_id}")
+            return Fill(BINANCE, leg.symbol, "sell", leg.price, qty, qty * leg.price * rate, leg.quote, now, f"test:{client_id}")
         executed = float(payload.get("executedQty", 0) or 0)
         quote_qty = float(payload.get("cummulativeQuoteQty", 0) or 0)
         price = quote_qty / executed if executed else leg.price

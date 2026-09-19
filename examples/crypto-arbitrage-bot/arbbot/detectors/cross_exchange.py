@@ -50,8 +50,8 @@ class CrossExchangeDetector(Detector):
     def identity_check(self, a: Quote, b: Quote, book: QuoteBook, now: float) -> Opportunity | None:
         """Two venues disagreeing by more than identity_mismatch_bps are not
         quoting the same asset. Quarantine it and report once."""
-        mid_a = a.mid * (book.usd_rate(a.quote) or 1.0)
-        mid_b = b.mid * (book.usd_rate(b.quote) or 1.0)
+        mid_a = a.mid * (book.usd_rate(a.quote, now) or 1.0)
+        mid_b = b.mid * (book.usd_rate(b.quote, now) or 1.0)
         if mid_a <= 0 or mid_b <= 0:
             return None
         gap_bps = abs(mid_a / mid_b - 1.0) * 1e4
@@ -69,19 +69,19 @@ class CrossExchangeDetector(Detector):
         )
 
     def evaluate(self, buy: Quote, sell: Quote, book: QuoteBook, now: float) -> Opportunity | None:
-        rate_buy = book.usd_rate(buy.quote) or 1.0
-        rate_sell = book.usd_rate(sell.quote) or 1.0
+        rate_buy = book.usd_rate(buy.quote, now) or 1.0
+        rate_sell = book.usd_rate(sell.quote, now) or 1.0
         ask_usd = buy.ask * rate_buy
         bid_usd = sell.bid * rate_sell
         fee_buy = self.fees.taker(buy.venue)
         fee_sell = self.fees.taker(sell.venue)
-        gross_bps, net_bps, net_per_unit = cross_edge(ask_usd, fee_buy, bid_usd, fee_sell)
+        gross_bps, fee_net_bps, net_per_unit = cross_edge(ask_usd, fee_buy, bid_usd, fee_sell)
         if gross_bps <= 0:
             return None
+        # The haircut is a safety margin demanded at decision time for the USDT->USD
+        # conversion risk; it is not a cost, so expected_profit_usd stays fee-net.
         haircut_bps = self.cfg.stable_haircut_bps if buy.quote != sell.quote else 0.0
-        if haircut_bps:
-            net_bps -= haircut_bps
-            net_per_unit -= ask_usd * haircut_bps / 1e4
+        net_bps = fee_net_bps - haircut_bps
         qty = min(buy.ask_qty, sell.bid_qty, self.max_notional_usd / ask_usd)
         if qty <= 0:
             return None
@@ -100,7 +100,8 @@ class CrossExchangeDetector(Detector):
             description=(f"{buy.base}: buy {buy.venue} {buy.symbol} @ {buy.ask:g}, "
                          f"sell {sell.venue} {sell.symbol} @ {sell.bid:g}"),
             quote_ages_ms=[buy.age_ms(now), sell.age_ms(now)],
-            extra={"haircut_bps": haircut_bps, "usd_rate_buy": rate_buy, "usd_rate_sell": rate_sell,
+            extra={"haircut_bps": haircut_bps, "fee_net_edge_bps": fee_net_bps,
+                   "usd_rate_buy": rate_buy, "usd_rate_sell": rate_sell,
                    "fee_bps": [fee_buy * 1e4, fee_sell * 1e4],
                    # trade-triggered feeds (Coinbase ticker) can be seconds behind the real book
                    "exch_lag_ms": [None if q.exch_ts is None else round((q.recv_ts - q.exch_ts) * 1e3, 1)

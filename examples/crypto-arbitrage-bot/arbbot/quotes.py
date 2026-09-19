@@ -23,6 +23,7 @@ class QuoteBook:
         self.max_age_by_venue = {k.lower(): float(v) for k, v in (max_age_by_venue or {}).items()}
         self.anchor_venue = anchor_venue.lower()
         self.stable_rate_band = (float(stable_rate_band[0]), float(stable_rate_band[1]))
+        self.stable_rate_max_age_s = 600.0  # USDT/USD moves slowly; a 10-minute-old print beats assuming par
         self.stable_rate_rejections = 0
         self.quarantined: dict[str, str] = {}  # base asset -> reason
         self.markets: dict[tuple[str, str], Market] = {}
@@ -30,8 +31,8 @@ class QuoteBook:
         self._by_venue: dict[str, dict[str, Quote]] = defaultdict(dict)
         # base asset -> {(venue, symbol): Quote} for markets quoted in a USD-family asset
         self._usd_by_base: dict[str, dict[tuple[str, str], Quote]] = defaultdict(dict)
-        # USD value of one unit of a stablecoin, learned from USDT-USD style markets
-        self._stable_rates: dict[str, float] = {"USD": 1.0}
+        # USDT-USD style quotes per venue: the USD value of one unit of a stablecoin
+        self._stable_quotes: dict[str, dict[str, Quote]] = defaultdict(dict)
         self.updates = 0
 
     # -- registration -----------------------------------------------------
@@ -53,7 +54,7 @@ class QuoteBook:
                 # e.g. Coinbase USDT-USD: how many dollars one USDT is worth
                 lo, hi = self.stable_rate_band
                 if lo <= q.mid <= hi:
-                    self._stable_rates[q.base] = q.mid
+                    self._stable_quotes[q.base][q.venue] = q
                 else:
                     self.stable_rate_rejections += 1
         self.updates += 1
@@ -79,6 +80,8 @@ class QuoteBook:
             q = self._by_key.pop(k)
             self._by_venue.get(venue, {}).pop(q.symbol, None)
             self._usd_by_base.get(q.base, {}).pop(k, None)
+        for per_venue in self._stable_quotes.values():
+            per_venue.pop(venue, None)
         return len(keys)
 
     def quarantine(self, base: str, reason: str) -> bool:
@@ -92,12 +95,15 @@ class QuoteBook:
     def venue_quotes(self, venue: str) -> dict[str, Quote]:
         return self._by_venue.get(venue, {})
 
-    def usd_rate(self, asset: str) -> float | None:
-        """Dollars per unit of a USD-family asset (1.0 for USD, ~0.9996 for USDT)."""
+    def usd_rate(self, asset: str, now: float | None = None) -> float | None:
+        """Dollars per unit of a USD-family asset (1.0 for USD, ~0.9996 for USDT):
+        the median of the venues' recent USDT-USD mids, or par when none is recent."""
         if asset == "USD":
             return 1.0
         if asset in USD_FAMILY:
-            return self._stable_rates.get(asset, 1.0)
+            mids = [q.mid for q in self._stable_quotes.get(asset, {}).values()
+                    if now is None or now - q.recv_ts <= self.stable_rate_max_age_s]
+            return float(median(mids)) if mids else 1.0
         return None
 
     def usd_quotes_for_base(self, base: str, now: float) -> list[Quote]:
@@ -112,9 +118,9 @@ class QuoteBook:
         """Best-effort USD mark for an asset: median of fresh USD-family mids,
         else via a BTC or ETH cross, else the stable rate, else None."""
         if asset in USD_FAMILY:
-            return self.usd_rate(asset)
+            return self.usd_rate(asset, now)
         quotes = self.usd_quotes_for_base(asset, now)
-        mids = [q.mid * (self.usd_rate(q.quote) or 1.0) for q in quotes]
+        mids = [q.mid * (self.usd_rate(q.quote, now) or 1.0) for q in quotes]
         if mids:
             return float(median(mids))
         if _depth > 0:

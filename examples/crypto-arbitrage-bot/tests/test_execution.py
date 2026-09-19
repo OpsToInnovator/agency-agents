@@ -59,10 +59,10 @@ def test_paper_instant_cross_exchange_fill_matches_expected_profit():
     assert ex.balance(BINANCE, "BTC") == pytest.approx(0.01)
     assert ex.balance(KRAKEN, "USD") == pytest.approx(5000 + 0.01 * 100600 * 0.996)
     assert ex.balance(KRAKEN, "BTC") == pytest.approx(2000 / book.usd_price("BTC", 1000.0) - 0.01)
-    assert ex.contributions_usd == pytest.approx(5000 * 2 + 2000)
+    assert ex.contributions_value_usd(1000.0) == pytest.approx(5000 * 2 + 2000)
     equity, unmarked = ex.equity_usd(1000.0)
     assert unmarked == []
-    assert equity == pytest.approx(ex.contributions_usd + rec.realized_pnl_usd, rel=1e-6)
+    assert equity == pytest.approx(ex.contributions_value_usd(1000.0) + rec.realized_pnl_usd, rel=1e-6)
     assert ex.latency_tax_usd == pytest.approx(0.0, abs=1e-9)
 
 
@@ -93,6 +93,47 @@ def test_paper_instant_rejects_when_nothing_to_sell():
     rec = run(ex.execute(opp, 1000.0))
     assert rec.status == "rejected" and "balance" in rec.reason
     assert ex.rejected == 1 and ex.trades == 0
+
+
+def test_paper_instant_triangle_with_slippage_sizes_legs_from_carry():
+    # default slippage (2 bps): leg 2 can only spend what leg 1 delivered; the plan must not be rejected
+    book, opp = triangle_book_and_opp()
+    ex = PaperExecutor(PaperConfig(slippage_bps=2.0, **INSTANT), FEES, book, [BINANCE])
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "filled", rec.reason
+    assert ex.balance(BINANCE, "BTC") == pytest.approx(0.0, abs=1e-12)
+    assert ex.balance(BINANCE, "ETH") == pytest.approx(0.0, abs=1e-12)
+    assert rec.realized_pnl_usd < opp.expected_profit_usd  # slippage on three legs
+
+
+def test_paper_buy_sell_sell_triangle_funds_nothing():
+    # USDT -> ETH -> BTC -> USDT: leg 2 sells ETH (bought), leg 3 sells BTC (produced by leg 2): self-funding
+    book = QuoteBook(max_age_s=2.0)
+    for m in (BTC_BINANCE, ETH_BINANCE, ETHBTC_BINANCE):
+        book.register(m)
+    book.update(quote(BTC_BINANCE, 100000, 100001, ts=1000.0))
+    book.update(quote(ETH_BINANCE, 3999, 4000, ts=1000.0))
+    ethbtc = quote(ETHBTC_BINANCE, 0.0404, 0.0405, ts=1000.0)
+    book.update(ethbtc)
+    (opp,) = TriangularDetector([BTC_BINANCE, ETH_BINANCE, ETHBTC_BINANCE], FEES, DetectionConfig(), 1000.0).on_quote(ethbtc, book, 1000.0)
+    assert [l.side for l in opp.legs] == ["buy", "sell", "sell"]
+    ex = PaperExecutor(PaperConfig(slippage_bps=0.0, **INSTANT), FEES, book, [BINANCE])
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "filled"
+    assert ex.contributions_value_usd(1000.0) == pytest.approx(1000.0)  # no phantom BTC inventory
+    assert ex.balance(BINANCE, "BTC") == pytest.approx(0.0, abs=1e-12)
+
+
+def test_paper_equity_matches_contributions_when_usdt_is_not_a_dollar():
+    from tests.helpers import USDT_COINBASE
+    book = QuoteBook(max_age_s=2.0)
+    for m in (BTC_BINANCE, USDT_COINBASE):
+        book.register(m)
+    book.update(quote(USDT_COINBASE, 0.9995, 0.9997, ts=1000.0))
+    ex = PaperExecutor(PaperConfig(), FEES, book, [BINANCE, COINBASE])
+    equity, _ = ex.equity_usd(1000.0)
+    assert equity == pytest.approx(1000 * 0.9996 + 1000)
+    assert ex.contributions_value_usd(1000.0) == pytest.approx(equity)  # no trade, no PnL
 
 
 def test_paper_instant_triangular_round_trip_pnl():

@@ -191,11 +191,11 @@ trades=1 realized=+0.1790 equity=3,199.83/3,200.00 | detect p50=0.08ms p99=0.34m
 - `trades` / `realized` / `promised` / `missed_legs` / `pending`: paper orders sent,
   the mark-to-market PnL they produced once they "arrived", what the detector promised
   at detection time, legs that missed because the touch moved, and orders still in
-  flight. `equity` is portfolio value / what was contributed (paper balances are funded
-  lazily per asset per venue, and USDT is marked at its live dollar rate, so equity can
-  sit a few dollars under contributions before any trade). The `stable_haircut_bps`
-  safety margin is demanded at detection but is not a cost, so realized PnL on a filled
-  trade can exceed the promise by that margin.
+  flight. `equity` is portfolio value, `contributed` is what was put in (paper balances
+  are funded lazily per asset per venue), both marked at the same marks, so
+  `unrealized` is inventory mark-to-market and a book with no trades shows zero PnL.
+  The `stable_haircut_bps` safety margin is demanded at decision time but is not a cost:
+  `net_edge_bps` includes it, `expected_profit_usd` (the promise) does not.
 - `stale`: markets whose last quote is older than the venue's `max_quote_age_ms`.
   Coinbase's `ticker` channel only fires on trades, so illiquid Coinbase products are
   often stale; stale quotes are never traded.

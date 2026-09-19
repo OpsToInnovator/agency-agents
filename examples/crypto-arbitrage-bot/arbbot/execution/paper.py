@@ -52,7 +52,8 @@ class PaperExecutor:
         self.fees = fees
         self.book = book
         self.balances: dict[str, dict[str, float]] = {v: {} for v in venues}
-        self.contributions_usd = 0.0
+        # what was put in, per (venue, asset), so it can be marked with the same marks as equity
+        self.contributed: dict[tuple[str, str], float] = defaultdict(float)
         self.realized_pnl_usd = 0.0
         self.promised_pnl_usd = 0.0  # what the detector expected for the trades that settled
         self.trades = 0
@@ -62,11 +63,21 @@ class PaperExecutor:
         for v in venues:
             quote = "USDT" if v == BINANCE else "USD"
             self.balances[v][quote] = cfg.starting_quote_per_venue_usd
-            self.contributions_usd += cfg.starting_quote_per_venue_usd  # stablecoins counted at par at funding
+            self.contributed[(v, quote)] += cfg.starting_quote_per_venue_usd
 
     # -- balances ---------------------------------------------------------
     def balance(self, venue: str, asset: str) -> float:
         return self.balances.get(venue, {}).get(asset, 0.0)
+
+    def contributions_value_usd(self, now: float) -> float:
+        """Everything that was put in, marked at the same marks equity uses, so
+        equity - contributions == realized + unrealized exactly, and a book with no
+        trades shows zero PnL even when USDT is not worth a dollar."""
+        total = 0.0
+        for (venue, asset), qty in self.contributed.items():
+            mark = self._mark(asset, now)
+            total += qty * (mark if mark is not None else 0.0)
+        return total
 
     @property
     def latency_tax_usd(self) -> float:
@@ -74,30 +85,32 @@ class PaperExecutor:
         return self.promised_pnl_usd - self.realized_pnl_usd
 
     def _ensure_inventory(self, venue: str, asset: str, now: float) -> None:
-        """Fund a base asset the first time a venue needs to sell it."""
-        if asset in self.balances.setdefault(venue, {}):
+        """Fund a base asset the first time a venue needs to sell it. With no mark
+        available yet the asset stays unfunded (not pinned) so a later call can fund it."""
+        if asset in self.balances.setdefault(venue, {}) or self.cfg.starting_base_inventory_usd <= 0:
             return
         mark = self.book.usd_price(asset, now)
-        if mark is None or mark <= 0 or self.cfg.starting_base_inventory_usd <= 0:
-            self.balances[venue][asset] = 0.0
+        if mark is None or mark <= 0:
             return
         qty = self.cfg.starting_base_inventory_usd / mark
         self.balances[venue][asset] = qty
-        self.contributions_usd += self.cfg.starting_base_inventory_usd
+        self.contributed[(venue, asset)] += qty
 
     def _fund_for(self, opp: Opportunity, now: float) -> None:
-        # Sell legs need inventory unless an earlier leg of the same plan produces it
-        # (a triangle sells what it just bought; a cross-exchange trade sells from stock).
+        # Sell legs need inventory unless an earlier leg of the same plan produces the
+        # asset (a triangle sells what it just bought; a cross-exchange trade sells from stock).
         produced: set[tuple[str, str]] = set()
         for leg in opp.legs:
-            if leg.side == "sell" and (leg.venue, leg.base) not in produced:
-                self._ensure_inventory(leg.venue, leg.base, now)
-            elif leg.side == "buy":
+            if leg.side == "sell":
+                if (leg.venue, leg.base) not in produced:
+                    self._ensure_inventory(leg.venue, leg.base, now)
+                produced.add((leg.venue, leg.quote))
+            else:
                 produced.add((leg.venue, leg.base))
 
     def _mark(self, asset: str, now: float) -> float | None:
         if asset in USD_FAMILY:
-            return self.book.usd_rate(asset)
+            return self.book.usd_rate(asset, now)
         return self.book.usd_price(asset, now)
 
     def equity_usd(self, now: float) -> tuple[float, list[str]]:
@@ -265,16 +278,21 @@ class PaperExecutor:
 
     def _simulate(self, opp: Opportunity, scale: float, now: float):
         """Walk the legs on a copy of the balances. Stops at the first leg that
-        does not fit and returns how much of the plan would have fit."""
+        does not fit and returns how much of the plan would have fit. A leg that
+        consumes what an earlier leg of the same plan produced is sized from that
+        amount (slippage and fees shrink it), never from the detector's plan."""
         balances = copy.deepcopy(self.balances)
         fills: list[Fill] = []
         slip = self.cfg.slippage_bps / 1e4
+        produced: dict[tuple[str, str], float] = {}
         for leg in opp.legs:
             qty = leg.qty * self.cfg.fill_fraction * scale
             fee_rate = self.fees.taker(leg.venue)
             acct = balances.setdefault(leg.venue, {})
             if leg.side == "buy":
                 price = leg.price * (1.0 + slip)
+                if (leg.venue, leg.quote) in produced:
+                    qty = min(qty, produced[(leg.venue, leg.quote)] / (price * (1.0 + fee_rate)))
                 cost = qty * price * (1.0 + fee_rate)
                 have = acct.get(leg.quote, 0.0)
                 if cost > have:
@@ -283,9 +301,12 @@ class PaperExecutor:
                     return fills, balances, have / cost, False
                 acct[leg.quote] = have - cost
                 acct[leg.base] = acct.get(leg.base, 0.0) + qty
+                produced[(leg.venue, leg.base)] = produced.get((leg.venue, leg.base), 0.0) + qty
                 fills.append(Fill(leg.venue, leg.symbol, "buy", price, qty, qty * price * fee_rate, leg.quote, now, "paper"))
             else:
                 price = leg.price * (1.0 - slip)
+                if (leg.venue, leg.base) in produced:
+                    qty = min(qty, produced[(leg.venue, leg.base)])
                 have = acct.get(leg.base, 0.0)
                 if qty > have:
                     if have <= 0:
@@ -294,6 +315,7 @@ class PaperExecutor:
                 proceeds = qty * price * (1.0 - fee_rate)
                 acct[leg.base] = have - qty
                 acct[leg.quote] = acct.get(leg.quote, 0.0) + proceeds
+                produced[(leg.venue, leg.quote)] = produced.get((leg.venue, leg.quote), 0.0) + proceeds
                 fills.append(Fill(leg.venue, leg.symbol, "sell", price, qty, qty * price * fee_rate, leg.quote, now, "paper"))
         return fills, balances, 1.0, True
 

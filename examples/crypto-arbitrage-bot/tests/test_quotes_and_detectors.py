@@ -38,6 +38,18 @@ def test_update_reports_what_changed():
     assert book.get(BINANCE, "BTCUSDT").recv_ts == 1003
 
 
+def test_stable_rate_goes_stale_and_is_dropped_on_disconnect():
+    book = make_book()
+    book.update(quote(USDT_COINBASE, 0.9895, 0.9905, ts=1000.0))  # a thin, trade-triggered print
+    assert book.usd_rate("USDT", 1000.0) == pytest.approx(0.99)
+    assert book.usd_rate("USDT", 1000.0 + 599) == pytest.approx(0.99)
+    assert book.usd_rate("USDT", 1000.0 + 601) == 1.0  # too old to trust: back to par
+    book.update(quote(USDT_COINBASE, 0.9995, 0.9997, ts=2000.0))
+    assert book.usd_rate("USDT", 2000.0) == pytest.approx(0.9996)
+    book.invalidate_venue(COINBASE)
+    assert book.usd_rate("USDT", 2000.0) == 1.0
+
+
 def test_stable_rate_outside_band_is_ignored():
     book = make_book()
     book.update(quote(USDT_COINBASE, 0.9995, 0.9997, ts=1000.0))
@@ -110,7 +122,9 @@ def test_cross_exchange_haircut_and_usdt_conversion():
     assert opp.gross_edge_bps == pytest.approx((100000 / 99900 - 1) * 1e4)
     assert opp.extra["haircut_bps"] == 5.0
     raw_net = (100000 * 0.994 - 99900 * 1.001) / 99900 * 1e4
-    assert opp.net_edge_bps == pytest.approx(raw_net - 5.0)
+    assert opp.net_edge_bps == pytest.approx(raw_net - 5.0)  # decision edge includes the haircut
+    assert opp.extra["fee_net_edge_bps"] == pytest.approx(raw_net)
+    assert opp.expected_profit_usd == pytest.approx(opp.notional_usd * raw_net / 1e4)  # the haircut is not a cost
 
 
 def test_cross_exchange_needs_two_fresh_venues():
