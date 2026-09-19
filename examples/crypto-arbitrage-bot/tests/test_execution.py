@@ -437,7 +437,7 @@ class FakeSession:
                 if isinstance(payload, Exception):
                     raise payload
                 return FakeResponse(status, payload)
-        raise AssertionError(f"unscripted {method} {url}")
+        pytest.fail(f"unscripted {method} {url}")  # escapes `except Exception` in the code under test
 
     def get(self, url, headers=None, timeout=None):
         return self._ctx("GET", url, None)
@@ -779,15 +779,17 @@ def test_live_refuses_markets_without_filters(monkeypatch):
     rec = run(ex.execute(opp, 1000.0, min_edge_bps=-1e9))  # a one-leg "cycle" never clears a real edge gate
     assert rec.status == "rejected" and "no exchange filters" in rec.reason
     assert not [c for c in session.calls if c[0] == "POST"]
-    problems = run(_live(book, FakeSession([
+    pre = FakeSession([
         PING,
         ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
         ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
         ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
         ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "1000"}]}),
         ("/api/v3/order/test", 200, {}),
-    ])).preflight(["BTCUSDT"]))
-    assert any("no exchange filters" in p for p in problems)
+    ])
+    problems = run(_live(book, pre).preflight(["BTCUSDT"]))
+    assert problems == ["no exchange filters for BTCUSDT (use discovery, not --static)"]
+    assert not pre.script  # every scripted call was made: no early reachability bail-out
 
 
 def test_live_preflight_reports_a_sticky_halt(monkeypatch, tmp_path):
@@ -808,7 +810,8 @@ def test_live_preflight_reports_a_sticky_halt(monkeypatch, tmp_path):
         ("/api/v3/order/test", 200, {}),
     ])
     problems = run(_live(book, session, risk=risk).preflight(["BTCUSDT"]))
-    assert any("halted: reconcile me" in p and "sticky" in p for p in problems)
+    assert problems == ["trading is halted: reconcile me (sticky: reconcile, then remove or edit the risk state file)"]
+    assert not session.script
 
 
 def test_live_preflight_reports_problems(monkeypatch):
@@ -837,6 +840,7 @@ def test_live_preflight_reports_problems(monkeypatch):
     ])
     book.register(BTC_BINANCE)
     assert run(_live(book, ok_session).preflight(["BTCUSDT"])) == []
+    assert not ok_session.script
 
 
 def test_live_preflight_refuses_a_geo_blocked_machine_before_any_signed_call(monkeypatch, tmp_path):
@@ -868,6 +872,43 @@ def test_live_preflight_names_other_reachability_failures(monkeypatch):
     assert len(down) == 1 and down[0].startswith("cannot reach https://api.example") and "no route to host" in down[0]
     teapot = run(_live(book, FakeSession([("/api/v3/ping", 418, {"code": -1003, "msg": "banned"})])).preflight(["BTCUSDT"]))
     assert len(teapot) == 1 and "HTTP 418" in teapot[0] and "banned" in teapot[0]
+    # a CDN maintenance page arrives as a non-JSON body: its text is shown, on one line
+    html = run(_live(book, FakeSession([("/api/v3/ping", 502, {"raw": "<html>\n  Unavailable\n</html>"})])).preflight(["BTCUSDT"]))
+    assert len(html) == 1 and "HTTP 502" in html[0] and "<html> Unavailable </html>" in html[0] and "\n" not in html[0]
+
+    class EmptyBody(FakeResponse):
+        async def text(self):
+            return ""
+
+    class EmptySession(FakeSession):
+        def _ctx(self, method, url, data):
+            self.calls.append((method, url, data))
+            return EmptyBody(503, None)
+
+    empty = run(_live(book, EmptySession([])).preflight(["BTCUSDT"]))
+    assert len(empty) == 1 and "HTTP 503" in empty[0] and "(empty body)" in empty[0]
+
+
+def test_live_preflight_refuses_a_200_that_is_not_binances(monkeypatch):
+    """A TLS-trusted interceptor (corporate web filter, captive portal) can answer 200 itself;
+    only Binance's documented ping body, exactly {}, counts as reaching the exchange."""
+    from arbbot.cli import connectivity_check
+    from arbbot.config import load_config
+
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook()
+    book.register(BTC_BINANCE)
+    for body in ({"raw": "<html>portal</html>"}, {"message": "ok"}, [], "blocked"):
+        session = FakeSession([("/api/v3/ping", 200, body)])
+        problems = run(_live(book, session).preflight(["BTCUSDT"]))
+        assert len(problems) == 1 and "not Binance's" in problems[0], body
+        assert [c[0] for c in session.calls] == ["GET"]  # no signed call left the machine
+    cfg = load_config(None, {"venues": {"binance_trade_rest": "https://trade.example"}})
+    rc, msg = run(connectivity_check(cfg, FakeSession([("/api/v3/ping", 200, {"raw": "<html>"})])))
+    assert rc == 1 and msg.startswith("FAIL") and "not Binance's" in msg
+    rc, msg = run(connectivity_check(cfg, FakeSession([("/api/v3/ping", 200, {})])))
+    assert rc == 0
 
 
 def test_connectivity_check_needs_no_keys_and_no_live_section(monkeypatch, capsys):

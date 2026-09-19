@@ -16,7 +16,7 @@ track_stable_rates = true     # subscribe USDT-USD so USDT prices convert to USD
 taker_fee_bps = { binance = 10.0, coinbase = 60.0, kraken = 80.0 }
 binance_ws = "wss://data-stream.binance.vision/stream"   # api.binance.com is HTTP 451 in some regions
 binance_rest = "https://data-api.binance.vision"
-binance_trade_rest = "https://api.binance.com"           # signed endpoints, live mode only
+binance_trade_rest = "https://api.binance.com"           # signed endpoints in live mode, and the unsigned reachability ping
 coinbase_ws = "wss://ws-feed.exchange.coinbase.com"
 coinbase_rest = "https://api.exchange.coinbase.com"
 kraken_ws = "wss://ws.kraken.com/v2"

@@ -54,7 +54,14 @@ class BinanceHTTPError(RuntimeError):
         self.status = status
         self.payload = payload
         code = payload.get("code") if isinstance(payload, dict) else None
-        msg = payload.get("msg") if isinstance(payload, dict) else str(payload)[:200]
+        if isinstance(payload, dict):
+            msg = payload.get("msg")
+            if msg is None:  # a non-JSON body (CDN block page, maintenance HTML) arrives as {"raw": text}
+                raw = payload.get("raw")
+                msg = " ".join(str(raw).split())[:200] if raw else "(empty body)"
+        else:
+            msg = str(payload)[:200]
+        self.detail = msg
         super().__init__(f"binance HTTP {status} code={code}: {msg}")
 
 
@@ -85,7 +92,7 @@ async def check_reachability(rest: "BinanceRest") -> str | None:
     """
     host = rest.base_url
     try:
-        await rest.request("GET", REACHABILITY_PATH, signed=False)
+        payload = await rest.request("GET", REACHABILITY_PATH, signed=False)
     except BinanceHTTPError as exc:
         if exc.status == 451:
             return (f"{host} answered HTTP 451 (unavailable for legal reasons): Binance does not serve this "
@@ -93,9 +100,14 @@ async def check_reachability(rest: "BinanceRest") -> str | None:
                     f"a VPN or proxy, which breaches the Binance terms and risks a frozen account")
         if exc.status == 403:
             return f"{host} answered HTTP 403: the request was refused (blocked IP or firewall); check the machine's IP before arming"
-        return f"{host} answered HTTP {exc.status} to {REACHABILITY_PATH}: {exc}"
+        return f"{host} answered HTTP {exc.status} to {REACHABILITY_PATH}: {exc.detail}"
     except Exception as exc:
         return f"cannot reach {host}: {type(exc).__name__}: {exc}"
+    if payload != {}:  # GET /api/v3/ping is documented to answer exactly {}
+        shown = payload["raw"] if isinstance(payload, dict) and "raw" in payload else json.dumps(payload)
+        return (f"{host} answered 200 to {REACHABILITY_PATH} with a body that is not Binance's ({shown[:80]!r}): "
+                f"something between this machine and Binance (proxy, web filter, captive portal) is answering; "
+                f"check the machine's network path before arming")
     return None
 
 

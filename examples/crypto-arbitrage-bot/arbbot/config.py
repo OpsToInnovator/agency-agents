@@ -35,7 +35,9 @@ class VenuesConfig:
     # regions; the binance.vision mirror serves the same public data.
     binance_ws: str = "wss://data-stream.binance.vision/stream"
     binance_rest: str = "https://data-api.binance.vision"
-    binance_trade_rest: str = "https://api.binance.com"  # signed endpoints (live mode only)
+    # Signed endpoints in live mode, and the unsigned reachability ping that `preflight`
+    # and `preflight --connectivity` send (no keys, no [live] section needed).
+    binance_trade_rest: str = "https://api.binance.com"
     coinbase_ws: str = "wss://ws-feed.exchange.coinbase.com"
     coinbase_rest: str = "https://api.exchange.coinbase.com"
     kraken_ws: str = "wss://ws.kraken.com/v2"

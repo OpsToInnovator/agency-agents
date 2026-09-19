@@ -22,7 +22,9 @@ def _no_network(monkeypatch):
     import websockets
 
     def _refuse(*args, **kwargs):
-        raise AssertionError("network access attempted in an offline test")
+        # pytest.fail raises outside the Exception hierarchy, so a gate that maps
+        # "any exception" to a reason cannot turn a network attempt into a pass
+        pytest.fail("network access attempted in an offline test")
 
     monkeypatch.setattr(websockets, "connect", _refuse)
     try:

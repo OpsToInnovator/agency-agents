@@ -298,7 +298,7 @@ async def cmd_preflight(args: argparse.Namespace) -> int:
         await executor.close()
     if problems:
         for p in problems:
-            print(f"FAIL {p}")
+            print(f"FAIL {p}", file=sys.stderr)  # every FAIL diagnostic of this CLI goes to stderr, OK to stdout
         return 1
     print(f"OK: {executor.rest.base_url} reachable, clock offset {executor.rest.time_offset_ms:+.0f} ms, "
           f"key restrictions fine, balances sufficient, order/test accepted")
