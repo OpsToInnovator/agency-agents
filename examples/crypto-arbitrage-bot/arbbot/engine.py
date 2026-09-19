@@ -320,6 +320,13 @@ class Engine:
             if not unmarked:  # an unmarkable asset would fake a drawdown
                 capital = contrib_fn(now)
                 pnl = value - capital
+        elif equity_fn is None and record.status in ("filled", "partial"):
+            # a live executor has no marked equity (balances live on the exchange): measure the
+            # drawdown on realized PnL against the stake the operator configured, if any
+            stake = float(getattr(self.executor, "capital_usd", 0.0) or 0.0)
+            if stake > 0:
+                capital = stake
+                pnl = float(getattr(self.executor, "realized_pnl_usd", 0.0) or 0.0)
         self.risk.on_settled(record, now, pnl_usd=pnl, capital_usd=capital)
         self.stats.trades_by_status[record.status] += 1
         self.reporter.on_trade(record)

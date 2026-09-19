@@ -385,6 +385,33 @@ change, a venue-disagreement anomaly on an asset traded that day, clock drift ov
 Even a passing stage C is a fill-quality test, not income: the GO bar scales to about
 US$0.28/day at A$20, below the cost of the VPS.
 
+**If you would rather commit money now: a US$500 start.** The stake changes nothing
+about the expectancy, so treat it as buying real fill data with a fixed loss budget, not as
+income. `live.example.toml` is sized for it; every limit is a fraction of the stake, and the
+paper measurement runs alongside on the same machine rather than before.
+
+| Rule | Setting | Why |
+| --- | --- | --- |
+| Per trade | US$50, 10 % | displayed top-of-book depth rarely allows more anyway |
+| Per UTC day | US$5 realized, 1 % | the daily-loss cap halts for the day |
+| Session drawdown | 5 %, US$25 below the peak | measured against `live.capital_usd`, which the preflight wants on the exchange |
+| Kill | US$50 cumulative, 10 % | `touch STOP`, write the post-mortem, do not restart on the same settings |
+
+The sequence is the staged one above, compressed: day 0, KYC'd account, spot-only key
+whitelisted to the machine with withdrawals off, `preflight --connectivity`, `read_fees.py`,
+500 USDT plus about US$10 of BNB on the exchange, `preflight` OK. Day 1, stage B with
+validation-only orders. From day 2, real orders at US$50 with the 7-day paper run logging
+to a second directory. Weekly, `scripts/rollup.py logs/live` scores the same criteria on live
+fills. The per-trade cap stays at 10 % of whatever the stake is; a bigger cap means a bigger
+stake, and only after a month of positive live realized PnL and a passing scorecard.
+
+The arithmetic to expect: at the measured −15.7 bps per attempted cycle a US$50 trade
+loses about US$0.08, so the daily cap allows roughly 60 losing fills and the kill rule
+about 600. The best triangle recorded so far would pay US$0.06 per fill at this size and
+the median US$0.014. Fixed costs on top of the stake: a Tokyo VPS at US$5 to 20 a month,
+0.5 to 1.8 % on the AUD to USDT round trip, and the BNB. What the stake buys is the one
+thing the paper run cannot: real fill rates and the real latency tax on Binance triangles.
+
 **What the measurement will not change.** Australian bank rails cap exchange payments
 (CommBank: A$10,000 per calendar month, no exemptions); moving AUD to USDT and back
 costs 0.8–1.8 % of the bankroll before the first trade; a USDT float carries unhedged
@@ -459,6 +486,7 @@ scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block 
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
 scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
 measure7d.toml      the 7-day measurement config (paper only)
+live.example.toml   a US$500 live start: stage B by default, limits as fractions of the stake
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 

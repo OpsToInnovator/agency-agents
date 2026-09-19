@@ -145,3 +145,18 @@ def test_static_universe_respects_symbols_and_venues():
     assert {m.symbol for m in markets if m.venue == KRAKEN} == {"BTC/USD", "USDT/USD", "USDC/USD"}
     assert not any(m.venue == COINBASE for m in markets)
     assert STATIC_BASES[0] == "BTC"
+
+
+def test_live_example_config_is_a_stage_b_start_sized_to_the_stake():
+    from arbbot.config import ConfigError, load_config
+
+    cfg = load_config(ROOT / "live.example.toml")
+    assert cfg.live.enabled is True and cfg.live.real_orders is False  # validation-only orders until flipped
+    assert cfg.live.capital_usd == 500.0
+    assert cfg.risk.max_notional_per_trade_usd == 0.10 * cfg.live.capital_usd
+    assert cfg.risk.max_daily_loss_usd == 0.01 * cfg.live.capital_usd
+    assert cfg.risk.max_drawdown_pct == 5.0 and cfg.risk.min_profit_usd == 0.005
+    assert cfg.universe.venues == ["binance"] and cfg.detection.cross_exchange is False and cfg.detection.triangular is True
+    assert cfg.universe.auto_discover is True  # live orders need exchange filters
+    with pytest.raises(ConfigError):
+        load_config(None, {"live": {"capital_usd": -1.0}})

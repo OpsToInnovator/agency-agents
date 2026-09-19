@@ -203,6 +203,7 @@ class BinanceLiveExecutor:
         self.risk = risk
         self.real_orders = bool(real_orders and cfg.real_orders)
         self.max_notional_usd = max_notional_usd
+        self.capital_usd = float(cfg.capital_usd or 0.0)  # the engine measures the drawdown cap against this
         self.intent_log = Path(intent_log) if intent_log else None
         self.trades = 0
         self.rejected = 0
@@ -258,6 +259,9 @@ class BinanceLiveExecutor:
             usdt = free.get("USDT", 0.0)
             if usdt < 2 * self.max_notional_usd:
                 problems.append(f"free USDT {usdt:.2f} is below 2x max notional ({2 * self.max_notional_usd:.2f})")
+            if self.capital_usd and usdt < self.capital_usd:
+                problems.append(f"free USDT {usdt:.2f} is below live.capital_usd ({self.capital_usd:.2f}): the stake the "
+                                f"drawdown cap is measured against is not on the exchange")
         except Exception as exc:
             problems.append(f"cannot read account balances: {exc}")
         try:

@@ -920,3 +920,30 @@ def test_live_executor_html_error_body_is_a_rejection_not_a_crash(monkeypatch):
     ex = _live(book, session)
     rec = run(ex.execute(opp, 1000.0))
     assert rec.status == "rejected" and "HTTP 404" in rec.reason
+
+
+def test_live_preflight_wants_the_declared_stake_on_the_exchange(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook()
+    book.register(BTC_BINANCE)
+
+    def session(free_usdt):
+        return FakeSession([
+            PING,
+            ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+            ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+            ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+            ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": free_usdt}]}),
+            ("/api/v3/order/test", 200, {}),
+        ])
+
+    def staked(sess):
+        ex = BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=500.0), "https://api.example", FEES, book,
+                                 real_orders=False, session=sess, max_notional_usd=50.0)
+        assert ex.capital_usd == 500.0
+        return ex
+
+    short = run(staked(session("300")).preflight(["BTCUSDT"]))
+    assert len(short) == 1 and "below live.capital_usd (500.00)" in short[0]
+    assert run(staked(session("500")).preflight(["BTCUSDT"])) == []
