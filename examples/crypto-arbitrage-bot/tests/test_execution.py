@@ -1054,3 +1054,62 @@ def test_risk_drawdown_budget_counts_the_first_loss_and_rebases_each_day():
     rm2 = RiskManager(RiskConfig(max_drawdown_pct=5.0, max_daily_loss_usd=1e9), DetectionConfig())
     assert rm2.note_pnl(40.0, 500.0) is False and rm2.peak_pnl_usd == 40.0
     assert rm2.note_pnl(16.0, 500.0) is False and rm2.note_pnl(14.0, 500.0) is True
+
+
+def test_live_read_usdt_rejects_a_payload_that_is_not_an_account(monkeypatch):
+    """An empty or non-JSON 200 must raise, never read as a zero balance: the compounding
+    kill floor is measured on this number and a zero would halt the bot sticky."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+    session = FakeSession([
+        ("/api/v3/account", 200, {"balances": [{"asset": "BNB", "free": "1"}, {"asset": "USDT", "free": "850.5", "locked": "100"}]}),
+        ("/api/v3/account", 200, {}),
+        ("/api/v3/account", 200, {"raw": "<html>"}),
+        ("/api/v3/account", 200, {"balances": [{"asset": "BNB", "free": "1"}]}),
+    ])
+    ex = _live(book, session)
+    assert run(ex.read_usdt()) == (850.5, 100.0)
+    with pytest.raises(ValueError, match="without balances"):
+        run(ex.read_usdt())
+    with pytest.raises(ValueError, match="without balances"):
+        run(ex.read_usdt())
+    assert run(ex.read_usdt()) == (0.0, 0.0)  # omitZeroBalances: no USDT row is a zero balance
+
+
+def test_live_kill_floor_is_anchored_to_the_declared_capital(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+    ex = BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=1000.0, max_cumulative_loss_pct=10.0, compound=True),
+                             "https://api.example", FEES, book, real_orders=False, session=FakeSession([]))
+    assert ex.compound and ex.initial_capital_usd == 1000.0 and ex.kill_floor_usd == 900.0
+    ex.capital_usd = 1300.0  # what a re-base does after a winning day
+    assert ex.kill_floor_usd == 900.0 and ex.initial_capital_usd == 1000.0
+
+
+def test_live_preflight_counts_locked_usdt_toward_the_kill_floor(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+
+    def session(free, locked):
+        return FakeSession([
+            PING,
+            ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+            ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+            ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+            ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": free, "locked": locked}]}),
+            ("/api/v3/order/test", 200, {}),
+        ])
+
+    def staked(sess):
+        return BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=500.0), "https://api.example", FEES, book,
+                                   real_orders=False, session=sess, max_notional_usd=50.0)
+
+    assert run(staked(session("400", "60")).preflight(["BTCUSDT"])) == []  # 460 on the exchange: inside the budget
+    problems = run(staked(session("400", "40")).preflight(["BTCUSDT"]))  # 440: the budget is spent
+    assert len(problems) == 1 and "USDT 440.00 is below the kill floor 450.00" in problems[0]

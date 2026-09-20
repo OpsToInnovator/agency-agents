@@ -2,6 +2,8 @@
 stop(), and opportunities the executor cannot run never consume risk budget."""
 import asyncio
 
+import pytest
+
 from arbbot.config import load_config
 from arbbot.engine import Clock, Engine
 from arbbot.execution import RiskManager
@@ -182,7 +184,7 @@ class CompoundingExecutor(FakeRemoteExecutor):
 
     def __init__(self, balances):
         super().__init__()
-        self.balances = list(balances)  # successive free-USDT reads
+        self.balances = list(balances)  # successive reads: free USDT, (free, locked), or an Exception
         self.reads = 0
         self.capital_usd = 1000.0
         self.max_notional_usd = 100.0
@@ -192,12 +194,12 @@ class CompoundingExecutor(FakeRemoteExecutor):
     def kill_floor_usd(self):
         return self.initial_capital_usd * (1 - self.max_cumulative_loss_pct / 100)
 
-    async def read_free_usdt(self):
+    async def read_usdt(self):
         self.reads += 1
         value = self.balances.pop(0)
-        if isinstance(value, Exception):
+        if isinstance(value, BaseException):
             raise value
-        return value
+        return value if isinstance(value, tuple) else (value, 0.0)
 
     async def execute(self, opp, now, min_edge_bps=0.0):
         self.executed.append(opp)
@@ -206,15 +208,26 @@ class CompoundingExecutor(FakeRemoteExecutor):
 
 class SizedDetector(PerQuoteDetector):
     max_notional_usd = 100.0
+    notional_usd = 50.0
+
+    def on_quote(self, q, book, now):
+        opps = super().on_quote(q, book, now)
+        for opp in opps:
+            opp.notional_usd = self.notional_usd
+        return opps
 
 
-def _compound_engine(ex):
+class RateLimited(Exception):
+    status = 429
+
+
+def _compound_engine(ex, det=None):
     cfg = load_config(None, {"risk": {"max_notional_per_trade_usd": 100.0, "max_daily_loss_usd": 10.0, "cooldown_s": 0.0},
                              "live": {"enabled": True, "capital_usd": 1000.0, "compound": True}})
     book = QuoteBook(max_age_s=2.0)
     book.register(BTC_BINANCE)
     risk = RiskManager(cfg.risk, cfg.detection)
-    det = SizedDetector()
+    det = det or SizedDetector()
     rep = Recorder()
     clock = Clock()
     eng = Engine(cfg, book, [], [det], risk, ex, rep, clock)
@@ -228,15 +241,17 @@ async def _tick(eng, clock, t, i):
         await eng._inflight
 
 
+DAY0 = 1_789_776_000.0  # 2026-09-19 00:00 UTC
+
+
 def test_compounding_rebases_once_per_utc_day_and_scales_every_cap():
     ex = CompoundingExecutor([1200.0, 1500.0])
     eng, cfg, det, risk, rep, clock = _compound_engine(ex)
-    day0 = 1_789_776_000.0  # 2026-09-19 00:00 UTC
 
     async def scenario():
-        await _tick(eng, clock, day0 + 10, 0)      # first execution of the day: re-base from 1200
-        await _tick(eng, clock, day0 + 20, 1)      # same day: no second read
-        await _tick(eng, clock, day0 + 86400 + 5, 2)  # next UTC day: re-base from 1500
+        await _tick(eng, clock, DAY0 + 10, 0)      # first execution of the day: re-base from 1200
+        await _tick(eng, clock, DAY0 + 20, 1)      # same day: no second read
+        await _tick(eng, clock, DAY0 + 86400 + 5, 2)  # next UTC day: re-base from 1500
 
     run(scenario())
     assert ex.reads == 2 and len(ex.executed) == 3
@@ -245,31 +260,91 @@ def test_compounding_rebases_once_per_utc_day_and_scales_every_cap():
     assert ex.kill_floor_usd == 900.0  # anchored to the original capital, not the re-based stake
 
 
+def test_compounding_scales_down_after_a_losing_day_and_stops_at_the_floor():
+    ex = CompoundingExecutor([1200.0, 900.0])  # exactly the floor: no halt, caps at 10% / 1% of 900
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+
+    async def scenario():
+        await _tick(eng, clock, DAY0 + 10, 0)
+        await _tick(eng, clock, DAY0 + 86400 + 5, 1)
+
+    run(scenario())
+    assert not risk.halted and len(ex.executed) == 2
+    assert cfg.risk.max_notional_per_trade_usd == 90.0 and cfg.risk.max_daily_loss_usd == 9.0 and ex.capital_usd == 900.0
+
+
 def test_compounding_halts_sticky_below_the_anchored_kill_floor():
     ex = CompoundingExecutor([890.0])
     eng, cfg, det, risk, rep, clock = _compound_engine(ex)
 
     async def scenario():
-        await _tick(eng, clock, 1_789_776_010.0, 0)
-        await _tick(eng, clock, 1_789_776_020.0, 1)
+        await _tick(eng, clock, DAY0 + 10, 0)
+        await _tick(eng, clock, DAY0 + 20, 1)
+        await _tick(eng, clock, DAY0 + 86400 + 5, 2)  # the day roll lifts daily caps, not this
 
     run(scenario())
-    assert ex.executed == []  # nothing was sent
+    assert ex.executed == [] and ex.reads == 1  # nothing was sent, nothing re-read
     assert risk.halted and risk.halt_sticky and "cumulative loss budget spent" in risk.halt_reason
     assert [t.status for t in rep.trades] == ["rejected"] and cfg.risk.max_notional_per_trade_usd == 100.0  # caps untouched
 
 
-def test_compounding_keeps_current_caps_when_the_balance_read_fails():
+def test_compounding_counts_usdt_locked_in_open_orders_as_stake():
+    ex = CompoundingExecutor([(850.0, 100.0)])  # free alone is under the floor; free + locked is not
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+    run(_tick(eng, clock, DAY0 + 10, 0))
+    assert not risk.halted and len(ex.executed) == 1
+    assert ex.capital_usd == 950.0 and cfg.risk.max_notional_per_trade_usd == 95.0
+
+
+def test_compounding_skips_the_cycle_when_the_balance_read_fails():
     ex = CompoundingExecutor([RuntimeError("boom"), 1300.0])
     eng, cfg, det, risk, rep, clock = _compound_engine(ex)
 
     async def scenario():
-        await _tick(eng, clock, 1_789_776_010.0, 0)  # read fails: trade proceeds on the configured caps
-        await _tick(eng, clock, 1_789_776_020.0, 1)  # same day, retried because the failed read did not mark the day
+        await _tick(eng, clock, DAY0 + 10, 0)  # read fails: nothing sent, caps untouched, day not marked
+        await _tick(eng, clock, DAY0 + 20, 1)  # same day: the read is retried and the trade goes
 
     run(scenario())
-    assert len(ex.executed) == 2 and ex.reads == 2 and not risk.halted
+    assert ex.reads == 2 and len(ex.executed) == 1 and not risk.halted
+    assert [t.status for t in rep.trades] == ["rejected", "filled"] and "could not read the USDT balance" in rep.trades[0].reason
     assert cfg.risk.max_notional_per_trade_usd == 130.0 and ex.capital_usd == 1300.0
+
+
+def test_compounding_rate_limit_on_the_balance_read_halts_like_an_order_would():
+    ex = CompoundingExecutor([RateLimited("429")])
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+    run(_tick(eng, clock, DAY0 + 10, 0))
+    assert ex.executed == [] and risk.halted and risk.halt_sticky and "binance rate limit (429)" in risk.halt_reason
+
+
+def test_compounding_cancel_during_the_balance_read_is_not_an_order_in_flight():
+    ex = CompoundingExecutor([asyncio.CancelledError()])
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+
+    async def scenario():
+        clock.set(DAY0 + 10)
+        await eng.handle(quote(BTC_BINANCE, 100, 101, ts=DAY0 + 10))
+        with pytest.raises(asyncio.CancelledError):
+            await eng._inflight
+
+    run(scenario())
+    assert ex.executed == [] and not risk.halted  # nothing reached the venue, so nothing to reconcile
+
+
+def test_compounding_rejects_the_first_opportunity_sized_at_the_previous_caps():
+    det = SizedDetector()
+    det.notional_usd = 95.0  # passes the 100 cap it was sized under, not the 90 the re-base sets
+    ex = CompoundingExecutor([900.0])
+    eng, cfg, _, risk, rep, clock = _compound_engine(ex, det)
+
+    async def scenario():
+        await _tick(eng, clock, DAY0 + 10, 0)   # re-based to 900 mid-flight: this one is over the new cap
+        det.notional_usd = 90.0
+        await _tick(eng, clock, DAY0 + 20, 1)   # sized at the new cap: goes
+
+    run(scenario())
+    assert [t.status for t in rep.trades] == ["rejected", "filled"] and "sized at the previous stake" in rep.trades[0].reason
+    assert len(ex.executed) == 1 and not risk.halted and det.max_notional_usd == 90.0
 
 
 def test_compounding_off_never_reads_the_balance():

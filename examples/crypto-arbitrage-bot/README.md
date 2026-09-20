@@ -247,10 +247,10 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `risk.max_notional_per_trade_usd` | 100 | Per-trade size cap (also caps detector sizing) |
 | `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
 | `risk.max_drawdown_pct` | 5.0 | PnL this far (as % of capital) below the day's opening PnL or intraday peak halts for the day (0 = off; live mode needs `live.capital_usd`) |
-| `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it (0 = that cap off live) |
-| `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once free USDT is below the stake less this |
+| `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it, or against the re-based stake once `live.compound` has run (0 = that cap off live) |
+| `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once USDT on the exchange (free plus locked) is below `capital_usd` less this |
 | `live.fee_float_usd` | 0 | BNB deposited to pay fees; `reconcile` treats BNB above it as inventory a cycle left behind |
-| `live.compound` | false | Re-base the stake from free USDT once a UTC day and scale the caps with it; the kill floor stays anchored to `capital_usd` |
+| `live.compound` | false | Once a UTC day, re-base the stake from the USDT on the exchange and scale the caps with it; the kill floor stays anchored to `capital_usd` and is checked at that re-base |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -280,7 +280,8 @@ What the live path does to protect you:
   as such and no signed request is sent; `preflight --connectivity` runs just that check
   without keys), the clock offset to the exchange is small, the symbols are `TRADING`, the API
   key **cannot withdraw**, free USDT covers two trades and, when `live.capital_usd` is
-  set, the stake less its kill budget, and an `order/test` call succeeds.
+  set, the USDT on the exchange covers the stake less its kill budget, and an `order/test`
+  call succeeds.
 - Every order gets a `newClientOrderId`; its intent is appended to
   `logs/live_intents.jsonl` and flushed to disk **before** the request is sent.
 - A timeout or ambiguous response is never retried blind. The order is looked up by
@@ -409,7 +410,7 @@ paper measurement runs alongside on the same machine rather than before.
 | Per trade | US$50, 10 % | displayed top-of-book depth rarely allows more anyway |
 | Per UTC day | US$5 realized, 1 % | the daily-loss cap halts for the day |
 | Drawdown | 5 %, US$25 below the day's opening PnL or its intraday peak | measured against `live.capital_usd`; a fresh budget each UTC day and each process start. Behind a US$5 daily cap it only fires after a day runs up more than US$20 and gives it back |
-| Kill | US$50 cumulative, 10 % | `live.max_cumulative_loss_pct`: preflight refuses to re-arm once free USDT is below US$450. `touch STOP`, write the post-mortem, do not restart on the same settings |
+| Kill | US$50 cumulative, 10 % | `live.max_cumulative_loss_pct`: preflight refuses to re-arm once the USDT on the exchange is below US$450, and with `live.compound` on the daily re-base halts sticky there. `touch STOP`, write the post-mortem, do not restart on the same settings |
 
 The sequence is the staged one above, compressed: day 0, KYC'd account, spot-only key
 whitelisted to the machine with withdrawals off, `preflight --connectivity`, `read_fees.py`,
@@ -439,13 +440,18 @@ stake is the same file with the numbers scaled: at US$1,000, US$100 per trade, U
 US$50 of drawdown, kill at US$100 of cumulative loss, about US$100 of BNB if fees are paid
 in BNB. The per-trade cap rarely binds anyway: displayed depth at the touch was US$16 to
 US$790, and the detectors size to it. `live.compound = true` makes the caps follow the
-account: once a UTC day the stake is re-read from free USDT and the per-trade cap, the
-daily loss cap and the drawdown base scale with it, while the kill floor stays at 90 % of
-the original capital and halts the bot sticky when the stake falls under it. Compounding
+account: before the first cycle of each UTC day the stake is re-read from the USDT on the
+exchange (free plus any locked in an open order) and the per-trade cap, the daily loss cap
+and the drawdown base scale with it, while the kill floor stays at 90 % of the original
+`capital_usd`. That floor is checked at each daily re-base and by preflight at every start,
+not between them: within a day the daily loss cap and the drawdown cap are what stop a
+losing run, and both count fees, including fees paid from the BNB float. The floor sees
+USDT alone, so fees paid in BNB do not move it. A cycle whose balance read fails is skipped
+with the caps unchanged; a rate-limit answer halts, as it would on an order. Compounding
 multiplies whatever the expectancy is. On this repository's evidence that is negative, so
-with compounding on the caps shrink with the stake until the floor stops the run; nothing
-in the code learns or adapts its way out of the fee floor, and the only feedback loop
-that exists is the scorecard, which is scored by a person.
+with compounding on the caps shrink with the stake day by day until the floor stops the
+run; nothing in the code learns or adapts its way out of the fee floor, and the only
+feedback loop that exists is the scorecard, which is scored by a person.
 
 **What the measurement will not change.** Australian bank rails cap exchange payments
 (CommBank: A$10,000 per calendar month, no exemptions); moving AUD to USDT and back

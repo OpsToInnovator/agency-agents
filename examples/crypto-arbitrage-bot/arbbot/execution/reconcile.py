@@ -198,7 +198,7 @@ async def reconcile_report(rest: Any, capital_usd: float, max_cumulative_loss_pc
         stake_status = "free USDT inside the kill budget"
     elif usdt_free + usdt_locked >= floor - 0.01:
         stake_status = (f"free USDT below the kill floor because {usdt_locked:.2f} USDT is locked in open orders: "
-                        f"cancel them and re-check; preflight refuses to re-arm until it is free")
+                        f"cancel them and re-check; the locked USDT still counts as stake, not as loss")
     else:
         stake_status = "free USDT BELOW THE KILL FLOOR: preflight will refuse to re-arm; do not restart on these settings"
     kill_switch_present = bool(kill_switch_file and Path(kill_switch_file).exists())
