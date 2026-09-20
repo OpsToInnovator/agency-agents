@@ -176,12 +176,16 @@ class TradeRecord:
     ts: float = 0.0
     promised_pnl_usd: float = 0.0  # what the detector expected at the sizes that were sent
     latency_ms: float = 0.0  # detection -> last leg resolved (paper arrival model)
+    # What the auto-unwind did with a broken cycle's position. The status stays "partial" so
+    # the loss still reaches the daily cap and the drawdown curve; this is the discriminator.
+    unwound: str = ""  # "" | "off" | "skipped" | "flat" | "failed"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ts": self.ts,
             "status": self.status,
             "reason": self.reason,
+            "unwound": self.unwound,
             "realized_pnl_usd": round(self.realized_pnl_usd, 6),
             "promised_pnl_usd": round(self.promised_pnl_usd, 6),
             "latency_ms": round(self.latency_ms, 1),

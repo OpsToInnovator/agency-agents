@@ -385,6 +385,12 @@ async def cmd_reconcile(args: argparse.Namespace, session: Any | None = None) ->
             print("refusing --clear-halt: open orders could not be listed, so flatness is unproven; retry, or pass --force",
                   file=sys.stderr)
             return 1
+        if rep.get("unwind_in_flight") and not args.force:
+            # the one state in which a human selling by hand can double-sell
+            print(f"refusing --clear-halt: unwind order(s) {', '.join(rep['unwind_in_flight'])} have no recorded answer, "
+                  f"so flatness is unproven; look them up on Binance by client order id, then retry or pass --force",
+                  file=sys.stderr)
+            return 1
         previous = clear_halt(state_file)
         print(f"halt cleared in {state_file} (was: {previous.get('halt_reason', '')!r}); the next scan --live may arm",
               file=sys.stderr)

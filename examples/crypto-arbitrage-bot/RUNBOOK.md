@@ -212,7 +212,8 @@ start or the preflight refuses with `kill switch file ... already exists`.
 
 ## When it halts
 
-The bot halts itself for four reasons (three with `compound = false`). Each prints `TRADING HALTED: <reason>` in
+The bot halts itself for four reasons (three with `compound = false`), and with
+`auto_unwind = true` a broken cycle often resolves itself instead of halting. Each prints `TRADING HALTED: <reason>` in
 `live.log` and persists the same reason, which `reconcile` shows as `HALTED: <reason>`.
 
 - **Daily loss cap** (`daily loss cap hit (-10.xx USD)`): US$10 of realized loss today, 1 % of
@@ -226,6 +227,15 @@ The bot halts itself for four reasons (three with `compound = false`). Each prin
   only preflight makes this check, at each start). Sticky on
   purpose; it is the kill criterion, not something to clear. The same re-base halts on
   `binance rate limit (418|429) on the balance read` for the same reason an order would.
+- **Broken cycle** (`cycle aborted mid-way ...`): leg 1 filled and a later leg did not.
+  With `auto_unwind = true`, as shipped, most of these no longer halt at all: the bot
+  sold the position back to USDT and carried on, and the trade log shows `status partial`
+  with `unwound flat`. When it could not, the halt reason says why in its middle clause
+  (`kill switch ... not unwinding`, `fill state unknown`, `no fresh sane quote`, `our
+  position model is wrong`, `still held on ... after 3 attempt(s)`) and `reconcile` prints
+  the unwind plan, each exit order and its outcome. If it names an order with **no
+  recorded answer**, look that client id up on Binance before selling anything by hand:
+  that is the one state in which you can double-sell. `--clear-halt` refuses until you do.
 - **Sticky halt**: any reason ending in `reconcile manually` (`cycle aborted mid-way`,
   `error after order ... fill state unknown`, `ambiguous order state for <id>`, `empty
   response for real order <id>`, `shutdown while an order was in flight`, `executor

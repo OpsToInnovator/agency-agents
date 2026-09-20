@@ -194,3 +194,26 @@ def test_compound_needs_a_declared_capital():
     assert load_config(None, {"live": {"compound": True, "capital_usd": 1000.0}}).live.compound is True
     with pytest.raises(ConfigError):
         load_config(None, {"live": {"compound": True}})
+
+
+def test_config_rejects_unsafe_unwind_settings():
+    """An operator who can set the exit slippage to 500 bps will eventually do so at the
+    worst possible moment."""
+    from arbbot.config import ConfigError, load_config
+
+    for bad in (0.0, -1.0, 201.0):
+        with pytest.raises(ConfigError, match="unwind_max_slippage_bps"):
+            load_config(None, {"live": {"unwind_max_slippage_bps": bad}})
+    for bad in (0, 11):
+        with pytest.raises(ConfigError, match="unwind_max_attempts"):
+            load_config(None, {"live": {"unwind_max_attempts": bad}})
+    with pytest.raises(ConfigError, match="unwind_dust_usd"):
+        load_config(None, {"live": {"unwind_dust_usd": -1.0}})
+    with pytest.raises(ConfigError, match="unwind_dust_halt_usd"):
+        load_config(None, {"live": {"unwind_dust_usd": 30.0, "unwind_dust_halt_usd": 5.0}})
+    with pytest.raises(ConfigError, match="unwind_halt_after"):
+        load_config(None, {"live": {"unwind_halt_after": 0}})
+    with pytest.raises(ConfigError):
+        load_config(None, {"live": {"auto_unwnid": True}})  # a typo must not silently do nothing
+    cfg = load_config(None, {"live": {"auto_unwind": False}})
+    assert cfg.live.auto_unwind is False and cfg.live.unwind_max_attempts == 3

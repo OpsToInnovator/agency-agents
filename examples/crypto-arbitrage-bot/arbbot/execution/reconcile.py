@@ -1,7 +1,8 @@
 """Read-only reconciliation of a live Binance account against the bot's own records.
 
-The live executor never unwinds a cycle that fails halfway: it books what it knows,
-halts sticky and leaves the human to look. This is what the human looks with. It
+The live executor can try, once, to sell a broken cycle's position straight back to
+USDT (live.auto_unwind). This is what you look at when that did not work, or was not
+attempted, or you want to see what it did. It
 prints every balance marked in USDT at the current price, whether the stake declared
 in [live] is still on the exchange, any resting orders, the persisted risk state, the
 kill-switch file and the last order intents from the journal, then says in plain words
@@ -95,7 +96,54 @@ def describe_entry(entry: dict[str, Any]) -> str:
         return f"{when}  response  {cid:14}  {str(payload)[:80]}"
     if kind == "error":
         return f"{when}  error     {cid:14}  {str(entry.get('error', ''))[:100]}"
+    if kind == "unwind_plan":
+        stranded = entry.get("stranded") or {}
+        route = entry.get("route") or {}
+        held = ", ".join(f"{q:.8f} {a} via {route.get(a) or 'NO MARKET'}" for a, q in stranded.items()) or "nothing"
+        return f"{when}  [unwind] plan            sell {held} back to {entry.get('start_asset', '?')}"
+    if kind == "unwind_intent":
+        p = entry.get("params") or {}
+        return (f"{when}  [unwind] intent  {cid:14}  SELL {p.get('symbol', '?'):10} qty {p.get('quantity', '?')} "
+                f"@ {p.get('price', '?')}  (attempt {entry.get('attempt', '?')} of {entry.get('of', '?')})")
+    if kind == "unwind_response":
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            return (f"{when}  [unwind] response{cid:14}  {payload.get('status', '?')} executedQty "
+                    f"{payload.get('executedQty', '?')} cummulativeQuoteQty {payload.get('cummulativeQuoteQty', '?')}")
+        return f"{when}  [unwind] response{cid:14}  {str(payload)[:80]}"
+    if kind == "unwind_error":
+        return f"{when}  [unwind] error   {cid:14}  {str(entry.get('error', ''))[:100]}"
+    if kind == "unwind_dust":
+        return (f"{when}  [unwind] dust            {float(entry.get('qty', 0) or 0):.8f} {entry.get('asset', '?')} "
+                f"(~{float(entry.get('usd', 0) or 0):.2f} USD) unsellable on {entry.get('symbol', '?')} "
+                f"({entry.get('filter', '?')}); written off at zero")
+    if kind == "unwind_done":
+        return (f"{when}  [unwind] done            "
+                + ("FLAT after " + str(entry.get("attempts", 0)) + " order(s)" if entry.get("flat")
+                   else "STILL EXPOSED: " + str(entry.get("left", ""))[:90]))
     return f"{when}  {kind:9} {cid:14}  {json.dumps({k: v for k, v in entry.items() if k not in ('ts', 'kind', 'client_id')})[:100]}"
+
+
+def unwind_summary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last unwind attempt in the journal tail, and which of its orders never got an
+    answer. An unanswered unwind intent is the one state in which a human selling by hand
+    can double-sell, so it is what `reconcile` shouts about."""
+    start = None
+    for i, e in enumerate(entries):
+        if e.get("kind") == "unwind_plan":
+            start = i
+    if start is None:
+        return None
+    tail = entries[start:]
+    intents = [e for e in tail if e.get("kind") == "unwind_intent"]
+    answered = {str(e.get("client_id", "")) for e in tail if e.get("kind") in ("unwind_response", "unwind_error")}
+    return {
+        "plan": tail[0],
+        "intents": intents,
+        "in_flight": [str(e.get("client_id", "")) for e in intents if str(e.get("client_id", "")) not in answered],
+        "dust": [e for e in tail if e.get("kind") == "unwind_dust"],
+        "done": next((e for e in tail if e.get("kind") == "unwind_done"), None),
+    }
 
 
 def journal_touches(entries: list[dict[str, Any]], asset: str) -> bool:
@@ -237,6 +285,11 @@ async def reconcile_report(rest: Any, capital_usd: float, max_cumulative_loss_pc
         verdict += " [open orders could not be listed, so flatness is unproven]"
     if kill_switch_present:
         verdict += f" [kill switch file {kill_switch_file} is present: no leg will be sent until it is removed]"
+    unwind = unwind_summary(journal_entries)
+    in_flight = (unwind or {}).get("in_flight") or []
+    if in_flight:
+        verdict += (f" [unwind order(s) {', '.join(in_flight)} have no recorded answer: look them up on Binance by "
+                    f"client order id BEFORE selling anything by hand, you may already be flat]")
     return {
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "balances": rows, "total_usdt": total, "usdt_free": usdt_free, "usdt_locked": usdt_locked,
@@ -245,6 +298,7 @@ async def reconcile_report(rest: Any, capital_usd: float, max_cumulative_loss_pc
         "state_file": str(state_file) if state_file else None, "state": state, "state_error": state_error,
         "kill_switch_file": str(kill_switch_file) if kill_switch_file else None, "kill_switch_present": kill_switch_present,
         "journal": [describe_entry(e) for e in journal_entries],
+        "unwind": unwind, "unwind_in_flight": in_flight,
         "inventory": inventory, "unpriced": unpriced, "flat": flat, "halted": halted, "verdict": verdict,
     }
 
@@ -258,7 +312,7 @@ def clear_halt(state_file: Path) -> dict[str, Any]:
     if "error" in previous:
         raise ValueError(f"cannot read {state_file}: {previous['error']}")
     updated = dict(previous)
-    updated.update({"halted": False, "halt_sticky": False, "halt_reason": ""})
+    updated.update({"halted": False, "halt_sticky": False, "halt_reason": "", "halt_token": ""})
     state_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         st = state_file.stat()
@@ -315,6 +369,17 @@ def format_report(rep: dict[str, Any]) -> str:
         lines.append(f"risk state ({rep['state_file']}): day {st.get('day')}, realized today {float(st.get('daily_realized_usd', 0) or 0):+.4f} USD, {halted}")
     if rep.get("kill_switch_present"):
         lines.append(f"kill switch: {rep['kill_switch_file']} is PRESENT (no leg will be sent; preflight refuses to arm)")
+    unwind = rep.get("unwind")
+    if unwind:
+        lines.append("last unwind: " + describe_entry(unwind["plan"]).split("[unwind] plan")[-1].strip())
+        for intent in unwind["intents"]:
+            lines.append("  " + describe_entry(intent).split("  ", 1)[-1])
+        for d in unwind["dust"]:
+            lines.append("  " + describe_entry(d).split("  ", 1)[-1])
+        if unwind.get("done"):
+            lines.append("  " + describe_entry(unwind["done"]).split("  ", 1)[-1])
+        for cid in rep.get("unwind_in_flight") or []:
+            lines.append(f"  {cid}: NO ANSWER RECORDED: LOOK THIS ORDER UP BY CLIENT ID BEFORE SELLING ANYTHING BY HAND")
     if rep["journal"]:
         lines.append(f"last {len(rep['journal'])} journal entries:")
         lines.extend("  " + j for j in rep["journal"])
