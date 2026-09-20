@@ -54,7 +54,14 @@ class BinanceHTTPError(RuntimeError):
         self.status = status
         self.payload = payload
         code = payload.get("code") if isinstance(payload, dict) else None
-        msg = payload.get("msg") if isinstance(payload, dict) else str(payload)[:200]
+        if isinstance(payload, dict):
+            msg = payload.get("msg")
+            if msg is None:  # a non-JSON body (CDN block page, maintenance HTML) arrives as {"raw": text}
+                raw = payload.get("raw")
+                msg = " ".join(str(raw).split())[:200] if raw else "(empty body)"
+        else:
+            msg = str(payload)[:200]
+        self.detail = msg
         super().__init__(f"binance HTTP {status} code={code}: {msg}")
 
 
@@ -69,6 +76,39 @@ class OrderNeverArrived(RuntimeError):
 ABORT_DRIFT_BPS = 50.0  # mid-cycle, only a dislocation this large stops us completing the cycle
 UNKNOWN_STATUS_CODES = (-1006, -1007)  # UNEXPECTED_RESP / TIMEOUT: "execution status unknown"
 LOOKUP_ATTEMPTS = 3
+
+
+REACHABILITY_PATH = "/api/v3/ping"
+
+
+async def check_reachability(rest: "BinanceRest") -> str | None:
+    """Ask the TRADING host (not the public market-data mirror) whether it serves this
+    machine's own IP. Returns None when it answers 200, otherwise one reason not to arm.
+
+    The public mirror answers everywhere, so without this check a geo-blocked machine
+    passed the clock sync and only failed at the first signed call, with an error that
+    did not say why. HTTP 451 is "unavailable for legal reasons": the answer is to run
+    from a permitted region, never to tunnel around it.
+    """
+    host = rest.base_url
+    try:
+        payload = await rest.request("GET", REACHABILITY_PATH, signed=False)
+    except BinanceHTTPError as exc:
+        if exc.status == 451:
+            return (f"{host} answered HTTP 451 (unavailable for legal reasons): Binance does not serve this "
+                    f"machine's IP region. Run the bot from a permitted region on its own IP; do not tunnel through "
+                    f"a VPN or proxy, which breaches the Binance terms and risks a frozen account")
+        if exc.status == 403:
+            return f"{host} answered HTTP 403: the request was refused (blocked IP or firewall); check the machine's IP before arming"
+        return f"{host} answered HTTP {exc.status} to {REACHABILITY_PATH}: {exc.detail}"
+    except Exception as exc:
+        return f"cannot reach {host}: {type(exc).__name__}: {exc}"
+    if payload != {}:  # GET /api/v3/ping is documented to answer exactly {}
+        shown = payload["raw"] if isinstance(payload, dict) and "raw" in payload else json.dumps(payload)
+        return (f"{host} answered 200 to {REACHABILITY_PATH} with a body that is not Binance's ({shown[:80]!r}): "
+                f"something between this machine and Binance (proxy, web filter, captive portal) is answering; "
+                f"check the machine's network path before arming")
+    return None
 
 
 def sign_query(params: dict[str, Any], secret: str) -> str:
@@ -175,6 +215,8 @@ class BinanceLiveExecutor:
         self.risk = risk
         self.real_orders = bool(real_orders and cfg.real_orders)
         self.max_notional_usd = max_notional_usd
+        self.capital_usd = float(cfg.capital_usd or 0.0)  # the engine measures the drawdown cap against this
+        self.max_cumulative_loss_pct = float(cfg.max_cumulative_loss_pct)
         self.intent_log = Path(intent_log) if intent_log else None
         self.trades = 0
         self.rejected = 0
@@ -195,6 +237,12 @@ class BinanceLiveExecutor:
     async def preflight(self, symbols: list[str]) -> list[str]:
         """Return a list of reasons NOT to arm live trading (empty = go)."""
         problems: list[str] = []
+        unreachable = await check_reachability(self.rest)
+        if unreachable:
+            # no signed call leaves the machine when the trading host will not serve it;
+            # the local checks at the bottom still run so the report is complete
+            problems.append(unreachable)
+            return self._local_preflight(symbols, problems)
         try:
             offset = await self.rest.sync_time()
             if abs(offset) > self.cfg.recv_window_ms / 2:
@@ -224,6 +272,19 @@ class BinanceLiveExecutor:
             usdt = free.get("USDT", 0.0)
             if usdt < 2 * self.max_notional_usd:
                 problems.append(f"free USDT {usdt:.2f} is below 2x max notional ({2 * self.max_notional_usd:.2f})")
+            if self.capital_usd:
+                # The stake may be down by the kill budget and still re-arm (a restart after a
+                # losing day, a crash, or a reconciled halt); below that floor the cumulative
+                # loss rule has fired and the settings, not the balance, are what to change.
+                floor = self.capital_usd * (1.0 - self.max_cumulative_loss_pct / 100.0)
+                if usdt < floor - 0.01:
+                    problems.append(f"free USDT {usdt:.2f} is below the kill floor {floor:.2f} (live.capital_usd "
+                                    f"{self.capital_usd:.2f} less {self.max_cumulative_loss_pct:g}% max_cumulative_loss_pct): "
+                                    f"the cumulative loss budget is spent; do not restart on the same settings")
+                elif usdt < self.capital_usd - 0.01:
+                    log.warning("LIVE preflight: free USDT %.2f is %.2f below live.capital_usd %.2f (inside the %g%% kill "
+                                "budget); the drawdown cap is measured against the declared stake",
+                                usdt, self.capital_usd - usdt, self.capital_usd, self.max_cumulative_loss_pct)
         except Exception as exc:
             problems.append(f"cannot read account balances: {exc}")
         try:
@@ -231,6 +292,10 @@ class BinanceLiveExecutor:
                 "symbol": symbols[0] if symbols else "BTCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": "10"})
         except Exception as exc:
             problems.append(f"order/test smoke call failed: {exc}")
+        return self._local_preflight(symbols, problems)
+
+    def _local_preflight(self, symbols: list[str], problems: list[str]) -> list[str]:
+        """The checks that need no network: exchange filters, kill switch, halt state."""
         missing = [s for s in symbols if (m := self.book.market(BINANCE, s)) is None or not m.step_size or not m.tick_size]
         if missing:
             problems.append(f"no exchange filters for {', '.join(missing[:6])}{'...' if len(missing) > 6 else ''} "
@@ -364,37 +429,43 @@ class BinanceLiveExecutor:
         carry: float | None = None  # units of this leg's input asset delivered by the previous leg
         fee_rate = self.fees.taker(BINANCE)
         for i, leg in enumerate(opp.legs):
-            if self.risk is not None:
-                ok, reason = self.risk.allow_leg(time.time())
-                if not ok:
-                    return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {reason}")
-            gate = self._gate_leg(opp, i, min_edge_bps, now)
-            if gate:
-                return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {gate}")
-            market = self.book.market(BINANCE, leg.symbol)
-            if market is None:
-                return self._abort(opp, fills, deltas, now, f"unknown market {leg.symbol}")
-            q = self._current(leg.symbol, now)
-            limit_price = (q.ask if leg.side == "buy" else q.bid) if q else leg.price
-            if carry is None:
-                qty = leg.qty
-            elif leg.side == "sell":
-                qty = min(leg.qty, carry)
-            else:
-                # Binance takes the buy commission from the received asset, so the whole
-                # carry can be spent; round_step's ROUND_DOWN is the safety margin.
-                qty = min(leg.qty, carry / limit_price)
-            p_dec, q_dec, reason = size_order(market, limit_price, qty, leg.side)
-            if reason:
-                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {reason}")
-            client_id = f"arb{uuid.uuid4().hex[:24]}"
-            # LIMIT + IOC at the current touch: fills what is there at that price or better,
-            # never chases a thin book the way a MARKET order would.
-            params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "LIMIT", "timeInForce": "IOC",
-                      "price": format(p_dec, "f"), "quantity": format(q_dec, "f"),
-                      "newClientOrderId": client_id, "newOrderRespType": "FULL"}
-            self._journal({"ts": time.time(), "kind": "intent", "endpoint": self.endpoint, "real": self.real_orders,
-                           "client_id": client_id, "params": params, "opportunity": opp.description})
+            # Everything before the send is wrapped: after a filled leg, a failure here (a full
+            # disk under the intent journal, a sizing error) must book the known fills through
+            # _abort, never escape as a crash that books nothing.
+            try:
+                if self.risk is not None:
+                    ok, reason = self.risk.allow_leg(time.time())
+                    if not ok:
+                        return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {reason}")
+                gate = self._gate_leg(opp, i, min_edge_bps, now)
+                if gate:
+                    return self._abort(opp, fills, deltas, now, f"leg {i + 1}: {gate}")
+                market = self.book.market(BINANCE, leg.symbol)
+                if market is None:
+                    return self._abort(opp, fills, deltas, now, f"unknown market {leg.symbol}")
+                q = self._current(leg.symbol, now)
+                limit_price = (q.ask if leg.side == "buy" else q.bid) if q else leg.price
+                if carry is None:
+                    qty = leg.qty
+                elif leg.side == "sell":
+                    qty = min(leg.qty, carry)
+                else:
+                    # Binance takes the buy commission from the received asset, so the whole
+                    # carry can be spent; round_step's ROUND_DOWN is the safety margin.
+                    qty = min(leg.qty, carry / limit_price)
+                p_dec, q_dec, reason = size_order(market, limit_price, qty, leg.side)
+                if reason:
+                    return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {reason}")
+                client_id = f"arb{uuid.uuid4().hex[:24]}"
+                # LIMIT + IOC at the current touch: fills what is there at that price or better,
+                # never chases a thin book the way a MARKET order would.
+                params = {"symbol": leg.symbol, "side": leg.side.upper(), "type": "LIMIT", "timeInForce": "IOC",
+                          "price": format(p_dec, "f"), "quantity": format(q_dec, "f"),
+                          "newClientOrderId": client_id, "newOrderRespType": "FULL"}
+                self._journal({"ts": time.time(), "kind": "intent", "endpoint": self.endpoint, "real": self.real_orders,
+                               "client_id": client_id, "params": params, "opportunity": opp.description})
+            except Exception as exc:  # the journal may be what failed: do not try to journal the error
+                return self._abort(opp, fills, deltas, now, f"{leg.symbol}: {exc!r} before send")
             try:
                 payload = await self._send(params, client_id)
             except asyncio.CancelledError:

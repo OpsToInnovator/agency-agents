@@ -111,3 +111,63 @@ def test_nothing_is_sent_after_stop():
     run(eng.handle(quote(BTC_BINANCE, 100, 101, ts=1000.0)))
     assert ex.executed == [] and eng._inflight is None
     assert eng.book.get(BINANCE, "BTCUSDT") is not None  # the book still updates
+
+
+class StakedExecutor(FakeRemoteExecutor):
+    """A live-style executor: no marked equity, only realized PnL and a configured stake."""
+    capital_usd = 500.0
+
+    def __init__(self, loss_per_fill):
+        super().__init__()
+        self.realized_pnl_usd = 0.0
+        self.loss = loss_per_fill
+
+    async def execute(self, opp, now, min_edge_bps=0.0):
+        self.executed.append(opp)
+        self.realized_pnl_usd -= self.loss
+        return TradeRecord(opp, [], "filled", "", -self.loss, now)
+
+
+class PerQuoteDetector:
+    name = "fake"
+
+    def on_quote(self, q, book, now):
+        leg = Leg(BINANCE, "BTCUSDT", "buy", "BTC", "USDT", 100.0, 0.5, 0.001)
+        return [Opportunity("triangular", now, [leg], 25.0, 5.0, 50.0, 0.25, "x", quote_ages_ms=[1.0])]
+
+
+def _drive(ex, cfg_overrides):
+    cfg = load_config(None, {"risk": {"max_daily_loss_usd": 1000.0, "max_drawdown_pct": 5.0, **cfg_overrides}})
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+    risk = RiskManager(cfg.risk, cfg.detection)
+    rep = Recorder()
+    clock = Clock()
+    eng = Engine(cfg, book, [], [PerQuoteDetector()], risk, ex, rep, clock)
+
+    async def scenario():
+        for i, t in enumerate((1000.0, 1003.0, 1006.0, 1009.0)):  # past the 2 s per-key cooldown each time
+            clock.set(t)
+            await eng.handle(quote(BTC_BINANCE, 100 + i, 101 + i, ts=t))  # an unchanged quote is skipped
+            if eng._inflight is not None:
+                await eng._inflight
+
+    run(scenario())
+    return rep, risk
+
+
+def test_live_drawdown_cap_measures_realized_pnl_against_the_configured_stake():
+    ex = StakedExecutor(13.0)
+    rep, risk = _drive(ex, {})
+    # the curve starts at 0; the second fill sits 26 below it, past 5% of US$500
+    assert [t.status for t in rep.trades] == ["filled", "filled"]
+    assert risk.halted and "drawdown cap hit" in risk.halt_reason and "5.20% of capital" in risk.halt_reason
+    assert len(ex.executed) == 2 and any("drawdown cap hit" in r[1] for r in rep.rejected)  # the rest were refused
+
+
+def test_live_drawdown_cap_stays_off_without_a_configured_stake():
+    ex = StakedExecutor(13.0)
+    ex.capital_usd = 0.0  # the default: balances are on the exchange and no stake was declared
+    rep, risk = _drive(ex, {})
+    assert [t.status for t in rep.trades] == ["filled"] * 4 and not risk.halted
+    assert risk.peak_pnl_usd is None

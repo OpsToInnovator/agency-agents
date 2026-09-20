@@ -259,9 +259,29 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     return 1 if stats.feed_errors else 0
 
 
+async def connectivity_check(cfg: Config, session: Any | None = None) -> tuple[int, str]:
+    """Does the Binance TRADING host serve this machine's own IP? Needs no keys and no [live]
+    section: it is the one thing to know before renting a VPS or funding an account."""
+    from .execution.live import BinanceRest, check_reachability
+
+    rest = BinanceRest(cfg.venues.binance_trade_rest, "", "", cfg.live.recv_window_ms, session,
+                       public_base_url=cfg.venues.binance_rest)
+    try:
+        reason = await check_reachability(rest)
+    finally:
+        await rest.close()
+    if reason:
+        return 1, f"FAIL {reason}"
+    return 0, f"OK: {rest.base_url} serves this machine's IP (HTTP 200 on /api/v3/ping)"
+
+
 async def cmd_preflight(args: argparse.Namespace) -> int:
     """Check everything live mode needs, without starting the scanner."""
     cfg = load_config(args.config, _overrides(args))
+    if getattr(args, "connectivity", False):
+        rc, message = await connectivity_check(cfg)
+        print(message, file=sys.stderr if rc else sys.stdout)
+        return rc
     if not cfg.live.enabled:
         print("set [live] enabled = true in the config file first", file=sys.stderr)
         return 2
@@ -278,9 +298,10 @@ async def cmd_preflight(args: argparse.Namespace) -> int:
         await executor.close()
     if problems:
         for p in problems:
-            print(f"FAIL {p}")
+            print(f"FAIL {p}", file=sys.stderr)  # every FAIL diagnostic of this CLI goes to stderr, OK to stdout
         return 1
-    print(f"OK: clock offset {executor.rest.time_offset_ms:+.0f} ms, key restrictions fine, balances sufficient, order/test accepted")
+    print(f"OK: {executor.rest.base_url} reachable, clock offset {executor.rest.time_offset_ms:+.0f} ms, "
+          f"key restrictions fine, balances sufficient, order/test accepted")
     return 0
 
 
@@ -332,9 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--static", action="store_true")
     m.set_defaults(func=cmd_markets)
 
-    pf = sub.add_parser("preflight", help="check clock, key permissions, balances and order/test for live mode")
+    pf = sub.add_parser("preflight", help="check reachability, clock, key permissions, balances and order/test for live mode")
     common(pf)
     pf.add_argument("--static", action="store_true")
+    pf.add_argument("--connectivity", action="store_true",
+                    help="only ask the Binance trading host whether it serves this machine's IP (no keys needed)")
     pf.set_defaults(func=cmd_preflight)
     return p
 

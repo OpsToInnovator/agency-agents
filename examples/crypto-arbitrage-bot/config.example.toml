@@ -16,7 +16,7 @@ track_stable_rates = true     # subscribe USDT-USD so USDT prices convert to USD
 taker_fee_bps = { binance = 10.0, coinbase = 60.0, kraken = 80.0 }
 binance_ws = "wss://data-stream.binance.vision/stream"   # api.binance.com is HTTP 451 in some regions
 binance_rest = "https://data-api.binance.vision"
-binance_trade_rest = "https://api.binance.com"           # signed endpoints, live mode only
+binance_trade_rest = "https://api.binance.com"           # signed endpoints in live mode, and the unsigned reachability ping
 coinbase_ws = "wss://ws-feed.exchange.coinbase.com"
 coinbase_rest = "https://api.exchange.coinbase.com"
 kraken_ws = "wss://ws.kraken.com/v2"
@@ -63,6 +63,8 @@ assumed_rtt_ms = 150.0        # detection -> venue per leg; triangle legs are se
 [live]
 enabled = false               # must be true AND pass --live on the CLI
 real_orders = false           # must be true AND pass --i-know-this-sends-real-orders
+capital_usd = 0.0             # stake at risk, USD; live mode measures risk.max_drawdown_pct against it (0 = that cap off live)
+max_cumulative_loss_pct = 10.0  # preflight refuses to re-arm once free USDT is below capital_usd less this budget
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

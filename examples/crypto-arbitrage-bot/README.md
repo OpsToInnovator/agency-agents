@@ -151,8 +151,9 @@ kraken ticker(bbo) ─┘    + USDT→USD rate        anomaly (report only)     
 - **Risk manager** (runs before any executor): minimum net edge, maximum plausible edge,
   minimum profit in dollars, quote staleness, detection latency, per-trade notional cap,
   daily realized-loss cap (halts for the UTC day, persisted to `logs/risk_state.json`
-  so a restart cannot reset it) and a drawdown-from-peak cap on the session's PnL
-  curve (paper mode, where equity can be marked),
+  so a restart cannot reset it) and a drawdown-from-peak cap on the PnL curve (marked
+  equity in paper mode; realized PnL against `live.capital_usd` in live mode), with a
+  fresh budget each UTC day and each process start,
   trades-per-minute limit, per-opportunity cooldown, and a kill-switch file (`STOP` in
   the working directory stops all trading instantly, checked again before every live leg).
 - **Feeds**: one WebSocket connection per venue, exponential backoff with jitter on
@@ -245,7 +246,9 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `detection.max_plausible_net_edge_bps` | 200 | Larger "edges" are bad data |
 | `risk.max_notional_per_trade_usd` | 100 | Per-trade size cap (also caps detector sizing) |
 | `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
-| `risk.max_drawdown_pct` | 5.0 | Session PnL this far (as % of capital) below its peak halts for the day (0 = off; paper mode) |
+| `risk.max_drawdown_pct` | 5.0 | PnL this far (as % of capital) below the day's opening PnL or intraday peak halts for the day (0 = off; live mode needs `live.capital_usd`) |
+| `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it (0 = that cap off live) |
+| `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once free USDT is below the stake less this |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -265,13 +268,17 @@ machine, and even then it goes to Binance's **validation-only** endpoint:
    (fills what is there at that price or better, never chases the book). Keys come from the environment
    (`BINANCE_API_KEY`, `BINANCE_API_SECRET`); they are never read from the config file
    and never written to any log.
-3. The risk manager still applies: kill switch, daily loss cap, notional cap, plausibility.
+3. The risk manager still applies: kill switch, daily loss cap, drawdown cap (when
+   `live.capital_usd` is set), notional cap, plausibility.
 
 What the live path does to protect you:
 
 - `python3 -m arbbot preflight` (also run automatically by `scan --live`) refuses to arm
-  unless the clock offset to the exchange is small, the symbols are `TRADING`, the API
-  key **cannot withdraw**, free USDT covers two trades, and an `order/test` call succeeds.
+  unless the trading host serves this machine's own IP (an HTTP 451 geo-block is reported
+  as such and no signed request is sent; `preflight --connectivity` runs just that check
+  without keys), the clock offset to the exchange is small, the symbols are `TRADING`, the API
+  key **cannot withdraw**, free USDT covers two trades and, when `live.capital_usd` is
+  set, the stake less its kill budget, and an `order/test` call succeeds.
 - Every order gets a `newClientOrderId`; its intent is appended to
   `logs/live_intents.jsonl` and flushed to disk **before** the request is sent.
 - A timeout or ambiguous response is never retried blind. The order is looked up by
@@ -305,7 +312,7 @@ checked against the venues' published pages and this bot's own logs on 2026-09-1
 | Cheapest Binance triangle fee floor, retail, paying fees in BNB | 22.5 bps (3 × 7.5) |
 | Cheapest cross-venue floor on venues licensed for Australians | 20 bps (Binance + OKX AU, USDT books; 17.5 with BNB) |
 | Gross triangle edge observed, 3,270 cycle observations | median −0.65 bps, max +2.04 bps |
-| Expected net per attempted cycle at the best legal floor | about −15.7 bps, before slippage and latency |
+| Expected net per attempted cycle, median gross less the fee floor | about −31 bps at the shipped 10 bps taker fee, −23 bps paying fees in BNB, before slippage and latency |
 | 10-minute live scan: gross-positive / net-positive / sent | 355,689 / 12 / 0 |
 
 Levers that look cheaper are not available to this strategy: 0 % maker fees exist only
@@ -322,8 +329,12 @@ APIs return reproduces the viral-post fee model.
 **Step 0b, measure your latency (24 h).** Run `bash scripts/rtt_probe.sh >> rtt.log &` on
 the machine that will trade. It logs the warm-connection round trip to each venue once a
 minute. Put the p90 of the slowest venue you trade into `paper.assumed_rtt_ms`, or the
-arrival model flatters you. Check `api.binance.com` answers HTTP 200 from that machine's
-IP before renting a VPS for it; do not use a VPN (it breaches the Binance terms).
+arrival model flatters you. On the same machine run `python3 -m arbbot preflight
+--connectivity`: it asks the Binance trading host, not the public market-data mirror,
+whether it serves the machine's own IP, and reports a geo-block (HTTP 451, "unavailable
+for legal reasons") in plain words. `scan --live` runs the same check first and refuses
+to arm on it. Do it before renting a VPS. Do not tunnel around a 451 with a VPN or proxy:
+it breaches the Binance terms and the usual outcome is a frozen account.
 
 **Step 1, the 7-day paper run.** On an always-on machine:
 
@@ -378,6 +389,41 @@ below 30 % over 50 sends, realized under a quarter of promised, HTTP 418/429, a 
 change, a venue-disagreement anomaly on an asset traded that day, clock drift over 1 s.
 Even a passing stage C is a fill-quality test, not income: the GO bar scales to about
 US$0.28/day at A$20, below the cost of the VPS.
+
+**If you would rather commit money now: a US$500 start.** The stake changes nothing
+about the expectancy, so treat it as buying real fill data with a fixed loss budget, not as
+income. `live.example.toml` is sized for it; every limit is a fraction of the stake, and the
+paper measurement runs alongside on the same machine rather than before.
+
+| Rule | Setting | Why |
+| --- | --- | --- |
+| Per trade | US$50, 10 % | displayed top-of-book depth rarely allows more anyway |
+| Per UTC day | US$5 realized, 1 % | the daily-loss cap halts for the day |
+| Drawdown | 5 %, US$25 below the day's opening PnL or its intraday peak | measured against `live.capital_usd`; a fresh budget each UTC day and each process start. Behind a US$5 daily cap it only fires after a day runs up more than US$20 and gives it back |
+| Kill | US$50 cumulative, 10 % | `live.max_cumulative_loss_pct`: preflight refuses to re-arm once free USDT is below US$450. `touch STOP`, write the post-mortem, do not restart on the same settings |
+
+The sequence is the staged one above, compressed: day 0, KYC'd account, spot-only key
+whitelisted to the machine with withdrawals off, `preflight --connectivity`, `read_fees.py`,
+500 USDT on the exchange, plus about US$50 of BNB if fees are to be paid in BNB (each
+filled US$50 cycle costs US$0.11 of it), `preflight` OK. Day 1, stage B with
+validation-only orders. From day 2, real orders at US$50 with the 7-day paper run logging
+to a second directory. Weekly, `scripts/rollup.py logs/live --scan-log live.log --capital-usd 500
+--cooldown-s 5` scores the same criteria on live fills (`live.log` is the scan's stderr,
+captured with `2>>live.log` as in the measurement loop). The per-trade cap stays at 10 % of
+whatever the stake is; a bigger cap means a bigger stake, and only after a month of positive
+live realized PnL and a passing scorecard.
+
+The arithmetic to expect, at the shipped 10 bps taker fee: the median cycle is −0.65 bps
+gross and the three legs cost 30 bps, so an attempted US$50 cycle loses about US$0.15,
+the daily cap allows roughly 33 losing fills and the kill rule about 330. Paying fees in
+BNB (7.5 bps a leg) makes that about US$0.12, 43 and 430, and burns about US$5 of BNB per
+capped day. The only net-positive triangles this bot has recorded are the five
+observations of one USDT → UNI → BTC → USDT episode in the 10-minute scan, four at
++1.7 bps and one at +12.7 bps net of 10 bps legs as promised at detection, before
+slippage and latency: US$0.06 for the best and under US$0.01 for the others at US$50.
+Fixed costs on top of the stake: a Tokyo VPS at US$5 to 20 a month, 0.8 to 1.8 % on the
+AUD to USDT round trip, and the BNB. What the stake buys is the one thing the paper run
+cannot: real fill rates and the real latency tax on Binance triangles.
 
 **What the measurement will not change.** Australian bank rails cap exchange payments
 (CommBank: A$10,000 per calendar month, no exemptions); moving AUD to USDT and back
@@ -453,6 +499,7 @@ scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block 
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
 scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
 measure7d.toml      the 7-day measurement config (paper only)
+live.example.toml   a US$500 live start: stage B by default, limits as fractions of the stake
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 

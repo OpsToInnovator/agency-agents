@@ -523,12 +523,12 @@ def scorecard(days: list[DayKind], capital_usd: float, n_days: int, ops: dict[st
     dd = max_drawdown([p for d in days for p in d.pnls])
     dd_ok = dd <= 0.02 * capital_usd
     if ops is None:
-        crit.append(Criterion("G8", "max drawdown <= 2% of paper capital in play and zero daily-loss-cap halts",
+        crit.append(Criterion("G8", "max drawdown <= 2% of the capital in play and zero daily-loss-cap halts",
                               MANUAL if dd_ok else False,
                               f"drawdown {dd:.4f} USD vs {0.02 * capital_usd:.2f} allowed; halts need --scan-log"))
     else:
         halts = int(ops.get("daily_loss_halts", 0))
-        crit.append(Criterion("G8", "max drawdown <= 2% of paper capital in play and zero daily-loss-cap halts",
+        crit.append(Criterion("G8", "max drawdown <= 2% of the capital in play and zero daily-loss-cap halts",
                               dd_ok and halts == 0, f"drawdown {dd:.4f} USD vs {0.02 * capital_usd:.2f} allowed; {halts} daily-loss halt(s)"))
     if ops is None:
         crit.append(Criterion("G9", "ops: < 5 disconnects/day/venue, 0 handler errors, stale share < 30%", MANUAL, "needs --scan-log"))
@@ -683,7 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=7, help="complete UTC days the scorecard needs (default 7)")
     ap.add_argument("--cooldown-s", type=float, default=2.0, help="risk.cooldown_s used in the run (default 2)")
     ap.add_argument("--capital-usd", type=float, default=1000.0,
-                    help="paper capital in play for the drawdown test (default 1000 = one venue's starting quote)")
+                    help="capital in play for the drawdown test: the paper starting quote (default 1000) "
+                         "or live.capital_usd for a live run's logs")
     ap.add_argument("--min-day-coverage", type=float, default=0.95,
                     help="fraction of a UTC day the runs must have been up for it to count as complete (default 0.95)")
     ap.add_argument("--include-today", action="store_true", help="score the current, incomplete UTC day too")

@@ -1,0 +1,55 @@
+# A US$500 live start on Binance triangles. Copy to live.toml, replace the fee block with what
+# scripts/read_fees.py printed, keep the API keys in the environment (never in this file), and
+# read the README section "A US$500 start". Every number below is a fraction of the stake:
+# 10% per trade, 1% per day, 5% below the session peak, and the kill rule at 10% cumulative.
+#
+#   day 0   python3 -m arbbot preflight --connectivity --config live.toml      (from the trading machine)
+#           python3 -m arbbot preflight --config live.toml                     (keys, balance, order/test)
+#   stage B python3 -m arbbot scan --live --config live.toml 2>>live.log       (validation-only orders, 1 day)
+#   stage C set real_orders = true, then
+#           python3 -m arbbot scan --live --i-know-this-sends-real-orders --config live.toml 2>>live.log
+#   weekly  python3 scripts/rollup.py logs/live --scan-log live.log --capital-usd 500 --cooldown-s 5
+
+[universe]
+top_n = 60
+auto_discover = true            # live orders need the exchange filters; --static has none and preflight refuses
+venues = ["binance"]            # only Binance triangles can be sent live
+triangle_quotes = ["BTC", "ETH", "BNB"]
+track_stable_rates = false      # no USD venue to convert against
+
+[venues]
+taker_fee_bps = { binance = 10.0 }   # REPLACE with scripts/read_fees.py; 7.5 only if fees are really paid in BNB
+
+[detection]
+cross_exchange = false          # needs a second venue, and could not be sent live anyway
+triangular = true
+anomaly = true
+min_net_edge_bps = 1.0
+max_plausible_net_edge_bps = 200.0
+
+[risk]
+max_notional_per_trade_usd = 50.0   # 10% of the stake; preflight wants 2x this in free USDT
+max_daily_loss_usd = 5.0            # 1% of the stake, realized; trading halts for the UTC day when hit
+max_trades_per_minute = 5
+cooldown_s = 5.0
+max_detect_latency_ms = 250.0
+kill_switch_file = "STOP"           # touch STOP to stop trading; the kill rule below says when
+min_profit_usd = 0.005              # 1 bps of a US$50 trade; below that a fill is three CGT events for nothing
+max_drawdown_pct = 5.0              # US$25 below the day's opening realized PnL or its intraday peak, against live.capital_usd;
+                                    # a fresh budget each UTC day and each process start
+state_file = "logs/live/risk_state.json"
+
+[live]
+enabled = true
+real_orders = false                 # stage B first (POST /api/v3/order/test); set true for stage C
+capital_usd = 500.0                 # the stake at risk: the drawdown cap is a percentage of this
+max_cumulative_loss_pct = 10.0      # the kill rule: preflight refuses to re-arm once free USDT is below 450
+api_key_env = "BINANCE_API_KEY"
+api_secret_env = "BINANCE_API_SECRET"
+recv_window_ms = 5000
+intent_log = "logs/live/live_intents.jsonl"
+
+[report]
+interval_s = 10.0
+log_dir = "logs/live"
+write_jsonl = true

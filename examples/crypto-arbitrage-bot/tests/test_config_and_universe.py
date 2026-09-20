@@ -145,3 +145,41 @@ def test_static_universe_respects_symbols_and_venues():
     assert {m.symbol for m in markets if m.venue == KRAKEN} == {"BTC/USD", "USDT/USD", "USDC/USD"}
     assert not any(m.venue == COINBASE for m in markets)
     assert STATIC_BASES[0] == "BTC"
+
+
+def test_live_example_config_is_a_stage_b_start_sized_to_the_stake():
+    from arbbot.config import ConfigError, load_config
+
+    cfg = load_config(ROOT / "live.example.toml")
+    assert cfg.live.enabled is True and cfg.live.real_orders is False  # validation-only orders until flipped
+    assert cfg.live.capital_usd == 500.0
+    assert cfg.risk.max_notional_per_trade_usd == 0.10 * cfg.live.capital_usd
+    assert cfg.risk.max_daily_loss_usd == 0.01 * cfg.live.capital_usd
+    assert cfg.risk.max_drawdown_pct == 5.0 and cfg.risk.min_profit_usd == 0.005
+    assert cfg.universe.venues == ["binance"] and cfg.detection.cross_exchange is False and cfg.detection.triangular is True
+    assert cfg.universe.auto_discover is True  # live orders need exchange filters
+    with pytest.raises(ConfigError):
+        load_config(None, {"live": {"capital_usd": -1.0}})
+
+
+def test_example_config_lists_every_key():
+    """config.example.toml promises "every key ... these are the defaults": keep it true."""
+    import tomllib
+    from dataclasses import fields, is_dataclass
+
+    from arbbot.config import Config
+
+    data = tomllib.loads((ROOT / "config.example.toml").read_text(encoding="utf-8"))
+    for section in fields(Config):
+        sub = getattr(Config(), section.name)
+        assert is_dataclass(sub)
+        assert set(data[section.name]) == {f.name for f in fields(sub)}, section.name
+
+
+def test_live_cumulative_loss_budget_validates():
+    from arbbot.config import ConfigError, load_config
+
+    assert load_config(None, {"live": {"max_cumulative_loss_pct": 0.0}}).live.max_cumulative_loss_pct == 0.0
+    for bad in (-1.0, 100.5):
+        with pytest.raises(ConfigError):
+            load_config(None, {"live": {"max_cumulative_loss_pct": bad}})

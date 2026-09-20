@@ -35,7 +35,9 @@ class VenuesConfig:
     # regions; the binance.vision mirror serves the same public data.
     binance_ws: str = "wss://data-stream.binance.vision/stream"
     binance_rest: str = "https://data-api.binance.vision"
-    binance_trade_rest: str = "https://api.binance.com"  # signed endpoints (live mode only)
+    # Signed endpoints in live mode, and the unsigned reachability ping that `preflight`
+    # and `preflight --connectivity` send (no keys, no [live] section needed).
+    binance_trade_rest: str = "https://api.binance.com"
     coinbase_ws: str = "wss://ws-feed.exchange.coinbase.com"
     coinbase_rest: str = "https://api.exchange.coinbase.com"
     kraken_ws: str = "wss://ws.kraken.com/v2"
@@ -105,6 +107,14 @@ class LiveConfig:
     # Both must be true AND the CLI must be run with --live for orders to be sent.
     enabled: bool = False
     real_orders: bool = False  # false = POST /api/v3/order/test (validates, never fills)
+    # The stake you consider at risk, in USD. Live balances live on the exchange, so the
+    # drawdown-from-peak cap (risk.max_drawdown_pct) is measured against this figure;
+    # 0 leaves that cap off for live mode (the daily loss cap and kill switch still apply).
+    capital_usd: float = 0.0
+    # The kill budget as a percentage of capital_usd. Preflight refuses to re-arm once free
+    # USDT is below capital less this budget: a spent budget means "do not restart on the
+    # same settings", not "top up and carry on".
+    max_cumulative_loss_pct: float = 10.0
     api_key_env: str = "BINANCE_API_KEY"
     api_secret_env: str = "BINANCE_API_SECRET"
     recv_window_ms: int = 5000
@@ -271,6 +281,10 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("paper.fill_model must be 'arrival' or 'instant'")
     if cfg.paper.assumed_rtt_ms < 0:
         raise ConfigError("paper.assumed_rtt_ms must be >= 0")
+    if cfg.live.capital_usd < 0:
+        raise ConfigError("live.capital_usd must be >= 0 (0 = drawdown cap off in live mode)")
+    if not 0 <= cfg.live.max_cumulative_loss_pct <= 100:
+        raise ConfigError("live.max_cumulative_loss_pct must be between 0 and 100")
     band = cfg.detection.stable_rate_band
     if len(band) != 2 or not 0 < band[0] < 1 < band[1]:
         raise ConfigError("detection.stable_rate_band must be [low, high] around 1.0")
