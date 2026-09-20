@@ -216,7 +216,9 @@ class BinanceLiveExecutor:
         self.real_orders = bool(real_orders and cfg.real_orders)
         self.max_notional_usd = max_notional_usd
         self.capital_usd = float(cfg.capital_usd or 0.0)  # the engine measures the drawdown cap against this
+        self.initial_capital_usd = self.capital_usd  # the kill floor is anchored here, whatever compounding does
         self.max_cumulative_loss_pct = float(cfg.max_cumulative_loss_pct)
+        self.compound = bool(cfg.compound)
         self.intent_log = Path(intent_log) if intent_log else None
         self.trades = 0
         self.rejected = 0
@@ -276,10 +278,10 @@ class BinanceLiveExecutor:
                 # The stake may be down by the kill budget and still re-arm (a restart after a
                 # losing day, a crash, or a reconciled halt); below that floor the cumulative
                 # loss rule has fired and the settings, not the balance, are what to change.
-                floor = self.capital_usd * (1.0 - self.max_cumulative_loss_pct / 100.0)
+                floor = self.kill_floor_usd
                 if usdt < floor - 0.01:
                     problems.append(f"free USDT {usdt:.2f} is below the kill floor {floor:.2f} (live.capital_usd "
-                                    f"{self.capital_usd:.2f} less {self.max_cumulative_loss_pct:g}% max_cumulative_loss_pct): "
+                                    f"{self.initial_capital_usd:.2f} less {self.max_cumulative_loss_pct:g}% max_cumulative_loss_pct): "
                                     f"the cumulative loss budget is spent; do not restart on the same settings")
                 elif usdt < self.capital_usd - 0.01:
                     log.warning("LIVE preflight: free USDT %.2f is %.2f below live.capital_usd %.2f (inside the %g%% kill "
@@ -306,6 +308,18 @@ class BinanceLiveExecutor:
             problems.append(f"trading is halted: {self.risk.halt_reason}"
                             + (" (sticky: reconcile, then remove or edit the risk state file)" if self.risk.halt_sticky else ""))
         return problems
+
+    async def read_free_usdt(self) -> float:
+        """Free USDT on the exchange right now (one signed GET); the compounding stake."""
+        account = await self.rest.request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
+        for b in account.get("balances", []):
+            if b.get("asset") == "USDT":
+                return float(b.get("free", 0) or 0)
+        return 0.0
+
+    @property
+    def kill_floor_usd(self) -> float:
+        return self.initial_capital_usd * (1.0 - self.max_cumulative_loss_pct / 100.0)
 
     # -- execution --------------------------------------------------------
     def _journal(self, entry: dict[str, Any]) -> None:

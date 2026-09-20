@@ -171,3 +171,110 @@ def test_live_drawdown_cap_stays_off_without_a_configured_stake():
     rep, risk = _drive(ex, {})
     assert [t.status for t in rep.trades] == ["filled"] * 4 and not risk.halted
     assert risk.peak_pnl_usd is None
+
+
+class CompoundingExecutor(FakeRemoteExecutor):
+    """A live-style executor with compounding on: the engine re-bases from what it reads."""
+    remote = True
+    compound = True
+    initial_capital_usd = 1000.0
+    max_cumulative_loss_pct = 10.0
+
+    def __init__(self, balances):
+        super().__init__()
+        self.balances = list(balances)  # successive free-USDT reads
+        self.reads = 0
+        self.capital_usd = 1000.0
+        self.max_notional_usd = 100.0
+        self.realized_pnl_usd = 0.0
+
+    @property
+    def kill_floor_usd(self):
+        return self.initial_capital_usd * (1 - self.max_cumulative_loss_pct / 100)
+
+    async def read_free_usdt(self):
+        self.reads += 1
+        value = self.balances.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    async def execute(self, opp, now, min_edge_bps=0.0):
+        self.executed.append(opp)
+        return TradeRecord(opp, [], "filled", "", 0.0, now)
+
+
+class SizedDetector(PerQuoteDetector):
+    max_notional_usd = 100.0
+
+
+def _compound_engine(ex):
+    cfg = load_config(None, {"risk": {"max_notional_per_trade_usd": 100.0, "max_daily_loss_usd": 10.0, "cooldown_s": 0.0},
+                             "live": {"enabled": True, "capital_usd": 1000.0, "compound": True}})
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+    risk = RiskManager(cfg.risk, cfg.detection)
+    det = SizedDetector()
+    rep = Recorder()
+    clock = Clock()
+    eng = Engine(cfg, book, [], [det], risk, ex, rep, clock)
+    return eng, cfg, det, risk, rep, clock
+
+
+async def _tick(eng, clock, t, i):
+    clock.set(t)
+    await eng.handle(quote(BTC_BINANCE, 100 + i, 101 + i, ts=t))
+    if eng._inflight is not None:
+        await eng._inflight
+
+
+def test_compounding_rebases_once_per_utc_day_and_scales_every_cap():
+    ex = CompoundingExecutor([1200.0, 1500.0])
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+    day0 = 1_789_776_000.0  # 2026-09-19 00:00 UTC
+
+    async def scenario():
+        await _tick(eng, clock, day0 + 10, 0)      # first execution of the day: re-base from 1200
+        await _tick(eng, clock, day0 + 20, 1)      # same day: no second read
+        await _tick(eng, clock, day0 + 86400 + 5, 2)  # next UTC day: re-base from 1500
+
+    run(scenario())
+    assert ex.reads == 2 and len(ex.executed) == 3
+    assert cfg.risk.max_notional_per_trade_usd == 150.0 and cfg.risk.max_daily_loss_usd == 15.0  # 10% and 1% of 1500
+    assert ex.capital_usd == 1500.0 and ex.max_notional_usd == 150.0 and det.max_notional_usd == 150.0
+    assert ex.kill_floor_usd == 900.0  # anchored to the original capital, not the re-based stake
+
+
+def test_compounding_halts_sticky_below_the_anchored_kill_floor():
+    ex = CompoundingExecutor([890.0])
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+
+    async def scenario():
+        await _tick(eng, clock, 1_789_776_010.0, 0)
+        await _tick(eng, clock, 1_789_776_020.0, 1)
+
+    run(scenario())
+    assert ex.executed == []  # nothing was sent
+    assert risk.halted and risk.halt_sticky and "cumulative loss budget spent" in risk.halt_reason
+    assert [t.status for t in rep.trades] == ["rejected"] and cfg.risk.max_notional_per_trade_usd == 100.0  # caps untouched
+
+
+def test_compounding_keeps_current_caps_when_the_balance_read_fails():
+    ex = CompoundingExecutor([RuntimeError("boom"), 1300.0])
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+
+    async def scenario():
+        await _tick(eng, clock, 1_789_776_010.0, 0)  # read fails: trade proceeds on the configured caps
+        await _tick(eng, clock, 1_789_776_020.0, 1)  # same day, retried because the failed read did not mark the day
+
+    run(scenario())
+    assert len(ex.executed) == 2 and ex.reads == 2 and not risk.halted
+    assert cfg.risk.max_notional_per_trade_usd == 130.0 and ex.capital_usd == 1300.0
+
+
+def test_compounding_off_never_reads_the_balance():
+    ex = CompoundingExecutor([1200.0])
+    ex.compound = False
+    eng, cfg, det, risk, rep, clock = _compound_engine(ex)
+    run(_tick(eng, clock, 1_789_776_010.0, 0))
+    assert ex.reads == 0 and cfg.risk.max_notional_per_trade_usd == 100.0

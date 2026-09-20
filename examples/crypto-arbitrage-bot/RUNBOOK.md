@@ -34,6 +34,14 @@ The budgets, as fractions of a US$500 stake (all set in `/etc/arbbot/live.toml`)
 | Kill | US$50 cumulative: free USDT below 450 | `live.max_cumulative_loss_pct`, preflight refuses to re-arm |
 | Instant stop | `touch /var/lib/arbbot/STOP` | checked before every leg; halts `arbbot-live` only, the measurement has its own `STOP-measure` |
 
+For another stake, scale the same ratios: at US$1,000 that is US$100 per trade, US$10 a day,
+US$50 of drawdown, a kill floor of US$900, and about US$100 of BNB if fees are paid in BNB.
+`compound = true` in `live.toml` makes the first three follow the account: once a UTC day
+the stake is re-read from free USDT and the caps scale with it, while the kill floor stays
+at 90 % of the original `capital_usd` and halts the bot sticky (`cumulative loss budget
+spent`) when the stake falls under it. That halt is the kill rule firing on its own; do not
+clear it and restart on the same settings.
+
 ## Day 0: machine, account, keys, fees, funding
 
 **1. The machine.** An always-on box with a static IP in a region Binance serves. From
@@ -191,7 +199,7 @@ start or the preflight refuses with `kill switch file ... already exists`.
 
 ## When it halts
 
-The bot halts itself for three reasons. Each prints `TRADING HALTED: <reason>` in
+The bot halts itself for three reasons (four with compounding on). Each prints `TRADING HALTED: <reason>` in
 `live.log` and persists the same reason, which `reconcile` shows as `HALTED: <reason>`.
 
 - **Daily loss cap** (`daily loss cap hit (-5.xx USD)`): US$5 of realized loss today.
@@ -199,6 +207,9 @@ The bot halts itself for three reasons. Each prints `TRADING HALTED: <reason>` i
 - **Drawdown cap** (`drawdown cap hit`): US$25 below the day's opening PnL or its peak.
   Lifts at 00:00 UTC. Behind the daily cap it can only fire after a day ran up more than
   US$20 and gave it back, so if you see it, read the day's fills.
+- **Kill floor** (`cumulative loss budget spent`, only with `compound = true`): the daily
+  re-base found free USDT below 90 % of the original stake. Sticky on purpose; it is the
+  kill criterion, not something to clear.
 - **Sticky halt**: any reason ending in `reconcile manually` (`cycle aborted mid-way`,
   `error after order ... fill state unknown`, `ambiguous order state for <id>`, `empty
   response for real order <id>`, `shutdown while an order was in flight`, `executor

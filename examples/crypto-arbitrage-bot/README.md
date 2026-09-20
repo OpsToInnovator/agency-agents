@@ -250,6 +250,7 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it (0 = that cap off live) |
 | `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once free USDT is below the stake less this |
 | `live.fee_float_usd` | 0 | BNB deposited to pay fees; `reconcile` treats BNB above it as inventory a cycle left behind |
+| `live.compound` | false | Re-base the stake from free USDT once a UTC day and scale the caps with it; the kill floor stays anchored to `capital_usd` |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -432,6 +433,19 @@ slippage and latency: US$0.06 for the best and under US$0.01 for the others at U
 Fixed costs on top of the stake: a Tokyo VPS at US$5 to 20 a month, 0.8 to 1.8 % on the
 AUD to USDT round trip, and the BNB. What the stake buys is the one thing the paper run
 cannot: real fill rates and the real latency tax on Binance triangles.
+
+**Other stake sizes, and compounding.** Every limit is a ratio to the stake, so a different
+stake is the same file with the numbers scaled: at US$1,000, US$100 per trade, US$10 a day,
+US$50 of drawdown, kill at US$100 of cumulative loss, about US$100 of BNB if fees are paid
+in BNB. The per-trade cap rarely binds anyway: displayed depth at the touch was US$16 to
+US$790, and the detectors size to it. `live.compound = true` makes the caps follow the
+account: once a UTC day the stake is re-read from free USDT and the per-trade cap, the
+daily loss cap and the drawdown base scale with it, while the kill floor stays at 90 % of
+the original capital and halts the bot sticky when the stake falls under it. Compounding
+multiplies whatever the expectancy is. On this repository's evidence that is negative, so
+with compounding on the caps shrink with the stake until the floor stops the run; nothing
+in the code learns or adapts its way out of the fee floor, and the only feedback loop
+that exists is the scorecard, which is scored by a person.
 
 **What the measurement will not change.** Australian bank rails cap exchange payments
 (CommBank: A$10,000 per calendar month, no exemptions); moving AUD to USDT and back

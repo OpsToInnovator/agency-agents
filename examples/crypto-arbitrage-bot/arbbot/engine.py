@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import time
 from collections import Counter, deque
@@ -96,6 +97,9 @@ class Engine:
         self.stats = Stats(started=self.clock.now())
         self._stop = asyncio.Event()
         self._inflight: asyncio.Task | None = None  # remote (live) executions run one at a time
+        self._rebase_day: str | None = None  # compounding: the UTC day the stake was last re-based
+        self._ratio_notional: float | None = None
+        self._ratio_daily: float | None = None
         self._tasks: set[asyncio.Task] = set()
 
     def stop(self) -> None:
@@ -294,8 +298,56 @@ class Engine:
             return
         self._finish_trade(record, now)
 
+    async def _maybe_rebase(self, now: float) -> str | None:
+        """Compounding: once per UTC day, re-base the stake from free USDT on the exchange and
+        scale the per-trade cap, the daily loss cap and the drawdown base with it, each keeping
+        its ratio to the configured capital. The kill floor is anchored to the original capital:
+        a stake below it halts sticky instead of re-basing downwards forever. Returns the halt
+        reason when the floor was hit, else None. A failed balance read keeps the current caps."""
+        ex = self.executor
+        if not getattr(ex, "compound", False):
+            return None
+        day = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
+        if day == self._rebase_day:
+            return None
+        try:
+            stake = float(await ex.read_free_usdt())
+        except Exception as exc:
+            log.warning("compound: could not read free USDT (%s); keeping the current caps", exc)
+            return None
+        self._rebase_day = day
+        floor = float(getattr(ex, "kill_floor_usd", 0.0) or 0.0)
+        if stake < floor - 0.01:
+            reason = (f"cumulative loss budget spent: free USDT {stake:.2f} is below the kill floor {floor:.2f}; "
+                      f"do not restart on these settings")
+            self.risk.halt(reason, sticky=True)
+            return reason
+        base = float(getattr(ex, "initial_capital_usd", 0.0) or 0.0)
+        if base <= 0:
+            return None
+        if self._ratio_notional is None:
+            self._ratio_notional = self.cfg.risk.max_notional_per_trade_usd / base
+            self._ratio_daily = self.cfg.risk.max_daily_loss_usd / base
+        notional = round(stake * self._ratio_notional, 2)
+        daily = round(stake * self._ratio_daily, 2)
+        self.cfg.risk.max_notional_per_trade_usd = notional
+        self.cfg.risk.max_daily_loss_usd = daily
+        ex.capital_usd = stake
+        if hasattr(ex, "max_notional_usd"):
+            ex.max_notional_usd = notional
+        for det in self.detectors:
+            if hasattr(det, "max_notional_usd"):
+                det.max_notional_usd = notional
+        log.info("compound: stake re-based to %.2f USDT for %s (per trade %.2f, daily loss cap %.2f, kill floor %.2f)",
+                 stake, day, notional, daily, floor)
+        return None
+
     async def _run_remote(self, opp: Opportunity, now: float) -> None:
         try:
+            halted = await self._maybe_rebase(now)
+            if halted:
+                self._finish_trade(TradeRecord(opp, [], "rejected", halted, 0.0, now), self.clock.now())
+                return
             record = await self.executor.execute(opp, now, min_edge_bps=self.cfg.detection.min_net_edge_bps)
         except asyncio.CancelledError:
             # Cancelled mid-order (interpreter teardown): we no longer know what the
