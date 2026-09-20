@@ -111,9 +111,9 @@ class LiveConfig:
     # drawdown-from-peak cap (risk.max_drawdown_pct) is measured against this figure;
     # 0 leaves that cap off for live mode (the daily loss cap and kill switch still apply).
     capital_usd: float = 0.0
-    # The kill budget as a percentage of capital_usd. Preflight refuses to re-arm once free
-    # USDT is below capital less this budget: a spent budget means "do not restart on the
-    # same settings", not "top up and carry on".
+    # The kill budget as a percentage of capital_usd. Preflight refuses to re-arm once the
+    # USDT on the exchange (free plus locked) is below capital less this budget: a spent
+    # budget means "do not restart on the same settings", not "top up and carry on".
     max_cumulative_loss_pct: float = 10.0
     # BNB deposited to pay fees with, in USD. `reconcile` treats that much BNB as a fee
     # float and anything above it as inventory a cycle left behind (0 = any BNB is inventory).

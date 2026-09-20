@@ -289,6 +289,16 @@ class BinanceLiveExecutor:
                                 usdt, self.capital_usd - usdt, self.capital_usd, self.max_cumulative_loss_pct)
         except Exception as exc:
             problems.append(f"cannot read account balances: {exc}")
+        if self.compound and self.initial_capital_usd > 0:
+            # live.capital_usd is the DENOMINATOR of the compounding ratios, not a multiplier of
+            # the caps: a stake raised on its own shrinks the ratios it looks like it should grow.
+            # Print what this file actually derives so a mis-scaled config shows up on day 0.
+            per_trade = 100.0 * self.max_notional_usd / self.initial_capital_usd
+            daily = (f", {100.0 * abs(self.risk.cfg.max_daily_loss_usd) / self.initial_capital_usd:.2f}% a day"
+                     if self.risk is not None else "")
+            log.info("LIVE preflight: compounding on; the caps re-base daily to %.2f%% of the stake per trade%s "
+                     "(live.capital_usd %.2f, kill floor %.2f)",
+                     per_trade, daily, self.initial_capital_usd, self.kill_floor_usd)
         try:
             await self.rest.request("POST", "/api/v3/order/test", {
                 "symbol": symbols[0] if symbols else "BTCUSDT", "side": "BUY", "type": "MARKET", "quoteOrderQty": "10"})

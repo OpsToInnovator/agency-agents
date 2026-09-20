@@ -248,7 +248,7 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `risk.max_daily_loss_usd` | 25 | Realized loss that halts trading for the UTC day (persisted in `risk.state_file`) |
 | `risk.max_drawdown_pct` | 5.0 | PnL this far (as % of capital) below the day's opening PnL or intraday peak halts for the day (0 = off; live mode needs `live.capital_usd`) |
 | `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it, or against the re-based stake once `live.compound` has run (0 = that cap off live) |
-| `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once USDT on the exchange (free plus locked) is below `capital_usd` less this |
+| `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once USDT on the exchange (free plus locked) is below `capital_usd` less this, and with `live.compound` on the daily re-base halts sticky there |
 | `live.fee_float_usd` | 0 | BNB deposited to pay fees; `reconcile` treats BNB above it as inventory a cycle left behind |
 | `live.compound` | false | Once a UTC day, re-base the stake from the USDT on the exchange and scale the caps with it; the kill floor stays anchored to `capital_usd` and is checked at that re-base |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
@@ -398,56 +398,62 @@ change, a venue-disagreement anomaly on an asset traded that day, clock drift ov
 Even a passing stage C is a fill-quality test, not income: the GO bar scales to about
 US$0.28/day at A$20, below the cost of the VPS.
 
-**If you would rather commit money now: a US$500 start.** `RUNBOOK.md` is the step-by-step
+**If you would rather commit money now: a US$1,000 start.** `RUNBOOK.md` is the step-by-step
 operator's version of this section, with the commands, the systemd services in `ops/`, and
 what to do at each halt. The stake changes nothing
 about the expectancy, so treat it as buying real fill data with a fixed loss budget, not as
-income. `live.example.toml` is sized for it; every limit is a fraction of the stake, and the
-paper measurement runs alongside on the same machine rather than before.
+income. `live.example.toml` is sized for it: every limit is a fraction of the stake, and with
+`live.compound = true` as shipped the per-trade cap, the daily loss cap and the drawdown base
+are re-based each UTC day from the USDT on the exchange. The kill floor stays anchored to the
+`capital_usd` in the file, and `min_profit_usd` is not re-based at all. The paper measurement
+runs alongside on the same machine rather than before.
 
 | Rule | Setting | Why |
 | --- | --- | --- |
-| Per trade | US$50, 10 % | displayed top-of-book depth rarely allows more anyway |
-| Per UTC day | US$5 realized, 1 % | the daily-loss cap halts for the day |
-| Drawdown | 5 %, US$25 below the day's opening PnL or its intraday peak | measured against `live.capital_usd`; a fresh budget each UTC day and each process start. Behind a US$5 daily cap it only fires after a day runs up more than US$20 and gives it back |
-| Kill | US$50 cumulative, 10 % | `live.max_cumulative_loss_pct`: preflight refuses to re-arm once the USDT on the exchange is below US$450, and with `live.compound` on the daily re-base halts sticky there. `touch STOP`, write the post-mortem, do not restart on the same settings |
+| Per trade | US$100, 10 % | displayed top-of-book depth rarely allows more anyway |
+| Per UTC day | US$10 realized, 1 % | the daily-loss cap halts for the day |
+| Drawdown | 5 %, US$50 below the day's opening PnL or its intraday peak | measured against the stake (`live.capital_usd`, re-based each UTC day by `live.compound`); a fresh budget each UTC day and each process start. Behind a US$10 daily cap it only fires after a day runs up more than US$40 and gives it back |
+| Kill | US$100 cumulative, 10 % | `live.max_cumulative_loss_pct`: preflight refuses to re-arm once the USDT on the exchange is below US$900, and the daily `live.compound` re-base halts sticky there. `touch STOP`, write the post-mortem, do not restart on the same settings |
 
 The sequence is the staged one above, compressed: day 0, KYC'd account, spot-only key
 whitelisted to the machine with withdrawals off, `preflight --connectivity`, `read_fees.py`,
-500 USDT on the exchange, plus about US$50 of BNB if fees are to be paid in BNB (each
-filled US$50 cycle costs US$0.11 of it), `preflight` OK. Day 1, stage B with
-validation-only orders. From day 2, real orders at US$50 with the 7-day paper run logging
-to a second directory. Weekly, `scripts/rollup.py logs/live --scan-log live.log --capital-usd 500
+1,000 USDT on the exchange, plus about US$100 of BNB if fees are to be paid in BNB (each
+filled US$100 cycle costs US$0.23 of it; the BNB is on top of the stake, because buying it
+out of the 1,000 leaves the kill floor's 900 and nothing to lose), `preflight` OK. Day 1, stage B with
+validation-only orders. From day 2, real orders at US$100 with the 7-day paper run logging
+to a second directory. Weekly, `scripts/rollup.py logs/live --scan-log live.log --capital-usd 1000
 --cooldown-s 5` scores the same criteria on live fills (`live.log` is the scan's stderr,
 captured with `2>>live.log` as in the measurement loop). The per-trade cap stays at 10 % of
-whatever the stake is; a bigger cap means a bigger stake, and only after a month of positive
-live realized PnL and a passing scorecard.
+whatever the stake is, and with compounding on it follows the account by itself, up after a
+winning day and down after a losing one. Adding money is the manual part, and only after a
+month of positive live realized PnL and a passing scorecard.
 
 The arithmetic to expect, at the shipped 10 bps taker fee: the median cycle is −0.65 bps
-gross and the three legs cost 30 bps, so an attempted US$50 cycle loses about US$0.15,
-the daily cap allows roughly 33 losing fills and the kill rule about 330. Paying fees in
-BNB (7.5 bps a leg) makes that about US$0.12, 43 and 430, and burns about US$5 of BNB per
-capped day. The only net-positive triangles this bot has recorded are the five
+gross and the three legs cost 30 bps, so an attempted US$100 cycle loses about US$0.31,
+the daily cap allows roughly 33 losing fills and the kill rule about 330, ten capped days
+(a few more as the caps re-base down). Paying fees in BNB (7.5 bps a leg) makes that about
+US$0.23, 43 and 430, and burns about US$10 of BNB per capped day. The only net-positive triangles this bot has recorded are the five
 observations of one USDT → UNI → BTC → USDT episode in the 10-minute scan, four at
 +1.7 bps and one at +12.7 bps net of 10 bps legs as promised at detection, before
-slippage and latency: US$0.06 for the best and under US$0.01 for the others at US$50.
+slippage and latency: US$0.13 for the best and about US$0.02 for the others at US$100.
 Fixed costs on top of the stake: a Tokyo VPS at US$5 to 20 a month, 0.8 to 1.8 % on the
 AUD to USDT round trip, and the BNB. What the stake buys is the one thing the paper run
 cannot: real fill rates and the real latency tax on Binance triangles.
 
 **Other stake sizes, and compounding.** Every limit is a ratio to the stake, so a different
-stake is the same file with the numbers scaled: at US$1,000, US$100 per trade, US$10 a day,
-US$50 of drawdown, kill at US$100 of cumulative loss, about US$100 of BNB if fees are paid
-in BNB. The per-trade cap rarely binds anyway: displayed depth at the touch was US$16 to
-US$790, and the detectors size to it. `live.compound = true` makes the caps follow the
-account: before the first cycle of each UTC day the stake is re-read from the USDT on the
+stake is the same file with the numbers scaled: at US$500, US$50 per trade, US$5 a day,
+US$25 of drawdown, kill at US$50 of cumulative loss (a floor of US$450), `min_profit_usd`
+0.005, about US$50 of BNB if fees are paid in BNB. The per-trade cap rarely binds anyway:
+displayed depth at the touch was US$16 to US$790, and the detectors size to it.
+`live.compound = true`, the shipped setting, makes the caps follow the account: before the first cycle of each UTC day the stake is re-read from the USDT on the
 exchange (free plus any locked in an open order) and the per-trade cap, the daily loss cap
 and the drawdown base scale with it, while the kill floor stays at 90 % of the original
 `capital_usd`. That floor is checked at each daily re-base and by preflight at every start,
 not between them: within a day the daily loss cap and the drawdown cap are what stop a
 losing run, and both count fees, including fees paid from the BNB float. The floor sees
 USDT alone, so fees paid in BNB do not move it. A cycle whose balance read fails is skipped
-with the caps unchanged; a rate-limit answer halts, as it would on an order. Compounding
+with the caps unchanged; a rate-limit answer halts, as it would on an order. `compound = false`
+freezes the three caps at whatever the file says. Compounding
 multiplies whatever the expectancy is. On this repository's evidence that is negative, so
 with compounding on the caps shrink with the stake day by day until the floor stops the
 run; nothing in the code learns or adapts its way out of the fee floor, and the only
@@ -529,7 +535,7 @@ scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block 
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
 scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
 measure7d.toml      the 7-day measurement config (paper only)
-live.example.toml   a US$500 live start: stage B by default, limits as fractions of the stake
+live.example.toml   a US$1,000 live start: stage B by default, compounding on, limits as fractions of the stake
 RUNBOOK.md          the operator's sequence for that start: day 0 to stage C, halts, reconciliation, kill criteria
 ops/                systemd units (live, measurement, latency probe, daily roll-up), env template, install.sh
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)

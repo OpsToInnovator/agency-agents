@@ -1113,3 +1113,59 @@ def test_live_preflight_counts_locked_usdt_toward_the_kill_floor(monkeypatch):
     assert run(staked(session("400", "60")).preflight(["BTCUSDT"])) == []  # 460 on the exchange: inside the budget
     problems = run(staked(session("400", "40")).preflight(["BTCUSDT"]))  # 440: the budget is spent
     assert len(problems) == 1 and "USDT 440.00 is below the kill floor 450.00" in problems[0]
+
+
+def test_live_preflight_prints_the_compounding_ratios(monkeypatch, caplog):
+    """live.capital_usd is the DENOMINATOR of the compounding ratios, not a multiplier of the
+    caps. Preflight prints what the file actually derives, so a stake raised on its own (which
+    shrinks both ratios) is visible on day 0 instead of at the next re-base."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+
+    def session():
+        return FakeSession([
+            PING,
+            ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+            ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+            ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+            ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "2000", "locked": "0"}]}),
+            ("/api/v3/order/test", 200, {}),
+        ])
+
+    def preflight(capital, notional, daily):
+        risk = RiskManager(RiskConfig(max_daily_loss_usd=daily), DetectionConfig(), now=1000.0)
+        ex = BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=capital, compound=True), "https://api.example",
+                                 FEES, book, real_orders=False, session=session(), risk=risk, max_notional_usd=notional)
+        with caplog.at_level("INFO", logger="arbbot.execution.live"):
+            caplog.clear()
+            assert run(ex.preflight(["BTCUSDT"])) == []
+        return "\n".join(r.getMessage() for r in caplog.records)
+
+    shipped = preflight(1000.0, 100.0, 10.0)  # the shipped file: 10% per trade, 1% a day
+    assert "compounding on" in shipped and "10.00% of the stake per trade" in shipped and "1.00% a day" in shipped
+    assert "kill floor 900.00" in shipped
+
+    mis_scaled = preflight(2000.0, 100.0, 10.0)  # capital_usd doubled, the caps left behind
+    assert "5.00% of the stake per trade" in mis_scaled and "0.50% a day" in mis_scaled
+
+
+def test_live_preflight_stays_quiet_about_ratios_without_compounding(monkeypatch, caplog):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book = QuoteBook(max_age_s=2.0)
+    book.register(BTC_BINANCE)
+    session = FakeSession([
+        PING,
+        ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+        ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+        ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+        ("/api/v3/account", 200, {"balances": [{"asset": "USDT", "free": "2000", "locked": "0"}]}),
+        ("/api/v3/order/test", 200, {}),
+    ])
+    ex = BinanceLiveExecutor(LiveConfig(enabled=True, capital_usd=1000.0), "https://api.example", FEES, book,
+                             real_orders=False, session=session, max_notional_usd=100.0)
+    with caplog.at_level("INFO", logger="arbbot.execution.live"):
+        assert run(ex.preflight(["BTCUSDT"])) == []
+    assert "compounding on" not in "\n".join(r.getMessage() for r in caplog.records)

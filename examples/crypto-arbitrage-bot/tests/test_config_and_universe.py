@@ -152,10 +152,13 @@ def test_live_example_config_is_a_stage_b_start_sized_to_the_stake():
 
     cfg = load_config(ROOT / "live.example.toml")
     assert cfg.live.enabled is True and cfg.live.real_orders is False  # validation-only orders until flipped
-    assert cfg.live.capital_usd == 500.0
+    assert cfg.live.capital_usd == 1000.0 and cfg.live.compound is True
     assert cfg.risk.max_notional_per_trade_usd == 0.10 * cfg.live.capital_usd
     assert cfg.risk.max_daily_loss_usd == 0.01 * cfg.live.capital_usd
-    assert cfg.risk.max_drawdown_pct == 5.0 and cfg.risk.min_profit_usd == 0.005
+    assert cfg.risk.max_drawdown_pct == 5.0  # US$50 of the US$1,000
+    assert cfg.risk.min_profit_usd == pytest.approx(1e-4 * cfg.risk.max_notional_per_trade_usd)  # 1 bps of a trade
+    assert cfg.live.max_cumulative_loss_pct == 10.0  # the kill floor is US$900
+    assert cfg.live.fee_float_usd == 0.10 * cfg.live.capital_usd  # the BNB float, RUNBOOK step 6
     assert cfg.universe.venues == ["binance"] and cfg.detection.cross_exchange is False and cfg.detection.triangular is True
     assert cfg.universe.auto_discover is True  # live orders need exchange filters
     with pytest.raises(ConfigError):
