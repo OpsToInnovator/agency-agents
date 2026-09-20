@@ -99,6 +99,36 @@ will ever see lives in that last row: a fee assumption no retail account gets, n
 slippage, and fills that were never actually sent to a venue. Run it yourself:
 `python3 scripts/sweep.py`.
 
+### Is the edge real, or three prices from three different moments?
+
+A triangle is priced from three quotes. If one is a second old, the "edge" can be nothing
+but the market having moved in between: a *bad comparison model*, which is the third cause
+of an apparent divergence, after temporary forced flow and genuine informed repricing.
+Only the first of the three is tradable, and a fast scanner manufactures the third for
+itself. `scripts/edge_decay.py` measures which one this is, by recording how old the
+oldest leg was for every opportunity on a tape.
+
+On a fresh 10-minute Binance capture (688,102 quotes, 116 markets, 160,846 triangles
+scored, 20 September 2026):
+
+| Gross edge band | Count | Median age of the oldest leg |
+| --- | --- | --- |
+| 0 to 5 bps | 159,389 | 148.5 ms |
+| 5 to 10 bps | 1,440 | 56.0 ms |
+| 10 to 20 bps | 16 | 60.1 ms |
+| 20 to 50 bps | 1 | 286.6 ms |
+
+The 200 biggest apparent edges are drawn from staler quotes than the rest (median oldest
+leg 186 ms against 148 ms), so part of the edge is indeed an artifact. But the finding
+that matters is the other one. Demand that every leg be under 50 ms old, which a third of
+the sample satisfies, and the best gross edge on the day is **+13.44 bps against a 30 bps
+fee floor**: a best net of **−16.55 bps**. Net-positive triangles after fees: **0 of
+160,846**.
+
+That is the whole argument in one line. The problem is not that the opportunities are
+stale or hard to reach. On a real day, at retail fees, the fee floor is more than twice
+the best edge that exists at all.
+
 ### What our own first live run "earned"
 
 The first 30-second paper-trading run of this bot reported **+$385 realized profit**.
@@ -546,6 +576,7 @@ arbbot/
                     reconcile.py (read-only account check after a halt)
 ops/as-arbbot.sh    runs one arbbot command as the service user with the keys loaded, from /var/lib/arbbot
 scripts/sweep.py    fee / haircut / slippage sensitivity sweep over a recorded tape
+scripts/edge_decay.py how much of an apparent edge is stale quotes, and what survives a freshness bar
 scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block (read-only keys, env only)
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
 scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
