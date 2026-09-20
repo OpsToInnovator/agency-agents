@@ -298,12 +298,14 @@ class Engine:
             return
         self._finish_trade(record, now)
 
-    async def _maybe_rebase(self, now: float) -> str | None:
-        """Compounding: once per UTC day, re-base the stake from free USDT on the exchange and
+    async def _maybe_rebase(self, opp: Opportunity, now: float) -> str | None:
+        """Compounding: once per UTC day, re-base the stake from the USDT on the exchange and
         scale the per-trade cap, the daily loss cap and the drawdown base with it, each keeping
         its ratio to the configured capital. The kill floor is anchored to the original capital:
-        a stake below it halts sticky instead of re-basing downwards forever. Returns the halt
-        reason when the floor was hit, else None. A failed balance read keeps the current caps."""
+        a stake below it halts sticky instead of re-basing downwards forever. Returns a reason to
+        reject this cycle (halted, the balance could not be read, or the opportunity was sized
+        at the previous caps), else None. Nothing has been sent when this runs, so no outcome
+        here needs a reconcile."""
         ex = self.executor
         if not getattr(ex, "compound", False):
             return None
@@ -311,14 +313,20 @@ class Engine:
         if day == self._rebase_day:
             return None
         try:
-            stake = float(await ex.read_free_usdt())
+            free, locked = await ex.read_usdt()
+            free, locked = float(free), float(locked)
         except Exception as exc:
-            log.warning("compound: could not read free USDT (%s); keeping the current caps", exc)
-            return None
+            if getattr(exc, "status", None) in (418, 429):  # the same rule as an order: back off, do not hammer
+                reason = f"binance rate limit ({exc.status}) on the balance read; back off before re-arming"
+                self.risk.halt(reason, sticky=True)
+                return reason
+            log.warning("compound: could not read the USDT balance (%s); caps unchanged, cycle skipped", exc)
+            return f"compound: could not read the USDT balance ({exc}); caps unchanged"
         self._rebase_day = day
+        stake = free + locked  # USDT resting in an open order is still the stake, as `reconcile` counts it
         floor = float(getattr(ex, "kill_floor_usd", 0.0) or 0.0)
         if stake < floor - 0.01:
-            reason = (f"cumulative loss budget spent: free USDT {stake:.2f} is below the kill floor {floor:.2f}; "
+            reason = (f"cumulative loss budget spent: USDT {stake:.2f} is below the kill floor {floor:.2f}; "
                       f"do not restart on these settings")
             self.risk.halt(reason, sticky=True)
             return reason
@@ -338,16 +346,19 @@ class Engine:
         for det in self.detectors:
             if hasattr(det, "max_notional_usd"):
                 det.max_notional_usd = notional
-        log.info("compound: stake re-based to %.2f USDT for %s (per trade %.2f, daily loss cap %.2f, kill floor %.2f)",
-                 stake, day, notional, daily, floor)
+        log.info("compound: stake re-based to %.2f USDT for %s (%.2f locked in open orders; per trade %.2f, "
+                 "daily loss cap %.2f, kill floor %.2f)", stake, day, locked, notional, daily, floor)
+        if opp.notional_usd > notional * 1.001:  # sized and risk-checked at the previous caps
+            return f"sized at the previous stake: {opp.notional_usd:.2f} USD is over the re-based per-trade cap {notional:.2f}"
         return None
 
     async def _run_remote(self, opp: Opportunity, now: float) -> None:
+        # Before any order goes out: a cancellation or a crash in here leaves nothing on the venue.
+        rejected = await self._maybe_rebase(opp, now)
+        if rejected:
+            self._finish_trade(TradeRecord(opp, [], "rejected", rejected, 0.0, now), self.clock.now())
+            return
         try:
-            halted = await self._maybe_rebase(now)
-            if halted:
-                self._finish_trade(TradeRecord(opp, [], "rejected", halted, 0.0, now), self.clock.now())
-                return
             record = await self.executor.execute(opp, now, min_edge_bps=self.cfg.detection.min_net_edge_bps)
         except asyncio.CancelledError:
             # Cancelled mid-order (interpreter teardown): we no longer know what the

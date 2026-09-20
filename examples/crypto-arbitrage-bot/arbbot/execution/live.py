@@ -269,18 +269,18 @@ class BinanceLiveExecutor:
         except Exception as exc:
             problems.append(f"cannot read API key restrictions: {exc}")
         try:
-            account = await self.rest.request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
-            free = {b["asset"]: float(b.get("free", 0) or 0) for b in account.get("balances", [])}
-            usdt = free.get("USDT", 0.0)
+            usdt, locked = await self.read_usdt()
             if usdt < 2 * self.max_notional_usd:
                 problems.append(f"free USDT {usdt:.2f} is below 2x max notional ({2 * self.max_notional_usd:.2f})")
             if self.capital_usd:
                 # The stake may be down by the kill budget and still re-arm (a restart after a
                 # losing day, a crash, or a reconciled halt); below that floor the cumulative
                 # loss rule has fired and the settings, not the balance, are what to change.
+                # USDT locked in a resting order is still the stake, so it counts (as `reconcile`
+                # counts it); the free-only figure above is what a cycle can actually spend.
                 floor = self.kill_floor_usd
-                if usdt < floor - 0.01:
-                    problems.append(f"free USDT {usdt:.2f} is below the kill floor {floor:.2f} (live.capital_usd "
+                if usdt + locked < floor - 0.01:
+                    problems.append(f"USDT {usdt + locked:.2f} is below the kill floor {floor:.2f} (live.capital_usd "
                                     f"{self.initial_capital_usd:.2f} less {self.max_cumulative_loss_pct:g}% max_cumulative_loss_pct): "
                                     f"the cumulative loss budget is spent; do not restart on the same settings")
                 elif usdt < self.capital_usd - 0.01:
@@ -309,13 +309,18 @@ class BinanceLiveExecutor:
                             + (" (sticky: reconcile, then remove or edit the risk state file)" if self.risk.halt_sticky else ""))
         return problems
 
-    async def read_free_usdt(self) -> float:
-        """Free USDT on the exchange right now (one signed GET); the compounding stake."""
+    async def read_usdt(self) -> tuple[float, float]:
+        """USDT on the exchange right now as (free, locked in open orders): one signed GET.
+        Raises on a payload that is not an account: an empty or non-JSON 200 must never read as
+        a zero balance, because the compounding kill floor is measured on this number."""
         account = await self.rest.request("GET", "/api/v3/account", {"omitZeroBalances": "true"})
-        for b in account.get("balances", []):
-            if b.get("asset") == "USDT":
-                return float(b.get("free", 0) or 0)
-        return 0.0
+        balances = account.get("balances") if isinstance(account, dict) else None
+        if not isinstance(balances, list):
+            raise ValueError(f"account payload without balances: {str(account)[:120]!r}")
+        for b in balances:
+            if isinstance(b, dict) and b.get("asset") == "USDT":
+                return float(b.get("free", 0) or 0), float(b.get("locked", 0) or 0)
+        return 0.0, 0.0  # omitZeroBalances: no row is a zero balance
 
     @property
     def kill_floor_usd(self) -> float:

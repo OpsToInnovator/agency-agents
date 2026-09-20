@@ -118,11 +118,11 @@ class LiveConfig:
     # BNB deposited to pay fees with, in USD. `reconcile` treats that much BNB as a fee
     # float and anything above it as inventory a cycle left behind (0 = any BNB is inventory).
     fee_float_usd: float = 0.0
-    # Compounding: re-base the stake from free USDT on the exchange at start and at each
-    # UTC day roll, and scale the per-trade cap, the daily loss cap and the drawdown base
-    # with it (each keeps its ratio to capital_usd). The kill floor stays anchored to the
-    # original capital_usd, so a slow bleed cannot re-base it away: when the stake falls
-    # below capital_usd less max_cumulative_loss_pct the bot halts sticky.
+    # Compounding: before the first cycle of each UTC day, re-base the stake from the USDT
+    # on the exchange (free plus locked) and scale the per-trade cap, the daily loss cap and
+    # the drawdown base with it (each keeps its ratio to capital_usd). The kill floor stays
+    # anchored to the original capital_usd, so a slow bleed cannot re-base it away: a re-base
+    # that finds the stake below capital_usd less max_cumulative_loss_pct halts sticky.
     compound: bool = False
     api_key_env: str = "BINANCE_API_KEY"
     api_secret_env: str = "BINANCE_API_SECRET"
