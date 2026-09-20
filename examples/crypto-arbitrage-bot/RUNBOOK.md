@@ -97,8 +97,10 @@ figure is printed next to it.
 **6. Fund.** Deposit 1,000 USDT to the spot wallet. The BNB is **on top of** that, not
 out of it: buying it with the deposited USDT leaves 900 free, which is the kill floor
 itself, so the first losing day halts the bot. If you would rather fund a fixed total,
-deposit the BNB first and set `capital_usd` to the USDT that remains, so the caps and the
-floor are both measured on the money that actually trades. If paying fees in BNB, budget
+deposit the BNB first and scale the file to the USDT that remains: at US$900 that is
+`capital_usd = 900`, `max_notional_per_trade_usd = 90`, `max_daily_loss_usd = 9`,
+`min_profit_usd = 0.009`. Setting `capital_usd` by itself moves only the drawdown base and
+the kill floor; the two caps are absolute dollars in the file. If paying fees in BNB, budget
 about US$100 of it (a filled US$100 cycle costs about US$0.23; a day at the daily cap
 burns about US$10), and set `fee_float_usd` in `live.toml` to what you deposited so
 `reconcile` knows how much BNB is float and how much is a leftover position; if you pay
@@ -122,7 +124,8 @@ balances and `order/test accepted`. Every `FAIL` line names exactly what to fix:
 | clock skew | `sudo timedatectl set-ntp true`, wait a minute, re-run |
 | API key can WITHDRAW | delete the key on Binance, make a new one without withdrawals |
 | no spot trading permission | edit the key's permissions on Binance |
-| free USDT below 2x max notional (200) / USDT below the kill floor (900) | on day 0 the deposit has not landed or the stake is not there; on a later start the kill rule has fired, so do not top up and restart |
+| free USDT below 2x max notional (200) | the deposit has not landed, or USDT is locked in a resting order or sitting in inventory: run `reconcile` first |
+| USDT (free plus locked) below the kill floor (900) | the kill rule has fired; do not top up and restart on the same settings |
 | status BREAK / no exchange filters | the symbol is suspended; `auto_discover = true` must stay on |
 | kill switch file already exists | `sudo rm /var/lib/arbbot/STOP` if you meant to start |
 | trading is halted (sticky) | see "When it halts" below; reconcile first |
@@ -293,12 +296,22 @@ appear there that is not in the journal. A week with zero sends in `rollup-measu
 is worth a look at `grep -c 'kill switch' /var/lib/arbbot/measure7d.log`: the
 measurement's own switch is `/var/lib/arbbot/STOP-measure`.
 
-The per-trade cap stays at 10 % of the stake. With `compound = true`, as shipped, it follows
-the account by itself, up after a winning day and down after a losing one, so this rule
-governs deposits: add money only after a month of positive live realized PnL and a passing
-scorecard, at most doubling the stake, raise `capital_usd` to the new stake so the kill floor
-tracks it, and re-run this runbook's day 0 preflight at the new size. With `compound = false`
-the cap moves only when you edit it, on the same evidence.
+The per-trade cap stays at 10 % of the stake, and with `compound = true` a deposit alone
+already carries it there: the ratio is fixed at the file's cap over `capital_usd`, so more
+USDT on the exchange means a proportionally larger cap at the next re-base. What a deposit
+does not move is the kill floor, anchored at 90 % of the `capital_usd` in the file. So
+scaling the stake means scaling the file, not one line of it: after a month of positive
+live realized PnL and a passing scorecard, at most double the stake, then set `capital_usd`,
+`max_notional_per_trade_usd`, `max_daily_loss_usd` and `min_profit_usd` to the new size
+together (at US$2,000: 2000, 200, 20, 0.02). `max_drawdown_pct` and
+`max_cumulative_loss_pct` are percentages and stay as they are.
+
+Raising `capital_usd` on its own is the one edit to avoid: it is the denominator of the
+compounding ratios, so it shrinks the caps it looks like it should grow (at 2000 with the
+caps left at 100 and 10, the bot trades 5 % of the stake and stops at 0.5 % of it). Restart
+after any edit, since the ratios are derived once per process, and read them back off the
+day 0 preflight, which prints them. With `compound = false` nothing moves until you edit
+it, on the same evidence.
 
 ## Stopping
 

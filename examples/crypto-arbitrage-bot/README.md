@@ -402,9 +402,11 @@ US$0.28/day at A$20, below the cost of the VPS.
 operator's version of this section, with the commands, the systemd services in `ops/`, and
 what to do at each halt. The stake changes nothing
 about the expectancy, so treat it as buying real fill data with a fixed loss budget, not as
-income. `live.example.toml` is sized for it; every limit is a fraction of the stake and, with
-`live.compound = true` as shipped, is re-based each UTC day from the USDT on the exchange. The
-paper measurement runs alongside on the same machine rather than before.
+income. `live.example.toml` is sized for it: every limit is a fraction of the stake, and with
+`live.compound = true` as shipped the per-trade cap, the daily loss cap and the drawdown base
+are re-based each UTC day from the USDT on the exchange. The kill floor stays anchored to the
+`capital_usd` in the file, and `min_profit_usd` is not re-based at all. The paper measurement
+runs alongside on the same machine rather than before.
 
 | Rule | Setting | Why |
 | --- | --- | --- |
