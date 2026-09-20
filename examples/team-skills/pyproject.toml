@@ -1,0 +1,27 @@
+[project]
+name = "teamskills"
+version = "0.1.0"
+description = "Shared skill management for teams: one reviewed catalog of SKILL.md files, installed and kept in sync across every member's AI coding tools"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+teamskills = "teamskills.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["teamskills*"]
+
+[tool.setuptools.package-data]
+teamskills = ["web/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
