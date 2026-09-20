@@ -183,3 +183,11 @@ def test_live_cumulative_loss_budget_validates():
     for bad in (-1.0, 100.5):
         with pytest.raises(ConfigError):
             load_config(None, {"live": {"max_cumulative_loss_pct": bad}})
+
+
+def test_compound_needs_a_declared_capital():
+    from arbbot.config import ConfigError, load_config
+
+    assert load_config(None, {"live": {"compound": True, "capital_usd": 1000.0}}).live.compound is True
+    with pytest.raises(ConfigError):
+        load_config(None, {"live": {"compound": True}})

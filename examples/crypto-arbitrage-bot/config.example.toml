@@ -66,6 +66,7 @@ real_orders = false           # must be true AND pass --i-know-this-sends-real-o
 capital_usd = 0.0             # stake at risk, USD; live mode measures risk.max_drawdown_pct against it (0 = that cap off live)
 max_cumulative_loss_pct = 10.0  # preflight refuses to re-arm once free USDT is below capital_usd less this budget
 fee_float_usd = 0.0           # BNB deposited for fees, USD; `reconcile` calls BNB above this inventory (0 = any BNB is)
+compound = false              # re-base the stake from free USDT daily and scale the caps with it (kill floor stays anchored)
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

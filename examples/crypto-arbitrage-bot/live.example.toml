@@ -45,6 +45,9 @@ real_orders = false                 # stage B first (POST /api/v3/order/test); s
 capital_usd = 500.0                 # the stake at risk: the drawdown cap is a percentage of this
 max_cumulative_loss_pct = 10.0      # the kill rule: preflight refuses to re-arm once free USDT is below 450
 fee_float_usd = 50.0                # the BNB you deposited for fees (RUNBOOK step 6); set 0 if you pay fees in USDT
+compound = false                    # true: once a UTC day the stake is re-read from free USDT and the per-trade cap, daily
+                                    # loss cap and drawdown base scale with it (10% / 1% / 5% of the current stake); the
+                                    # kill floor stays at 90% of capital_usd and halts sticky when the stake falls under it
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

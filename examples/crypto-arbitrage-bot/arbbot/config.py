@@ -118,6 +118,12 @@ class LiveConfig:
     # BNB deposited to pay fees with, in USD. `reconcile` treats that much BNB as a fee
     # float and anything above it as inventory a cycle left behind (0 = any BNB is inventory).
     fee_float_usd: float = 0.0
+    # Compounding: re-base the stake from free USDT on the exchange at start and at each
+    # UTC day roll, and scale the per-trade cap, the daily loss cap and the drawdown base
+    # with it (each keeps its ratio to capital_usd). The kill floor stays anchored to the
+    # original capital_usd, so a slow bleed cannot re-base it away: when the stake falls
+    # below capital_usd less max_cumulative_loss_pct the bot halts sticky.
+    compound: bool = False
     api_key_env: str = "BINANCE_API_KEY"
     api_secret_env: str = "BINANCE_API_SECRET"
     recv_window_ms: int = 5000
@@ -290,6 +296,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("live.max_cumulative_loss_pct must be between 0 and 100")
     if cfg.live.fee_float_usd < 0:
         raise ConfigError("live.fee_float_usd must be >= 0")
+    if cfg.live.compound and cfg.live.capital_usd <= 0:
+        raise ConfigError("live.compound needs live.capital_usd > 0: the caps are scaled as ratios to it")
     band = cfg.detection.stable_rate_band
     if len(band) != 2 or not 0 < band[0] < 1 < band[1]:
         raise ConfigError("detection.stable_rate_band must be [low, high] around 1.0")
