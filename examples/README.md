@@ -47,6 +47,14 @@ These examples answer the question: *"What does it actually look like when the f
 
 **Key takeaway:** Thousands of gross-positive spreads per minute, zero or single digits net of fees, and the first "profit" it ever reported was a ticker collision (Binance `ONE` vs Kraken `ONE`). Build the scanner, learn the microstructure, keep your $68.
 
+### [team-skills/](./team-skills/)
+
+**What:** A shared skill management system for teams: one reviewed catalog of Agent-Skills `SKILL.md` files, with roles, a draft → review → publish workflow, immutable semantic versions with SHA-256 digests, and an installer that keeps every member's Claude Code, Antigravity, Codex and Osaurus skill directories in sync.
+
+**The scenario:** Skills are the unit every AI coding tool now loads, and this repo already renders its agents into that format. A team that shares them by copying files has no idea who runs which version, who approved it, or which copies drifted. Team Skills is a dependency-free Python app (CLI + HTTP API + browser UI over one SQLite file) that answers all three: contributors draft, a different maintainer approves, members install and `sync`, and `status` reports current / outdated / modified / missing / deprecated copies. It imports this repository's agent files as drafts in one command.
+
+**Key takeaway:** The catalog, not the copy on disk, is the source of truth; every published version has a digest and a published `index` generation, so any runtime can prove it retrieved exactly what was approved.
+
 ## Adding New Examples
 
 If you run an interesting multi-agent exercise, consider adding it here. Good examples show:

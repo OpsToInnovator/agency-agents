@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team Skills</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c1f26; --muted: #667085; --line: #e4e7ec;
+    --accent: #2563eb; --accent-ink: #ffffff; --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --soft: #eef2ff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1218; --panel: #171b23; --ink: #e6e8ee; --muted: #98a2b3; --line: #2a303c;
+      --accent: #60a5fa; --accent-ink: #0b1220; --soft: #1e2536;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.active, nav button:hover { color: var(--ink); background: var(--soft); }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .stat { background: var(--soft); border-radius: 8px; padding: 12px; }
+  .stat b { display: block; font-size: 24px; }
+  .stat span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr.link { cursor: pointer; }
+  tr.link:hover td { background: var(--soft); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); color: var(--muted); }
+  .badge.published { color: var(--ok); border-color: var(--ok); }
+  .badge.in_review { color: var(--warn); border-color: var(--warn); }
+  .badge.deprecated { color: var(--bad); border-color: var(--bad); }
+  .badge.draft { color: var(--accent); border-color: var(--accent); }
+  .tag { display: inline-block; background: var(--soft); border-radius: 4px; padding: 0 6px; font-size: 12px; margin-right: 4px; }
+  button, .btn { font: inherit; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select, textarea { font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  textarea { width: 100%; min-height: 360px; font-family: var(--mono); font-size: 13px; line-height: 1.45; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; }
+  pre.diff .add { color: var(--ok); } pre.diff .del { color: var(--bad); } pre.diff .hunk { color: var(--accent); }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); }
+  .tabs button.active { color: var(--ink); border-bottom-color: var(--accent); }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; display: none; max-width: 90vw; }
+  #toast.bad { background: var(--bad); color: #fff; }
+  .login { max-width: 440px; margin: 60px auto; }
+  .login input { width: 100%; margin: 6px 0 12px; }
+  h2 { font-size: 18px; margin: 0 0 12px; } h3 { font-size: 15px; margin: 16px 0 8px; }
+  .feed li { padding: 6px 0; border-bottom: 1px solid var(--line); list-style: none; } .feed { padding: 0; margin: 0; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--soft); padding: 1px 4px; border-radius: 4px; }
+  @media (max-width: 640px) { header { flex-wrap: wrap; } td:nth-child(n+5), th:nth-child(n+5) { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Team Skills</h1>
+  <nav id="nav"></nav>
+  <div class="spacer"></div>
+  <span id="who" class="muted small"></span>
+  <button id="logout" style="display:none">Sign out</button>
+</header>
+<main id="main"></main>
+<div id="toast"></div>
+<script>
+(() => {
+  const $ = (sel, el = document) => el.querySelector(sel);
+  const state = { token: null, team: null, user: null, me: null, view: 'dashboard', slug: null, tab: 'published', auth: 'token' };
+  const VIEWS = [['dashboard', 'Dashboard'], ['skills', 'Skills'], ['reviews', 'Reviews'], ['members', 'Members'], ['activity', 'Activity']];
+  const RANK = { viewer: 0, contributor: 1, maintainer: 2, owner: 3 };
+
+  const h = (tag, attrs = {}, ...children) => {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === 'class') el.className = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (v !== null && v !== undefined) el.setAttribute(k, v);
+    }
+    for (const c of children.flat()) if (c !== null && c !== undefined) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+    return el;
+  };
+  const esc = (s) => String(s ?? '');
+  const when = (iso) => iso ? iso.replace('T', ' ').replace('Z', '') : '';
+  const toast = (msg, bad = false) => {
+    const t = $('#toast'); t.textContent = msg; t.className = bad ? 'bad' : ''; t.style.display = 'block';
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => (t.style.display = 'none'), bad ? 5000 : 2500);
+  };
+
+  const store = {
+    load() { try { return JSON.parse(localStorage.getItem('teamskills') || '{}'); } catch (e) { return {}; } },
+    save(obj) { try { localStorage.setItem('teamskills', JSON.stringify(obj)); } catch (e) { /* private mode */ } },
+    clear() { try { localStorage.removeItem('teamskills'); } catch (e) { /* ignore */ } },
+  };
+
+  async function rpc(op, args = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    if (state.team) headers['X-TeamSkills-Team'] = state.team;
+    if (state.user) headers['X-TeamSkills-User'] = state.user;
+    const res = await fetch('/api/rpc', { method: 'POST', headers, body: JSON.stringify({ op, args }) });
+    const payload = await res.json();
+    if (!payload.ok) { const err = new Error(payload.error.message); err.code = payload.error.code; throw err; }
+    return payload.result;
+  }
+  const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); if (e.code === 'unauthorized') signOut(); } };
+  const can = (role) => state.me && RANK[state.me.role] >= RANK[role];
+  const canEdit = (skill) => can('maintainer') || (can('contributor') && skill.owner === state.me.handle);
+
+  // ---------------------------------------------------------------- login
+  async function boot() {
+    const health = await fetch('/api/health').then((r) => r.json()).catch(() => ({ auth: 'token' }));
+    state.auth = health.auth;
+    const saved = store.load();
+    Object.assign(state, { token: saved.token || null, team: saved.team || null, user: saved.user || null });
+    if (state.token || (state.team && state.user)) {
+      try { await signIn(); return; } catch (e) { store.clear(); }
+    }
+    renderLogin();
+  }
+  async function signIn() {
+    const info = await rpc('whoami');
+    state.me = info.member; state.teamInfo = info.team; state.team = info.team.slug; state.user = info.member.handle;
+    store.save({ token: state.token, team: state.team, user: state.user });
+    $('#who').textContent = `${state.me.handle} · ${state.me.role} · ${state.teamInfo.name}`;
+    $('#logout').style.display = '';
+    renderNav(); go('dashboard');
+  }
+  function signOut() {
+    store.clear(); Object.assign(state, { token: null, team: null, user: null, me: null });
+    $('#who').textContent = ''; $('#logout').style.display = 'none'; $('#nav').innerHTML = ''; renderLogin();
+  }
+  $('#logout').onclick = signOut;
+  function renderLogin() {
+    const main = $('#main'); main.innerHTML = '';
+    const tokenMode = state.auth !== 'none';
+    const form = h('form', { class: 'card login', onsubmit: guard(async (e) => {
+      e.preventDefault();
+      if (tokenMode) state.token = $('#tok', form).value.trim();
+      else { state.team = $('#team', form).value.trim(); state.user = $('#user', form).value.trim(); }
+      await signIn();
+    }) },
+      h('h2', {}, 'Sign in'),
+      tokenMode
+        ? [h('label', {}, 'Member token'), h('input', { id: 'tok', placeholder: 'ts_…', autocomplete: 'off' }),
+           h('p', { class: 'muted small' }, 'Tokens are issued when a member is added (', h('code', {}, 'teamskills members add'), ').')]
+        : [h('label', {}, 'Team slug'), h('input', { id: 'team', placeholder: 'acme' }),
+           h('label', {}, 'Your handle'), h('input', { id: 'user', placeholder: 'ana' }),
+           h('p', { class: 'muted small' }, 'This server runs without authentication.')],
+      h('button', { class: 'primary', type: 'submit' }, 'Continue'));
+    main.append(form);
+  }
+
+  // ------------------------------------------------------------ navigation
+  function renderNav() {
+    const nav = $('#nav'); nav.innerHTML = '';
+    for (const [id, label] of VIEWS) nav.append(h('button', { class: state.view === id ? 'active' : '', onclick: () => go(id) }, label));
+  }
+  function go(view, slug = null) { state.view = view; state.slug = slug; state.tab = 'published'; renderNav(); render(); }
+  const render = guard(async () => {
+    const main = $('#main'); main.innerHTML = '';
+    main.append(h('p', { class: 'muted' }, 'Loading…'));
+    const el = await ({ dashboard, skills, skill, reviews, members, activity })[state.view]();
+    main.innerHTML = ''; main.append(el);
+  });
+
+  // -------------------------------------------------------------- views
+  const badge = (status) => h('span', { class: 'badge ' + status }, status.replace('_', ' '));
+  const tags = (list) => (list || []).map((t) => h('span', { class: 'tag' }, t));
+
+  async function dashboard() {
+    const d = await rpc('dashboard');
+    const s = d.by_status;
+    return h('div', {},
+      h('div', { class: 'card' }, h('h2', {}, `${d.team.name}`),
+        h('div', { class: 'grid' },
+          stat(d.skills_total, 'skills'), stat(s.published, 'published'), stat(s.in_review, 'in review'),
+          stat(s.draft, 'drafts'), stat(s.deprecated, 'deprecated'), stat(d.members, 'members'))),
+      h('div', { class: 'card' }, h('h3', {}, 'Waiting for review'),
+        d.pending_reviews.length ? reviewTable(d.pending_reviews) : h('p', { class: 'muted' }, 'Nothing pending.')),
+      h('div', { class: 'row', style: 'align-items:flex-start' },
+        h('div', { class: 'card', style: 'flex:1;min-width:280px' }, h('h3', {}, 'Most installed'),
+          d.most_installed.length ? h('table', {}, h('tbody', {}, d.most_installed.map((m) => h('tr', { class: 'link', onclick: () => go('skill', m.slug) }, h('td', {}, m.slug), h('td', {}, m.installs))))) : h('p', { class: 'muted' }, 'No installs recorded yet.')),
+        h('div', { class: 'card', style: 'flex:1;min-width:280px' }, h('h3', {}, 'Drafts in progress'),
+          d.drafts_in_progress.length ? h('table', {}, h('tbody', {}, d.drafts_in_progress.slice(0, 10).map((x) => h('tr', { class: 'link', onclick: () => go('skill', x.slug) }, h('td', {}, x.slug), h('td', { class: 'muted' }, `${x.editor} · ${when(x.updated_at)}`))))) : h('p', { class: 'muted' }, 'None.'))),
+      h('div', { class: 'card' }, h('h3', {}, 'Recent activity'), feed(d.recent_activity)));
+  }
+  const stat = (n, label) => h('div', { class: 'stat' }, h('b', {}, n), h('span', {}, label));
+
+  function feed(items) {
+    if (!items.length) return h('p', { class: 'muted' }, 'No activity yet.');
+    return h('ul', { class: 'feed' }, items.map((a) => {
+      const details = Object.entries(a.details || {}).filter(([, v]) => v !== '' && v !== null && !(Array.isArray(v) && !v.length)).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : v}`).join(' · ');
+      return h('li', {}, h('span', { class: 'muted small' }, when(a.at)), ' ', h('b', {}, a.actor), ' ', a.action.replace('.', ' '), ' ',
+        a.skill ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('skill', a.skill); } }, a.skill) : '', details ? h('span', { class: 'muted small' }, ' — ' + details) : '');
+    }));
+  }
+
+  async function skills() {
+    const filters = { status: '', tag: '', query: '' };
+    const wrap = h('div', {});
+    const list = h('div', {});
+    const load = guard(async () => {
+      const rows = await rpc('list_skills', { status: filters.status || null, tag: filters.tag || null, query: filters.query || null });
+      list.innerHTML = '';
+      list.append(rows.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Skill', 'Status', 'Version', 'Owner', 'Installs', 'Tags', 'Updated'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, rows.map((s) => h('tr', { class: 'link', onclick: () => go('skill', s.slug) },
+          h('td', {}, h('b', {}, s.slug), h('div', { class: 'muted small' }, s.description)), h('td', {}, badge(s.status), s.has_draft && s.status !== 'draft' ? h('div', { class: 'small muted' }, 'draft pending') : ''),
+          h('td', {}, s.latest_version || '—'), h('td', {}, s.owner), h('td', {}, s.installs), h('td', {}, tags(s.tags)), h('td', { class: 'muted small' }, when(s.updated_at))))))
+        : h('p', { class: 'muted' }, 'No skills match.'));
+    });
+    const status = h('select', { onchange: (e) => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'Any status'),
+      ['draft', 'in_review', 'published', 'deprecated'].map((s) => h('option', { value: s }, s.replace('_', ' '))));
+    const query = h('input', { placeholder: 'Search…', oninput: (e) => { filters.query = e.target.value; clearTimeout(query.t); query.t = setTimeout(load, 200); } });
+    const tag = h('input', { placeholder: 'tag', style: 'width:120px', oninput: (e) => { filters.tag = e.target.value; clearTimeout(tag.t); tag.t = setTimeout(load, 200); } });
+    wrap.append(h('div', { class: 'card' }, h('div', { class: 'row' }, h('h2', { style: 'margin:0;flex:1' }, 'Skills'), query, tag, status,
+      can('contributor') ? h('button', { class: 'primary', onclick: () => newSkill(wrap) }, 'New skill') : ''), h('div', { style: 'margin-top:12px' }, list)));
+    await load();
+    return wrap;
+  }
+
+  function newSkill(wrap) {
+    const name = h('input', { placeholder: 'skill-slug', style: 'width:220px' });
+    const ta = h('textarea', {});
+    const tmpl = (n) => `---\nname: ${n || 'my-skill'}\ndescription: Describe what this skill does and when an agent should use it.\ntags: []\n---\n\n# ${(n || 'My Skill').split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')}\n\n## When to use this skill\n\n…\n\n## Steps\n\n1. …\n\n## Guardrails\n\n- …\n`;
+    ta.value = tmpl('');
+    name.oninput = () => { ta.value = ta.value.replace(/^name: .*$/m, `name: ${name.value}`); };
+    const card = h('div', { class: 'card' }, h('h2', {}, 'New skill'),
+      h('div', { class: 'row' }, h('label', {}, 'Slug '), name, h('button', { onclick: () => { ta.value = tmpl(name.value); } }, 'Reset template')),
+      h('div', { style: 'margin:12px 0' }, ta),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: guard(async () => { const s = await rpc('create_skill', { content: ta.value }); toast('Draft created'); go('skill', s.slug); }) }, 'Create draft'),
+        h('button', { onclick: () => card.remove() }, 'Cancel')));
+    wrap.prepend(card);
+  }
+
+  async function skill() {
+    const s = await rpc('get_skill', { slug: state.slug });
+    const wrap = h('div', {});
+    const actions = [];
+    const act = (label, op, args = {}, cls = '', after = null) => actions.push(h('button', { class: cls, onclick: guard(async () => {
+      const extra = typeof after === 'function' ? after() : {}; if (extra === null) return;
+      await rpc(op, { slug: s.slug, ...args, ...extra }); toast(`${label} done`); render();
+    }) }, label));
+    const editable = canEdit(s);
+    if (editable && s.has_draft && !s.pending_review) act('Submit for review', 'submit_review', {}, 'primary', () => {
+      const bump = s.latest_version ? (prompt('Version bump: major, minor or patch', 'minor') || '').trim() : 'minor';
+      if (!bump) return null; const note = prompt('Note for the reviewer (optional)', '') ?? ''; return { bump, note };
+    });
+    if (s.pending_review && can('maintainer') && s.pending_review.submitted_by !== state.me.handle) act('Approve & publish', 'approve', {}, 'primary', () => ({ comment: prompt('Comment (optional)', '') ?? '' }));
+    if (s.pending_review && can('maintainer')) act('Reject', 'reject', {}, 'danger', () => { const r = prompt('Reason for rejecting'); return r ? { reason: r } : null; });
+    if (s.pending_review && (s.pending_review.submitted_by === state.me.handle || can('maintainer'))) act('Withdraw', 'withdraw_review');
+    if (editable && s.has_draft && s.latest_version && !s.pending_review) act('Discard draft', 'discard_draft', {}, 'danger', () => (confirm('Discard the draft?') ? {} : null));
+    if (can('maintainer') && s.latest_version && s.lifecycle !== 'deprecated') act('Deprecate', 'deprecate', {}, 'danger', () => ({ reason: prompt('Reason (optional)', '') ?? '' }));
+    if (can('maintainer') && s.lifecycle === 'deprecated') act('Restore', 'restore');
+    if (can('maintainer') && !s.latest_version) act('Delete', 'delete_skill', {}, 'danger', () => (confirm('Delete this unpublished skill?') ? {} : null));
+    if (can('maintainer')) act('Transfer owner', 'set_owner', {}, '', () => { const hd = prompt('New owner handle', s.owner); return hd && hd !== s.owner ? { handle: hd } : null; });
+    const header = h('div', { class: 'card' },
+      h('div', { class: 'row' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('skills'); } }, '← Skills')),
+      h('div', { class: 'row', style: 'margin-top:8px' }, h('h2', { style: 'margin:0' }, s.slug), badge(s.status), s.latest_version ? h('span', { class: 'muted' }, 'v' + s.latest_version) : ''),
+      h('p', {}, s.description),
+      h('p', { class: 'muted small' }, `owner ${s.owner} · ${s.installs} installs · `, tags(s.tags)),
+      s.lifecycle === 'deprecated' ? h('p', { style: 'color:var(--bad)' }, 'Deprecated: ' + (s.deprecation_reason || 'no reason given')) : '',
+      s.pending_review ? h('p', { style: 'color:var(--warn)' }, `In review — submitted by ${s.pending_review.submitted_by} (${s.pending_review.bump} bump)${s.pending_review.note ? ': ' + s.pending_review.note : ''}`) : '',
+      s.has_draft && !s.pending_review ? h('p', { class: 'muted small' }, `Draft by ${s.draft_editor} · ${when(s.draft_updated_at)}`) : '',
+      h('div', { class: 'row' }, actions));
+    const tabsDef = [['published', 'Published'], ['draft', 'Draft'], ['diff', 'Diff'], ['versions', 'Versions'], ['history', 'Review history']];
+    const body = h('div', {});
+    const tabs = h('div', { class: 'tabs' }, tabsDef.map(([id, label]) => h('button', { class: state.tab === id ? 'active' : '', onclick: () => { state.tab = id; wrap.querySelectorAll('.tabs button').forEach((b, i) => b.classList.toggle('active', tabsDef[i][0] === id)); showTab(); } }, label)));
+    const showTab = guard(async () => {
+      body.innerHTML = '';
+      if (state.tab === 'published') {
+        if (!s.latest_version) return body.append(h('p', { class: 'muted' }, 'Not published yet.'));
+        const c = await rpc('get_content', { slug: s.slug }); body.append(h('pre', {}, c.content));
+        body.append(h('p', { class: 'muted small' }, 'Install: ', h('code', {}, `teamskills install ${s.slug}`)));
+      } else if (state.tab === 'draft') {
+        if (!s.has_draft) {
+          if (editable && !s.pending_review) body.append(h('button', { onclick: guard(async () => { const c = await rpc('get_content', { slug: s.slug }); await rpc('update_draft', { slug: s.slug, content: c.content + '\n' }); toast('Draft opened from the published version'); render(); }) }, 'Start a draft from the published version'));
+          else body.append(h('p', { class: 'muted' }, 'No draft.'));
+          return;
+        }
+        const c = await rpc('get_content', { slug: s.slug, ref: 'draft' });
+        if (editable && !s.pending_review) {
+          const ta = h('textarea', {}); ta.value = c.content;
+          const status = h('span', { class: 'muted small' });
+          body.append(ta, h('div', { class: 'row', style: 'margin-top:8px' },
+            h('button', { class: 'primary', onclick: guard(async () => { await rpc('update_draft', { slug: s.slug, content: ta.value }); toast('Draft saved'); render(); }) }, 'Save draft'),
+            h('button', { onclick: guard(async () => { const v = await rpc('validate', { content: ta.value }); status.textContent = v.ok ? 'Valid' + (v.warnings.length ? ' — ' + v.warnings.join('; ') : '') : 'Problems: ' + v.problems.join('; '); }) }, 'Validate'), status));
+        } else body.append(h('pre', {}, c.content));
+      } else if (state.tab === 'diff') {
+        if (!s.has_draft) return body.append(h('p', { class: 'muted' }, 'No draft to compare.'));
+        const d = await rpc('diff', { slug: s.slug });
+        const pre = h('pre', { class: 'diff' });
+        for (const line of (d.diff || '').split('\n')) pre.append(h('span', { class: line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('@@') ? 'hunk' : '' }, line + '\n'));
+        body.append(d.diff ? pre : h('p', { class: 'muted' }, 'Draft is identical to the published version.'));
+      } else if (state.tab === 'versions') {
+        body.append(s.versions.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Version', 'Published', 'Author', 'Approved by', 'Note'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, s.versions.map((v) => h('tr', { class: 'link', onclick: guard(async () => { const c = await rpc('get_content', { slug: s.slug, ref: v.version }); body.append(h('h3', {}, 'v' + v.version), h('pre', {}, c.content)); }) }, h('td', {}, v.version), h('td', {}, when(v.created_at)), h('td', {}, v.author), h('td', {}, v.approved_by), h('td', {}, v.note))))) : h('p', { class: 'muted' }, 'No versions yet.'));
+      } else {
+        body.append(s.reviews.length ? h('table', {}, h('thead', {}, h('tr', {}, ['Submitted', 'By', 'Bump', 'Decision', 'Decided by', 'Reason / note'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, s.reviews.map((r) => h('tr', {}, h('td', {}, when(r.created_at)), h('td', {}, r.submitted_by), h('td', {}, r.bump), h('td', {}, r.decision || 'pending'), h('td', {}, r.decided_by || ''), h('td', {}, r.reason || r.note || ''))))) : h('p', { class: 'muted' }, 'No reviews yet.'));
+      }
+    });
+    wrap.append(header, h('div', { class: 'card' }, tabs, body));
+    await showTab();
+    return wrap;
+  }
+
+  function reviewTable(rows) {
+    return h('table', {}, h('thead', {}, h('tr', {}, ['Skill', 'Proposed', 'By', 'Submitted', 'Note'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.map((r) => h('tr', { class: 'link', onclick: () => go('skill', r.skill) }, h('td', {}, r.skill), h('td', {}, r.proposed_version), h('td', {}, r.submitted_by), h('td', {}, when(r.created_at)), h('td', {}, r.note)))));
+  }
+  async function reviews() {
+    const rows = await rpc('pending_reviews');
+    return h('div', { class: 'card' }, h('h2', {}, 'Pending reviews'), rows.length ? reviewTable(rows) : h('p', { class: 'muted' }, 'Nothing waiting for review.'));
+  }
+
+  async function members() {
+    const rows = await rpc('list_members');
+    const wrap = h('div', {});
+    const tbl = h('table', {}, h('thead', {}, h('tr', {}, ['Handle', 'Name', 'Role', 'Since', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.map((m) => h('tr', {}, h('td', {}, h('b', {}, m.handle)), h('td', {}, m.display_name), h('td', {},
+        can('owner') ? h('select', { onchange: guard(async (e) => { await rpc('set_role', { handle: m.handle, role: e.target.value }); toast('Role updated'); render(); }) }, ['viewer', 'contributor', 'maintainer', 'owner'].map((r) => h('option', { value: r, selected: r === m.role ? '' : null }, r))) : m.role),
+        h('td', { class: 'muted small' }, when(m.created_at)),
+        h('td', {}, can('owner') ? [h('button', { onclick: guard(async () => { const r = await rpc('rotate_token', { handle: m.handle }); prompt(`New token for ${m.handle} (copy it now)`, r.token); }) }, 'New token'), ' ',
+          h('button', { class: 'danger', onclick: guard(async () => { if (!confirm(`Remove ${m.handle}?`)) return; await rpc('remove_member', { handle: m.handle }); toast('Member removed'); render(); }) }, 'Remove')] : '')))));
+    wrap.append(h('div', { class: 'card' }, h('h2', {}, 'Members'), tbl));
+    if (can('owner')) {
+      const handle = h('input', { placeholder: 'handle' }), name = h('input', { placeholder: 'display name' });
+      const role = h('select', {}, ['viewer', 'contributor', 'maintainer', 'owner'].map((r) => h('option', { value: r, selected: r === 'contributor' ? '' : null }, r)));
+      wrap.append(h('div', { class: 'card' }, h('h3', {}, 'Add member'), h('div', { class: 'row' }, handle, name, role,
+        h('button', { class: 'primary', onclick: guard(async () => { const m = await rpc('add_member', { handle: handle.value.trim(), display_name: name.value.trim() || null, role: role.value }); prompt(`Token for ${m.handle} (shown once — copy it now)`, m.token); render(); }) }, 'Add'))));
+    }
+    return wrap;
+  }
+
+  async function activity() {
+    const rows = await rpc('activity', { limit: 100 });
+    return h('div', { class: 'card' }, h('h2', {}, 'Activity'), feed(rows));
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
