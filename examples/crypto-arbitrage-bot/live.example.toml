@@ -1,14 +1,15 @@
-# A US$500 live start on Binance triangles. Copy to live.toml, replace the fee block with what
+# A US$1,000 live start on Binance triangles. Copy to live.toml, replace the fee block with what
 # scripts/read_fees.py printed, keep the API keys in the environment (never in this file), and
-# read the README section "A US$500 start". Every number below is a fraction of the stake:
-# 10% per trade, 1% per day, 5% below the session peak, and the kill rule at 10% cumulative.
+# read the README section "A US$1,000 start". Every number below is a fraction of the stake:
+# 10% per trade, 1% per day, 5% below the day's peak, and the kill rule at 10% cumulative. With
+# compound = true the first three are re-based each UTC day from the USDT on the exchange.
 #
 #   day 0   python3 -m arbbot preflight --connectivity --config live.toml      (from the trading machine)
 #           python3 -m arbbot preflight --config live.toml                     (keys, balance, order/test)
 #   stage B python3 -m arbbot scan --live --config live.toml 2>>live.log       (validation-only orders, 1 day)
 #   stage C set real_orders = true, then
 #           python3 -m arbbot scan --live --i-know-this-sends-real-orders --config live.toml 2>>live.log
-#   weekly  python3 scripts/rollup.py logs/live --scan-log live.log --capital-usd 500 --cooldown-s 5
+#   weekly  python3 scripts/rollup.py logs/live --scan-log live.log --capital-usd 1000 --cooldown-s 5
 
 [universe]
 top_n = 60
@@ -28,27 +29,29 @@ min_net_edge_bps = 1.0
 max_plausible_net_edge_bps = 200.0
 
 [risk]
-max_notional_per_trade_usd = 50.0   # 10% of the stake; preflight wants 2x this in free USDT
-max_daily_loss_usd = 5.0            # 1% of the stake, realized; trading halts for the UTC day when hit
+max_notional_per_trade_usd = 100.0  # 10% of the stake; preflight wants 2x this (200 USDT) free; re-based daily
+max_daily_loss_usd = 10.0           # 1% of the stake, realized; trading halts for the UTC day when hit; re-based daily
 max_trades_per_minute = 5
 cooldown_s = 5.0
 max_detect_latency_ms = 250.0
 kill_switch_file = "STOP"           # touch STOP to stop trading; the kill rule below says when
-min_profit_usd = 0.005              # 1 bps of a US$50 trade; below that a fill is three CGT events for nothing
-max_drawdown_pct = 5.0              # US$25 below the day's opening realized PnL or its intraday peak, against live.capital_usd;
+min_profit_usd = 0.01               # 1 bps of a US$100 trade (the day-0 cap; this floor is not re-based)
+max_drawdown_pct = 5.0              # US$50 below the day's opening realized PnL or its intraday peak, against live.capital_usd;
                                     # a fresh budget each UTC day and each process start
 state_file = "logs/live/risk_state.json"
 
 [live]
 enabled = true
 real_orders = false                 # stage B first (POST /api/v3/order/test); set true for stage C
-capital_usd = 500.0                 # the stake at risk: the drawdown cap is a percentage of this
-max_cumulative_loss_pct = 10.0      # the kill rule: preflight refuses to re-arm once USDT on the exchange is below 450
-fee_float_usd = 50.0                # the BNB you deposited for fees (RUNBOOK step 6); set 0 if you pay fees in USDT
-compound = false                    # true: before the first cycle of each UTC day the stake is re-read from the USDT on
-                                    # the exchange and the per-trade cap, daily loss cap and drawdown base scale with it
-                                    # (10% / 1% / 5% of that stake); the kill floor stays at 90% of capital_usd and that
-                                    # re-base halts sticky when the stake is under it
+capital_usd = 1000.0                # the stake at risk: the drawdown cap is a percentage of it, and the kill floor is anchored to it
+max_cumulative_loss_pct = 10.0      # the kill rule: preflight refuses to re-arm once USDT on the exchange is below 900,
+                                    # and the daily re-base halts sticky there
+fee_float_usd = 100.0               # the BNB you deposited for fees (RUNBOOK step 6); set 0 if you pay fees in USDT
+compound = true                     # before the first cycle of each UTC day the stake is re-read from the USDT on the
+                                    # exchange (free plus locked) and the per-trade cap, daily loss cap and drawdown base
+                                    # scale with it (10% / 1% / 5% of that stake); the kill floor stays at 900, 90% of
+                                    # capital_usd, and that re-base halts sticky when the stake is under it. false: the
+                                    # three caps above stay at the figures written here
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

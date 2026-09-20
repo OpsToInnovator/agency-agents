@@ -1,4 +1,4 @@
-# Runbook: the US$500 live start
+# Runbook: the US$1,000 live start
 
 This is the operator's sequence for running arbbot with real money on Binance triangles,
 step by step, with the command to type, what a good result looks like, and what to do
@@ -24,19 +24,22 @@ Three rules that hold throughout:
 
 Below, `RUN` stands for `sudo /opt/arbbot/ops/as-arbbot.sh /opt/arbbot/venv/bin/python`.
 
-The budgets, as fractions of a US$500 stake (all set in `/etc/arbbot/live.toml`):
+The budgets, as fractions of a US$1,000 stake (all set in `/etc/arbbot/live.toml`). With
+`compound = true`, as shipped, the first three are re-based each UTC day from the USDT on
+the exchange, so these dollar figures are the day-0 values:
 
 | Rule | Setting | Enforced by |
 | --- | --- | --- |
-| Per trade | US$50 | `risk.max_notional_per_trade_usd` |
-| Per UTC day | US$5 realized loss, then halt for the day | `risk.max_daily_loss_usd`, persisted |
-| Drawdown | US$25 below the day's opening PnL or its intraday peak | `risk.max_drawdown_pct` against `live.capital_usd` |
-| Kill | US$50 cumulative: USDT on the exchange below 450 | `live.max_cumulative_loss_pct`, preflight refuses to re-arm |
+| Per trade | US$100 | `risk.max_notional_per_trade_usd` |
+| Per UTC day | US$10 realized loss, then halt for the day | `risk.max_daily_loss_usd`, persisted |
+| Drawdown | US$50 below the day's opening PnL or its intraday peak | `risk.max_drawdown_pct` against the stake (`live.capital_usd`, re-based daily) |
+| Kill | US$100 cumulative: USDT on the exchange below 900 | `live.max_cumulative_loss_pct`; preflight refuses to re-arm, and the daily re-base halts sticky |
 | Instant stop | `touch /var/lib/arbbot/STOP` | checked before every leg; halts `arbbot-live` only, the measurement has its own `STOP-measure` |
 
-For another stake, scale the same ratios: at US$1,000 that is US$100 per trade, US$10 a day,
-US$50 of drawdown, a kill floor of US$900, and about US$100 of BNB if fees are paid in BNB.
-`compound = true` in `live.toml` makes the first three follow the account: before the
+For another stake, scale the same ratios: at US$500 that is US$50 per trade, US$5 a day,
+US$25 of drawdown, a kill floor of US$450, `min_profit_usd = 0.005`, and about US$50 of BNB
+if fees are paid in BNB. `compound = true`, as shipped in `live.toml`, makes the first three
+follow the account: before the
 first cycle of each UTC day the stake is re-read from the USDT on the exchange (free plus
 locked) and the caps scale with it, while the kill floor stays at 90 % of the original
 `capital_usd`. The floor is checked at that re-base and by preflight at every start; a
@@ -91,9 +94,13 @@ It prints a `[venues] taker_fee_bps = { binance = ... }` line. Paste that value 
 whole run and the account has "Using BNB to pay for fees" switched on; the discounted
 figure is printed next to it.
 
-**6. Fund.** Deposit 500 USDT to the spot wallet. If paying fees in BNB, also about
-US$50 of BNB (a filled US$50 cycle costs about US$0.11 of it; a day at the daily cap
-burns about US$5), and set `fee_float_usd` in `live.toml` to what you deposited so
+**6. Fund.** Deposit 1,000 USDT to the spot wallet. The BNB is **on top of** that, not
+out of it: buying it with the deposited USDT leaves 900 free, which is the kill floor
+itself, so the first losing day halts the bot. If you would rather fund a fixed total,
+deposit the BNB first and set `capital_usd` to the USDT that remains, so the caps and the
+floor are both measured on the money that actually trades. If paying fees in BNB, budget
+about US$100 of it (a filled US$100 cycle costs about US$0.23; a day at the daily cap
+burns about US$10), and set `fee_float_usd` in `live.toml` to what you deposited so
 `reconcile` knows how much BNB is float and how much is a leftover position; if you pay
 fees in USDT, set it to 0. From Australia the cheapest verified ramp is AUD to USDT on an
 exchange with a deep AUD/USDT book, then a withdrawal to Binance; budget 0.8 to 1.8 %
@@ -115,7 +122,7 @@ balances and `order/test accepted`. Every `FAIL` line names exactly what to fix:
 | clock skew | `sudo timedatectl set-ntp true`, wait a minute, re-run |
 | API key can WITHDRAW | delete the key on Binance, make a new one without withdrawals |
 | no spot trading permission | edit the key's permissions on Binance |
-| free USDT below 2x max notional / below the kill floor | the deposit has not landed, or the stake is not there |
+| free USDT below 2x max notional (200) / USDT below the kill floor (900) | on day 0 the deposit has not landed or the stake is not there; on a later start the kill rule has fired, so do not top up and restart |
 | status BREAK / no exchange filters | the symbol is suspended; `auto_discover = true` must stay on |
 | kill switch file already exists | `sudo rm /var/lib/arbbot/STOP` if you meant to start |
 | trading is halted (sticky) | see "When it halts" below; reconcile first |
@@ -202,16 +209,18 @@ start or the preflight refuses with `kill switch file ... already exists`.
 
 ## When it halts
 
-The bot halts itself for three reasons (four with compounding on). Each prints `TRADING HALTED: <reason>` in
+The bot halts itself for four reasons (three with `compound = false`). Each prints `TRADING HALTED: <reason>` in
 `live.log` and persists the same reason, which `reconcile` shows as `HALTED: <reason>`.
 
-- **Daily loss cap** (`daily loss cap hit (-5.xx USD)`): US$5 of realized loss today.
+- **Daily loss cap** (`daily loss cap hit (-10.xx USD)`): US$10 of realized loss today, 1 % of
+  the day's re-based stake.
   Nothing to do; it lifts at 00:00 UTC. Two such days in any seven is a kill criterion.
-- **Drawdown cap** (`drawdown cap hit`): US$25 below the day's opening PnL or its peak.
-  Lifts at 00:00 UTC. Behind the daily cap it can only fire after a day ran up more than
-  US$20 and gave it back, so if you see it, read the day's fills.
-- **Kill floor** (`cumulative loss budget spent`, only with `compound = true`): the daily
-  re-base found the USDT on the exchange below 90 % of the original stake. Sticky on
+- **Drawdown cap** (`drawdown cap hit`): US$50 below the day's opening PnL or its peak, 5 %
+  of the day's re-based stake. Lifts at 00:00 UTC. Behind the daily cap it can only fire
+  after a day ran up more than US$40 and gave it back, so if you see it, read the day's fills.
+- **Kill floor** (`cumulative loss budget spent`): the daily `compound` re-base found the
+  USDT on the exchange below 90 % of the original stake, US$900 (with `compound = false`
+  only preflight makes this check, at each start). Sticky on
   purpose; it is the kill criterion, not something to clear. The same re-base halts on
   `binance rate limit (418|429) on the balance read` for the same reason an order would.
 - **Sticky halt**: any reason ending in `reconcile manually` (`cycle aborted mid-way`,
@@ -260,7 +269,8 @@ Write down what happened before touching the config. A halt that repeats is data
 Any one of these ends stage C: `sudo touch /var/lib/arbbot/STOP`, `sudo systemctl stop
 arbbot-live`, write the post-mortem, and do not restart on the same settings.
 
-- Free USDT below 450 (the preflight enforces this one).
+- USDT on the exchange (free plus locked) below 900: preflight enforces it at every start,
+  and the daily re-base halts sticky on it.
 - The daily loss cap on two days in any seven.
 - Any sticky halt you cannot reconcile within the hour, or one that left a one-legged
   position twice.
@@ -283,13 +293,12 @@ appear there that is not in the journal. A week with zero sends in `rollup-measu
 is worth a look at `grep -c 'kill switch' /var/lib/arbbot/measure7d.log`: the
 measurement's own switch is `/var/lib/arbbot/STOP-measure`.
 
-The per-trade cap stays at 10 % of the stake. With `compound = false` it grows only with
-the stake, and the stake grows only after a month of positive live realized PnL and a
-passing scorecard: double it, never more, and re-run this runbook's day 0 preflight at the
-new size. With `compound = true` the cap follows the account by itself, up after a winning
-day and down after a losing one, so the rule above governs deposits: add money only on
-that same evidence, raise `capital_usd` to the new stake so the kill floor tracks it, and
-re-run preflight.
+The per-trade cap stays at 10 % of the stake. With `compound = true`, as shipped, it follows
+the account by itself, up after a winning day and down after a losing one, so this rule
+governs deposits: add money only after a month of positive live realized PnL and a passing
+scorecard, at most doubling the stake, raise `capital_usd` to the new stake so the kill floor
+tracks it, and re-run this runbook's day 0 preflight at the new size. With `compound = false`
+the cap moves only when you edit it, on the same evidence.
 
 ## Stopping
 
@@ -308,6 +317,8 @@ likely a business for tax purposes; the records are what an accountant will ask 
 
 `sudo ops/install.sh` again from a fresh checkout, with `arbbot-live` stopped (the
 installer refuses otherwise). It keeps the venv and never overwrites an edited file in
-`/etc/arbbot`, so new keys in the example configs (`fee_float_usd`, the measurement's
-`kill_switch_file = "STOP-measure"`) have to be added to `/etc/arbbot/live.toml` and
-`/etc/arbbot/measure7d.toml` by hand, then `systemctl restart arbbot-measure`.
+`/etc/arbbot`, so new keys in the example configs (`fee_float_usd`, `compound`, the
+measurement's `kill_switch_file = "STOP-measure"`) have to be added to `/etc/arbbot/live.toml` and
+`/etc/arbbot/measure7d.toml` by hand, then `systemctl restart arbbot-measure`. A `live.toml` installed from the old
+US$500 example keeps that sizing and, without a `compound` key, compounding off; edit it to
+the figures above before relying on this runbook.
