@@ -1,0 +1,33 @@
+[Unit]
+Description=arbbot live scanner (Binance triangles, gated by preflight and the risk manager)
+Documentation=file:///opt/arbbot/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arbbot
+Group=arbbot
+# Relative paths in live.toml (STOP, logs/live/...) resolve here, not in the code checkout.
+WorkingDirectory=/var/lib/arbbot
+EnvironmentFile=/etc/arbbot/live.env
+ExecStart=/opt/arbbot/venv/bin/python -m arbbot scan --live $ARBBOT_LIVE_FLAGS --config /etc/arbbot/live.toml --log-dir logs/live
+# scan's stderr is the run log the weekly roll-up reads (--scan-log live.log)
+StandardOutput=append:/var/lib/arbbot/live.log
+StandardError=append:/var/lib/arbbot/live.log
+# SIGINT = the bot's own graceful stop (finishes an in-flight cycle, closes the venue session)
+KillSignal=SIGINT
+TimeoutStopSec=45
+# a crash restarts; a refused preflight (3) or a config / keys problem (2) must not loop every 5 s
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2 3
+# hardening: the service can only write its own state directory and the log
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arbbot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

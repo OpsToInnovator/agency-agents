@@ -1,0 +1,26 @@
+[Unit]
+Description=arbbot 7-day paper measurement (public feeds only, no keys)
+Documentation=file:///opt/arbbot/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arbbot
+Group=arbbot
+WorkingDirectory=/var/lib/arbbot
+ExecStart=/opt/arbbot/venv/bin/python -m arbbot scan --config /etc/arbbot/measure7d.toml --log-dir logs/measure7d
+StandardOutput=append:/var/lib/arbbot/measure7d.log
+StandardError=append:/var/lib/arbbot/measure7d.log
+KillSignal=SIGINT
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arbbot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
