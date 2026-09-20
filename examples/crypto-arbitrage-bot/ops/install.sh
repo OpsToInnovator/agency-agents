@@ -6,6 +6,12 @@ set -euo pipefail
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 if [ "$(id -u)" -ne 0 ]; then echo "run as root (sudo $0)" >&2; exit 2; fi
 command -v python3 >/dev/null || { echo "python3 is required (3.11+)" >&2; exit 2; }
+command -v rsync >/dev/null || { echo "rsync is required (apt install rsync)" >&2; exit 2; }
+command -v setpriv >/dev/null || { echo "setpriv is required (util-linux)" >&2; exit 2; }
+if systemctl is-active --quiet arbbot-live 2>/dev/null; then
+  echo "arbbot-live is running: stop it first (sudo systemctl stop arbbot-live), the install replaces its code" >&2
+  exit 2
+fi
 python3 - <<'PY' || { echo "python 3.11+ is required" >&2; exit 2; }
 import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PY
@@ -14,9 +20,11 @@ install -d -o root -g root -m 755 /opt/arbbot
 install -d -o root -g arbbot -m 750 /etc/arbbot
 install -d -o arbbot -g arbbot -m 750 /var/lib/arbbot /var/lib/arbbot/logs
 # code: a plain copy of the checkout (no .git, no logs), plus a venv with the two runtime deps
-rsync -a --delete --exclude .git --exclude logs --exclude '__pycache__' --exclude '.pytest_cache' "$SRC/" /opt/arbbot/
+# /venv is anchored so --delete never removes the interpreter installed on an earlier run
+rsync -a --delete --exclude .git --exclude logs --exclude '__pycache__' --exclude '.pytest_cache' --exclude /venv "$SRC/" /opt/arbbot/
+chmod 755 /opt/arbbot/ops/as-arbbot.sh /opt/arbbot/ops/install.sh /opt/arbbot/ops/rollup_daily.sh /opt/arbbot/scripts/rtt_probe.sh
 [ -x /opt/arbbot/venv/bin/python ] || python3 -m venv /opt/arbbot/venv
-/opt/arbbot/venv/bin/pip install --quiet --upgrade pip
+/opt/arbbot/venv/bin/pip install --quiet --upgrade pip || echo "pip self-upgrade skipped (offline?)" >&2
 /opt/arbbot/venv/bin/pip install --quiet /opt/arbbot
 # configs: never overwrite an edited one
 [ -f /etc/arbbot/live.toml ] || install -o root -g arbbot -m 640 "$SRC/live.example.toml" /etc/arbbot/live.toml
@@ -29,14 +37,16 @@ install -m 644 "$SRC"/ops/arbbot-live.service "$SRC"/ops/arbbot-measure.service 
 systemctl daemon-reload
 cat <<MSG
 
-installed. Nothing is running yet. Next, in this order (see /opt/arbbot/RUNBOOK.md):
-  1. as the arbbot user, from /var/lib/arbbot:
-       sudo -u arbbot /opt/arbbot/venv/bin/python -m arbbot preflight --connectivity --config /etc/arbbot/live.toml
-  2. put the API key in /etc/arbbot/live.env (chmod 640 root:arbbot is set); read your fees:
-       sudo -u arbbot env \$(grep -v '^#' /etc/arbbot/live.env | xargs) /opt/arbbot/venv/bin/python /opt/arbbot/scripts/read_fees.py
+installed. Nothing is running yet. Next, in this order (see /opt/arbbot/RUNBOOK.md). Every
+arbbot command below goes through /opt/arbbot/ops/as-arbbot.sh, which loads the keys from
+/etc/arbbot/live.env and runs the command as the arbbot user from /var/lib/arbbot, the
+directory the service's relative paths (STOP, logs/live/...) resolve against.
+  1. sudo /opt/arbbot/ops/as-arbbot.sh /opt/arbbot/venv/bin/python -m arbbot preflight --connectivity --config /etc/arbbot/live.toml
+  2. put the API key in /etc/arbbot/live.env (640 root:arbbot is set); read your fees:
+       sudo /opt/arbbot/ops/as-arbbot.sh /opt/arbbot/venv/bin/python /opt/arbbot/scripts/read_fees.py
      and paste the printed [venues] block into /etc/arbbot/live.toml
   3. systemctl enable --now arbbot-rtt arbbot-measure arbbot-rollup.timer      (public feeds, no keys)
   4. fund the account, then:
-       sudo -u arbbot env \$(grep -v '^#' /etc/arbbot/live.env | xargs) /opt/arbbot/venv/bin/python -m arbbot preflight --config /etc/arbbot/live.toml
+       sudo /opt/arbbot/ops/as-arbbot.sh /opt/arbbot/venv/bin/python -m arbbot preflight --config /etc/arbbot/live.toml
   5. stage B: systemctl enable --now arbbot-live        (validation-only orders; ARBBOT_LIVE_FLAGS empty)
 MSG

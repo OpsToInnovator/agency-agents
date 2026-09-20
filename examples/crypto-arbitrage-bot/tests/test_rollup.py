@@ -388,3 +388,4 @@ def test_measure7d_config_loads_and_is_paper_only():
     assert cfg.live.enabled is False and cfg.live.real_orders is False
     assert cfg.paper.fill_model == "arrival" and cfg.paper.fill_fraction == 0.5
     assert cfg.risk.min_profit_usd == 0.01
+    assert cfg.risk.kill_switch_file.endswith("STOP-measure")  # the live run's STOP must not halt the comparison run

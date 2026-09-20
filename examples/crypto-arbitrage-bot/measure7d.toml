@@ -37,7 +37,7 @@ max_daily_loss_usd = 25.0
 max_trades_per_minute = 30
 cooldown_s = 2.0
 max_detect_latency_ms = 250.0
-kill_switch_file = "STOP"
+kill_switch_file = "STOP-measure"  # its own switch: the live run's STOP must not silently halt the comparison run
 min_profit_usd = 0.01          # lowered from 0.05 so small candidates are SENT and their fill quality measured;
                                # the GO metric is dollar-weighted realized PnL, so dust cannot inflate it
 max_drawdown_pct = 5.0

@@ -15,9 +15,16 @@ ExecStart=/opt/arbbot/venv/bin/python -m arbbot scan --live $ARBBOT_LIVE_FLAGS -
 # scan's stderr is the run log the weekly roll-up reads (--scan-log live.log)
 StandardOutput=append:/var/lib/arbbot/live.log
 StandardError=append:/var/lib/arbbot/live.log
-# SIGINT = the bot's own graceful stop (finishes an in-flight cycle, closes the venue session)
+# SIGINT = the bot's own graceful stop: it finishes the cycle in flight, which with a
+# timed-out order and three lookups can take up to about 2.5 minutes, then closes the venue
+# session. Killing it sooner would drop the sticky halt that protects the next start.
 KillSignal=SIGINT
-TimeoutStopSec=45
+TimeoutStopSec=180
+# If even that expires, a second SIGINT takes the bot's cancel path, which persists the
+# "shutdown while an order was in flight" halt and exits 130. systemd has no third signal:
+# a process that ignores this one is left running, which is the right failure mode for a
+# bot with an order in flight.
+FinalKillSignal=SIGINT
 # a crash restarts; a refused preflight (3) or a config / keys problem (2) must not loop every 5 s
 Restart=on-failure
 RestartSec=5

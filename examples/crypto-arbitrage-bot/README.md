@@ -249,6 +249,7 @@ Every key has a safe default and unknown keys are an error. The ones worth knowi
 | `risk.max_drawdown_pct` | 5.0 | PnL this far (as % of capital) below the day's opening PnL or intraday peak halts for the day (0 = off; live mode needs `live.capital_usd`) |
 | `live.capital_usd` | 0 | The stake at risk; live mode measures `risk.max_drawdown_pct` against it (0 = that cap off live) |
 | `live.max_cumulative_loss_pct` | 10 | The kill budget; preflight refuses to re-arm once free USDT is below the stake less this |
+| `live.fee_float_usd` | 0 | BNB deposited to pay fees; `reconcile` treats BNB above it as inventory a cycle left behind |
 | `risk.min_profit_usd` | 0.05 | Dust-sized opportunities are not actionable |
 | `risk.kill_switch_file` | `STOP` | Create the file to stop instantly |
 | `paper.fill_model` / `assumed_rtt_ms` | `arrival` / 150 | Orders arrive later and can miss; `instant` is the generous model |
@@ -288,9 +289,10 @@ What the live path does to protect you:
   cycle whose edge decayed is not sent. HTTP 418/429 halt trading.
 - Live executions run one at a time, off the quote path.
 - `python3 -m arbbot reconcile` is the read-only check for after a halt: every balance
-  marked in USDT, the stake against its kill floor, open orders, the persisted halt state,
-  the last order intents, and a verdict naming what to sell; `--clear-halt` lifts a halt
-  only once the account is flat. It never sends an order.
+  marked in USDT, the stake against its kill floor, resting orders, the persisted halt
+  state, the kill-switch file, the last order intents, and a verdict naming what to sell
+  or cancel (BNB above the declared `live.fee_float_usd` counts as inventory);
+  `--clear-halt` lifts a halt only once the account is flat. It never sends an order.
 
 Only single-venue (triangular) opportunities can be sent live. Cross-exchange
 execution would need order placement on Coinbase and Kraken as well; this project does
@@ -501,6 +503,7 @@ arbbot/
   detectors/        cross_exchange.py, triangular.py, anomaly.py
   execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated),
                     reconcile.py (read-only account check after a halt)
+ops/as-arbbot.sh    runs one arbbot command as the service user with the keys loaded, from /var/lib/arbbot
 scripts/sweep.py    fee / haircut / slippage sensitivity sweep over a recorded tape
 scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block (read-only keys, env only)
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
