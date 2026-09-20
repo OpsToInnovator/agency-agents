@@ -165,7 +165,7 @@ moved N bps) are the bot declining a stale opportunity and are expected.
 
 ```bash
 sudo touch /var/lib/arbbot/STOP                 # no new leg starts while the service stops
-sudo systemctl stop arbbot-live                 # can take up to about three minutes if an order is being reconciled
+sudo systemctl stop arbbot-live                 # up to about five minutes: it finishes the cycle, and any unwind, in flight
 sudo rm /var/lib/arbbot/STOP
 sudo sed -i 's/^real_orders = false/real_orders = true/' /etc/arbbot/live.toml
 sudo sed -i 's/^ARBBOT_LIVE_FLAGS=.*/ARBBOT_LIVE_FLAGS=--i-know-this-sends-real-orders/' /etc/arbbot/live.env
@@ -207,7 +207,7 @@ promised. The scorecard's GO criteria are the week's question, not the day's.
 
 **Stopping or restarting in stage C, every time:** `sudo touch /var/lib/arbbot/STOP` first,
 so no new leg starts, then `systemctl stop`; the stop waits for an in-flight cycle, up to
-about three minutes when an order has to be looked up. Remove the file before the next
+about five minutes when an order has to be looked up or a position unwound. Remove the file before the next
 start or the preflight refuses with `kill switch file ... already exists`.
 
 ## When it halts
@@ -327,7 +327,7 @@ it, on the same evidence.
 
 ```bash
 sudo touch /var/lib/arbbot/STOP
-sudo systemctl disable --now arbbot-live            # waits for an in-flight cycle, up to about three minutes
+sudo systemctl disable --now arbbot-live            # waits for an in-flight cycle and unwind, up to about five minutes
 RUN -m arbbot reconcile --config /etc/arbbot/live.toml   # must say FLAT
 ```
 

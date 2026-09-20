@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pathlib
 
 import pytest
 
@@ -1667,3 +1668,91 @@ def test_apply_fill_books_a_cycle_leg_and_an_unwind_identically(monkeypatch):
     carry2 = ex._apply_fill(d2, sell_leg, sell)
     assert d2["BTC"] == pytest.approx(-0.01) and d2["USDT"] == pytest.approx(1000.0 - 1.0)
     assert carry2 == pytest.approx(1000.0 - 1.0)
+
+
+def test_a_200_that_did_not_come_from_the_matching_engine_is_ambiguous(monkeypatch):
+    """request() renders a non-JSON body as {"raw": ...}. Reading that as "the IOC filled
+    nothing" would let the cycle abort claim the position is known and sell an asset the leg
+    may already have spent: the hole position_known_after closes for a 4xx, left open for 200."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    from arbbot.execution.live import looks_like_an_order
+    assert looks_like_an_order({"executedQty": "0"}) and looks_like_an_order({"orderId": 1})
+    assert looks_like_an_order({"status": "EXPIRED"})
+    assert not looks_like_an_order({"raw": "<html>maintenance</html>"}) and not looks_like_an_order({})
+    assert not looks_like_an_order(None) and not looks_like_an_order("ok")
+
+    for body in ({"raw": "<html>maintenance</html>"}, {"ok": True}):
+        book, opp = triangle_book_and_opp()
+        risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+        session = FakeSession([TIME, LEG1_FILL, ("/api/v3/order", 200, body)])
+        ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+        rec = run(ex.execute(opp, 1000.0))
+        assert len(_posts(session)) == 2, body  # no exit order: we do not know what leg 2 did
+        assert rec.unwound == "skipped" and "fill state unknown" in rec.reason
+        assert risk.halted and risk.halt_sticky and "did not come from the matching engine" in risk.halt_reason
+
+
+def test_a_crash_inside_the_unwind_cannot_start_a_second_one(monkeypatch, tmp_path):
+    """Four abort call sites sit inside the leg loop's pre-send handler, so an exception
+    escaping the unwind would re-enter _abort with a fresh order budget."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, _unwind_fill("0.00998", "995.495")])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    orig = ex._journal
+
+    def journal_full_disk(entry):
+        if entry.get("kind") == "unwind_response":
+            raise OSError(28, "No space left on device")
+        return orig(entry)
+
+    ex._journal = journal_full_disk
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 3  # one exit order, never a second unwind's worth
+    assert rec.unwound == "failed" and "the unwind crashed" in rec.reason
+    assert risk.halted and risk.halt_sticky
+    assert "look them up by client order id" in rec.reason
+
+
+def test_stop_is_re_checked_before_every_exit_order(monkeypatch):
+    """The cycle re-checks the kill switch before every leg; so must the unwind."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    _record_sleeps(monkeypatch)
+    book, opp = triangle_book_and_opp()
+    import tempfile
+    stop = pathlib.Path(tempfile.mkdtemp()) / "STOP"
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9, kill_switch_file=str(stop)), DetectionConfig())
+    nothing = ("/api/v3/order", 200, {"executedQty": "0", "cummulativeQuoteQty": "0", "status": "EXPIRED", "fills": []})
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, nothing, nothing, nothing])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner = ex._send
+
+    async def stop_after_the_first_exit(params, client_id):
+        payload = await inner(params, client_id)
+        if client_id.startswith("unw"):
+            stop.write_text("")  # the operator sees the incident and hits STOP
+        return payload
+
+    ex._send = stop_after_the_first_exit
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 3  # leg 1, leg 2, ONE exit order: not three
+    assert rec.unwound == "failed" and "stopped part-way through the unwind" in rec.reason
+    assert risk.halted and risk.halt_sticky
+
+
+def test_the_service_stop_timeout_covers_the_engine_wait():
+    """systemd killing the process mid-unwind manufactures the unknown position the unwind
+    exists to avoid, so TimeoutStopSec must stay above the engine's shutdown wait."""
+    from arbbot.config import LiveConfig
+    from arbbot.execution.live import UNWIND_BACKOFF_S
+    unit = (pathlib.Path(__file__).resolve().parents[1] / "ops" / "arbbot-live.service").read_text(encoding="utf-8")
+    timeout = next(int(l.split("=", 1)[1]) for l in unit.splitlines() if l.startswith("TimeoutStopSec="))
+    cfg = LiveConfig()
+    t, lookups = 10.0, 3  # the shipped rest timeout and LOOKUP_ATTEMPTS
+    per_order = t + lookups * (1.5 + t)
+    worst = t + 3 * per_order + cfg.unwind_max_attempts * per_order + sum(UNWIND_BACKOFF_S)
+    assert timeout > max(90.0, worst + 10.0)

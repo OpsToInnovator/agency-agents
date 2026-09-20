@@ -102,6 +102,15 @@ def position_known_after(exc: BaseException | None) -> bool:
     return False  # ambiguity, timeouts, cancellation, anything unnamed
 
 
+def looks_like_an_order(payload: Any) -> bool:
+    """Did this 200 actually come from Binance's matching engine? request() renders any
+    non-JSON body as {"raw": text}, and a proxy, CDN error page or captive portal can answer
+    200 with HTML. Without this, such a body reaches _fill_from, which reads "no executedQty"
+    as "the IOC filled nothing" and lets the cycle abort claim the position is known: the
+    same hole position_known_after closes for a 4xx, left open for a 200."""
+    return isinstance(payload, dict) and any(k in payload for k in ("executedQty", "orderId", "status"))
+
+
 def send_blocked_by(exc: BaseException | None) -> str | None:
     """Reasons no further order may leave this machine even though the position IS known.
     Sending into a rate-limit ban escalates it from minutes to days."""
@@ -264,6 +273,7 @@ class BinanceLiveExecutor:
         self.unwound_cost_usd = 0.0
         self._unwinds: deque[float] = deque()  # wall clock of each successful unwind (rolling hour)
         self._t0 = time.time()  # wall clock at the start of the cycle being executed
+        self._aborting = False  # one abort, and so one unwind, per execute()
         log.warning("LIVE executor armed: %s; auto-unwind %s",
                     "REAL ORDERS" if self.real_orders else "test endpoint only (no fills)",
                     "ON (a broken cycle sells its position back and keeps trading)" if self.auto_unwind
@@ -542,10 +552,11 @@ class BinanceLiveExecutor:
             if not self.real_orders:
                 raise AmbiguousOrderState(f"order/test call failed with {type(exc).__name__}: {exc or 'no response'}") from exc
             return await self._reconcile(params, client_id, exc)
-        if self.real_orders and not payload:
+        if self.real_orders and not looks_like_an_order(payload):
+            what = "empty response" if not payload else "a reply that did not come from the matching engine"
             if self.risk is not None:
-                self.risk.halt(f"empty response for real order {client_id} ({params['symbol']}); reconcile manually", sticky=True)
-            raise AmbiguousOrderState(f"{params['symbol']}: empty response to a real order")
+                self.risk.halt(f"{what} for real order {client_id} ({params['symbol']}); reconcile manually", sticky=True)
+            raise AmbiguousOrderState(f"{params['symbol']}: {what} to a real order: {str(payload)[:120]!r}")
         return payload or {}
 
     async def execute(self, opp: Opportunity, now: float, min_edge_bps: float = 0.0) -> TradeRecord:
@@ -739,6 +750,16 @@ class BinanceLiveExecutor:
         dusted: set[str] = set()
         spent, last_error = 0, ""
         while True:
+            if self.risk is not None:
+                # re-checked before EVERY exit order, the same rule the cycle legs follow: an
+                # operator who touches STOP mid-unwind means it from that moment, not from the
+                # next cycle.
+                ok, why = self.risk.allow_unwind(time.time())
+                if not ok:
+                    held = self._stranded(opp, deltas, now, skip=frozenset(dusted))
+                    hint = (f"; holding {held[0][1]:.8f} {held[0][0]}, sell it on {held[0][2] or 'the Binance spot page'}"
+                            if held else "")
+                    return done(f"{why}: stopped part-way through the unwind{hint}")
             targets = self._stranded(opp, deltas, now, skip=frozenset(dusted))
             if not targets:
                 return done("")
@@ -851,6 +872,23 @@ class BinanceLiveExecutor:
         `position_known` is keyword-only and defaults to the SAFE value, so a call site added by
         a future edit is non-unwindable until someone writes position_known=True and justifies
         it in review. Where an exception exists, position_known_after(exc) decides instead."""
+        if self._aborting:
+            # _abort now SENDS orders, and four of its call sites sit inside the leg loop's
+            # pre-send handler. Without this, anything that raises in here re-enters with a
+            # fresh order budget and sends the unwind twice.
+            log.error("LIVE: _abort re-entered while already aborting (%s); not unwinding again", reason)
+            return TradeRecord(opp, fills, "partial" if fills and self.real_orders else "rejected",
+                               f"{reason} (during an abort already in progress)", 0.0, now,
+                               promised_pnl_usd=opp.expected_profit_usd if fills else 0.0, unwound="skipped")
+        self._aborting = True
+        try:
+            return await self._abort_inner(opp, fills, deltas, now, reason, exc=exc, position_known=position_known)
+        finally:
+            self._aborting = False
+
+    async def _abort_inner(self, opp: Opportunity, fills: list[Fill], deltas: dict[str, float], now: float,
+                           reason: str, *, exc: BaseException | None = None,
+                           position_known: bool = False) -> TradeRecord:
         self.rejected += 1
         status = "partial" if fills and self.real_orders else "rejected"
         realized, unwound = 0.0, ""
@@ -886,7 +924,14 @@ class BinanceLiveExecutor:
                 unwound, left = "skipped", ("fill state unknown: selling an asset we may not hold, or may hold twice, "
                                             "is worse than halting")
             else:
-                left = await self._unwind(opp, fills, deltas, now, self._t0)
+                try:
+                    left = await self._unwind(opp, fills, deltas, now, self._t0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as unwind_exc:  # a full disk under the journal, a malformed payload
+                    log.exception("LIVE: the unwind itself crashed")
+                    left = (f"the unwind crashed ({unwind_exc!r}); some exit orders may have been sent, look them up "
+                            f"by client order id before selling anything by hand")
                 unwound = "flat" if not left else "failed"
             unpriced: list[str] = []
             realized = self._mark_deltas(deltas, now, unpriced)  # AFTER the unwind: the true cost
