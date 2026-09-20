@@ -309,11 +309,13 @@ async def cmd_preflight(args: argparse.Namespace) -> int:
 async def cmd_reconcile(args: argparse.Namespace, session: Any | None = None) -> int:
     """Show what the live account holds against what the bot recorded; lift a halt on request.
 
-    Exit codes: 0 flat and not halted, 1 attention needed (inventory, halt, or a refused
-    --clear-halt), 2 usage or keys, 3 the trading host is unreachable."""
-    from .execution.live import BinanceRest, check_reachability
+    Exit codes: 0 flat and not halted, 1 attention needed (inventory, a resting order, a halt,
+    an unreadable state file, or a refused --clear-halt), 2 usage or keys, 3 the trading host
+    or the market-data mirror is unreachable."""
+    from .execution.live import BinanceHTTPError, BinanceRest, check_reachability
     from .execution.reconcile import clear_halt, format_report, reconcile_report
 
+    key_error_codes = (-2014, -2015, -1022, -1002)  # bad key format, invalid key/IP/permission, bad signature, unauthorized
     cfg = load_config(args.config, _overrides(args))
     api_key = os.environ.get(cfg.live.api_key_env, "")
     api_secret = os.environ.get(cfg.live.api_secret_env, "")
@@ -321,6 +323,14 @@ async def cmd_reconcile(args: argparse.Namespace, session: Any | None = None) ->
         print(f"set {cfg.live.api_key_env} and {cfg.live.api_secret_env} in the environment (read-only spot keys are enough)",
               file=sys.stderr)
         return 2
+    state_file = Path(cfg.risk.state_file) if cfg.risk.state_file else None
+    intent_log = Path(cfg.live.intent_log) if cfg.live.intent_log else None
+    kill_switch = Path(cfg.risk.kill_switch_file) if cfg.risk.kill_switch_file else None
+    if state_file is not None and not state_file.exists():
+        print(f"note: no risk state file at {state_file}. Relative paths in the config resolve against the current "
+              f"directory ({os.getcwd()}); the service's is its WorkingDirectory (/var/lib/arbbot when installed by "
+              f"ops/install.sh). Run this from there if the bot has already traded.", file=sys.stderr)
+    fee_float = cfg.live.fee_float_usd if args.fee_float_usd is None else args.fee_float_usd
     rest = BinanceRest(cfg.venues.binance_trade_rest, api_key, api_secret, cfg.live.recv_window_ms, session,
                        public_base_url=cfg.venues.binance_rest)
     try:
@@ -328,33 +338,58 @@ async def cmd_reconcile(args: argparse.Namespace, session: Any | None = None) ->
         if reason:
             print(f"FAIL {reason}", file=sys.stderr)
             return 3
-        await rest.sync_time()
-        state_file = Path(cfg.risk.state_file) if cfg.risk.state_file else None
-        intent_log = Path(cfg.live.intent_log) if cfg.live.intent_log else None
-        rep = await reconcile_report(rest, cfg.live.capital_usd, cfg.live.max_cumulative_loss_pct, state_file, intent_log,
-                                     last_n=args.last, dust_usd=args.dust_usd)
+        try:
+            await rest.sync_time()
+        except Exception as exc:  # an HTTP error, a connection failure, or a 200 with a non-Binance body
+            detail = exc.detail if isinstance(exc, BinanceHTTPError) else f"{type(exc).__name__}: {exc}"
+            print(f"FAIL cannot read server time from {rest.public_base_url}: {detail}", file=sys.stderr)
+            return 3
+        try:
+            rep = await reconcile_report(rest, cfg.live.capital_usd, cfg.live.max_cumulative_loss_pct, state_file, intent_log,
+                                         last_n=args.last, dust_usd=args.dust_usd, fee_float_usd=fee_float,
+                                         kill_switch_file=kill_switch)
+        except BinanceHTTPError as exc:
+            code = exc.payload.get("code") if isinstance(exc.payload, dict) else None
+            if exc.status == 401 or code in key_error_codes:
+                print(f"FAIL the key was refused (HTTP {exc.status} code={code}): {exc.detail}. Check the key, its IP "
+                      f"restriction and its spot permission", file=sys.stderr)
+                return 2
+            print(f"FAIL {rest.base_url} answered HTTP {exc.status}: {exc.detail}", file=sys.stderr)
+            return 3
+        except Exception as exc:
+            print(f"FAIL cannot reach {rest.base_url}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 3
     finally:
         await rest.close()
     if args.json:
         print(json.dumps(rep, indent=2, default=str))
     else:
         print(format_report(rep))
+    ok = rep["flat"] and rep["halted"] is False
     if args.clear_halt:
+        if rep.get("state_error"):
+            print(f"refusing --clear-halt: the risk state file cannot be read ({rep['state_error']}); --force does not apply, "
+                  f"fix or move the file by hand", file=sys.stderr)
+            return 1
         if state_file is None or rep["state"] is None:
             print("nothing to clear: no risk state file", file=sys.stderr)
-            return 1
+            return 0 if rep["flat"] else 1
         if not rep["halted"]:
             print("nothing to clear: not halted", file=sys.stderr)
-            return 0
+            return 0 if rep["flat"] else 1
         if not rep["flat"] and not args.force:
-            print("refusing --clear-halt: the account is not flat (see the verdict). Sell the inventory back to USDT first, "
-                  "or pass --force to keep the position on purpose", file=sys.stderr)
+            print("refusing --clear-halt: the account is not flat (see the verdict). Sell the inventory back to USDT and cancel "
+                  "resting orders first, or pass --force to keep the position on purpose", file=sys.stderr)
+            return 1
+        if rep.get("orders_unknown") and not args.force:
+            print("refusing --clear-halt: open orders could not be listed, so flatness is unproven; retry, or pass --force",
+                  file=sys.stderr)
             return 1
         previous = clear_halt(state_file)
         print(f"halt cleared in {state_file} (was: {previous.get('halt_reason', '')!r}); the next scan --live may arm",
               file=sys.stderr)
-        return 0
-    return 0 if (rep["flat"] and not rep["halted"]) else 1
+        return 0 if rep["flat"] else 1
+    return 0 if ok else 1
 
 
 async def cmd_markets(args: argparse.Namespace) -> int:
@@ -418,6 +453,8 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--last", type=int, default=10, help="journal entries to show (default 10)")
     rc.add_argument("--dust-usd", type=float, default=5.0, dest="dust_usd",
                     help="balances worth less than this are dust, not inventory (default 5, Binance's minimum notional)")
+    rc.add_argument("--fee-float-usd", type=float, default=None, dest="fee_float_usd",
+                    help="BNB held to pay fees, in USD (default: [live] fee_float_usd); BNB above it is inventory")
     rc.add_argument("--json", action="store_true", help="machine-readable output")
     rc.add_argument("--clear-halt", action="store_true", dest="clear_halt",
                     help="lift the halt in the risk state file once the account is flat")
