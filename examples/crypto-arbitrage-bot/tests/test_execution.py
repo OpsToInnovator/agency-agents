@@ -8,7 +8,7 @@ from arbbot.detectors import CrossExchangeDetector, TriangularDetector
 from arbbot.execution import BinanceLiveExecutor, PaperExecutor, RiskManager
 from arbbot.execution.live import AmbiguousOrderState, LiveDisabled, sign_query
 from arbbot.fees import FeeSchedule
-from arbbot.models import BINANCE, COINBASE, KRAKEN, Leg, Opportunity, TradeRecord
+from arbbot.models import BINANCE, COINBASE, KRAKEN, Fill, Leg, Market, Opportunity, TradeRecord
 from arbbot.quotes import QuoteBook
 from tests.helpers import BTC_BINANCE, BTC_COINBASE, BTC_KRAKEN, ETH_BINANCE, ETHBTC_BINANCE, quote
 
@@ -456,9 +456,9 @@ TIME = ("/api/v3/time", 200, {"serverTime": 1789795661273})
 PING = ("/api/v3/ping", 200, {})
 
 
-def _live(book, session, real=False, cfg_real=False, risk=None, tmp_path=None):
-    return BinanceLiveExecutor(LiveConfig(enabled=True, real_orders=cfg_real), "https://api.example", FEES, book,
-                               real_orders=real, session=session, risk=risk,
+def _live(book, session, real=False, cfg_real=False, risk=None, tmp_path=None, **cfg_kw):
+    return BinanceLiveExecutor(LiveConfig(enabled=True, real_orders=cfg_real, **cfg_kw), "https://api.example", FEES,
+                               book, real_orders=real, session=session, risk=risk,
                                intent_log=(tmp_path / "intents.jsonl") if tmp_path else None)
 
 
@@ -707,9 +707,10 @@ def test_live_partial_cycle_books_its_loss_and_splits_commissions(monkeypatch):
                                                    "fills": [{"commission": "0.001", "commissionAsset": "BNB"},
                                                              {"commission": "0.000005", "commissionAsset": "BTC"}]}),
                            ("/api/v3/order", 400, {"code": -2010, "msg": "Account has insufficient balance for requested action."})])
-    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, auto_unwind=False)
     rec = run(ex.execute(opp, 1000.0))
     assert rec.status == "partial" and risk.halted and risk.halt_sticky
+    assert rec.unwound == "off" and rec.reason.endswith("NOT unwound: live.auto_unwind is off")
     # BNB has no market in this universe: its commission is booked at the schedule rate in USDT
     assert rec.fills[0].fees_by_asset == {"USDT": pytest.approx(999.0 * 0.001), "BTC": 0.000005}
     assert rec.fills[0].fee_in("BTC") == 0.000005  # only the BTC part reduces what we can sell on
@@ -1006,7 +1007,7 @@ def test_live_pre_send_failure_after_a_fill_books_the_half_cycle(monkeypatch, tm
     book, opp = triangle_book_and_opp()
     risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
     session = FakeSession([TIME, ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999", "fills": [], "orderId": 1})])
-    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path, auto_unwind=False)
     orig = ex._journal
     intents = []
 
@@ -1026,7 +1027,7 @@ def test_live_pre_send_failure_after_a_fill_books_the_half_cycle(monkeypatch, tm
     assert sum(1 for c in session.calls if c[0] == "POST") == 1
     # the same failure on the FIRST leg sent nothing: rejected, nothing booked, no halt
     risk2 = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
-    ex2 = _live(book, FakeSession([TIME]), real=True, cfg_real=True, risk=risk2, tmp_path=tmp_path)
+    ex2 = _live(book, FakeSession([TIME]), real=True, cfg_real=True, risk=risk2, tmp_path=tmp_path, auto_unwind=False)
 
     def dead_journal(entry):
         raise OSError(28, "No space left on device")
@@ -1169,3 +1170,500 @@ def test_live_preflight_stays_quiet_about_ratios_without_compounding(monkeypatch
     with caplog.at_level("INFO", logger="arbbot.execution.live"):
         assert run(ex.preflight(["BTCUSDT"])) == []
     assert "compounding on" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------------------ auto-unwind
+# A cycle that fills leg 1 and then fails leaves the account holding an asset it never
+# wanted. These pin what the bot does about that instead of halting and waiting for a human.
+
+LEG1_FILL = ("/api/v3/order", 200, {"executedQty": "0.00999", "cummulativeQuoteQty": "999.0",
+                                    "fills": [], "orderId": 1, "status": "FILLED"})
+REJECT_2010 = ("/api/v3/order", 400, {"code": -2010, "msg": "Account has insufficient balance for requested action."})
+# leg 1 above leaves deltas = {USDT: -999.0, BTC: 0.00998001} (0.00999 less the 0.1% schedule fee)
+STRANDED_BTC = 0.00998001
+
+
+def _unwind_fill(qty, quote_qty, status="FILLED", order_id=2):
+    return ("/api/v3/order", 200, {"executedQty": qty, "cummulativeQuoteQty": quote_qty, "status": status,
+                                   "orderId": order_id,
+                                   "fills": [{"commission": str(round(float(quote_qty) * 0.001, 8)),
+                                              "commissionAsset": "USDT"}]})
+
+
+def _posts(session):
+    return [c for c in session.calls if c[0] == "POST"]
+
+
+def _record_sleeps(monkeypatch):
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr("arbbot.execution.live.asyncio.sleep", fake_sleep)
+    return slept
+
+
+def test_unwind_sells_the_stranded_leg_back_to_usdt_and_keeps_trading(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, _unwind_fill("0.00998", "995.495")])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 3  # two cycle legs, then one unwind
+    body = _posts(session)[2][2]
+    assert body.startswith("symbol=BTCUSDT&side=SELL&type=LIMIT&timeInForce=IOC&price=99749.00&quantity=0.00998")
+    assert "newClientOrderId=unw" in body
+    assert rec.status == "partial" and rec.unwound == "flat" and "unwound, cycle flat" in rec.reason
+    assert not risk.halted and not risk.halt_sticky  # the bot resumed its own halt and keeps trading
+    assert len(rec.fills) == 2 and rec.fills[1].side == "sell"
+    # -999.0 spent, 995.495 back, 0.995495 USDT commission: the true cost of the round trip
+    assert rec.realized_pnl_usd == pytest.approx(-4.500495)
+    assert ex.realized_pnl_usd == pytest.approx(-4.500495)
+    # the 1e-8 BTC tail is below the lot step: written off at zero, never marked at mid
+    assert ex.dust_assets["BTC"] == pytest.approx(1e-8, rel=1e-3)
+    assert rec.opportunity.extra["unwind"]["orders"][0]["symbol"] == "BTCUSDT"
+    risk.on_settled(rec, 1000.0, pnl_usd=rec.realized_pnl_usd, capital_usd=1000.0)
+    assert risk.daily_realized_usd == pytest.approx(-4.500495)  # the loss still reaches the daily cap
+
+
+def test_unwind_never_runs_when_the_fill_state_is_unknown(monkeypatch, tmp_path):
+    """Selling an asset we may not hold, or may hold twice, is worse than halting."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+
+    # (a) a 5xx the lookup cannot resolve
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL,
+                           ("/api/v3/order", 504, {"code": -1007, "msg": "Timeout waiting for response"}),
+                           ("/api/v3/order", 0, ConnectionError("down")),
+                           ("/api/v3/order", 0, ConnectionError("down")),
+                           ("/api/v3/order", 0, ConnectionError("down"))])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "skipped"
+    assert risk.halted and risk.halt_sticky and "ambiguous" in risk.halt_reason
+    assert "ALSO: cycle aborted mid-way" in risk.halt_reason  # the more specific halt is kept
+
+    # (b) a post-send local failure: we never learned what the venue did
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, ("/api/v3/order", 200, {"executedQty": "0.25", "cummulativeQuoteQty": "0.0099",
+                                                                    "fills": [], "orderId": 2, "status": "FILLED"})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    orig = ex._journal
+    ex._journal = lambda e: (_ for _ in ()).throw(OSError(28, "no space")) if e.get("kind") == "response" and e.get("client_id", "").startswith("arb") and len(_posts(session)) == 2 else orig(e)
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.unwound == "skipped" and "fill state unknown" in rec.reason
+    assert len(_posts(session)) == 2
+
+    # (c) the middlebox case: an HTTP 400 whose body never came from Binance
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, ("/api/v3/order", 400, {"raw": "<html>blocked by proxy</html>"})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "skipped"
+    assert "fill state unknown" in rec.reason and risk.halt_sticky
+
+
+def test_unwind_stops_dead_and_never_retries_a_definitive_rejection(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+
+    # (a) the venue says we do not hold it: our position model is wrong, so stop
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, REJECT_2010])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 3  # never a fourth
+    assert rec.unwound == "failed" and "our position model is wrong" in risk.halt_reason
+    assert risk.halted and risk.halt_sticky
+
+    # (b) a rate limit during the unwind: the sender's own halt reason survives
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, ("/api/v3/order", 418, {"code": -1003, "msg": "banned"})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 3 and rec.unwound == "failed"
+    assert "back off before re-arming" in risk.halt_reason  # resume refused: not our halt
+
+    # (c) the CYCLE leg was rate limited: no unwind order at all
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, ("/api/v3/order", 429, {"code": -1003, "msg": "too many"})])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "skipped"
+    assert "no further orders until the ban clears" in rec.reason
+
+
+def test_unwind_is_refused_while_the_stop_file_exists(monkeypatch, tmp_path):
+    """STOP is the one instruction that comes straight from a human and means send nothing."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    stop = tmp_path / "STOP"
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9, kill_switch_file=str(stop)), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner = ex._send
+
+    async def send_then_stop(params, client_id):
+        payload = await inner(params, client_id)
+        stop.write_text("")  # the operator hits STOP while leg 1 is in flight
+        return payload
+
+    ex._send = send_then_stop
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 1 and rec.unwound == "skipped"
+    assert "kill switch" in rec.reason and f"{STRANDED_BTC:.8f} BTC" in risk.halt_reason
+    assert "BTCUSDT" in risk.halt_reason and risk.halt_sticky
+
+
+def test_unwind_runs_while_the_risk_manager_is_already_halted(monkeypatch):
+    """A halt stops the bot OPENING risk. Refusing to flatten because we are halted for
+    holding inventory would be circular, so a reducing order still goes."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, _unwind_fill("0.00998", "995.495")])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner = ex._send
+
+    async def send_then_halt(params, client_id):
+        payload = await inner(params, client_id)
+        if client_id.startswith("arb"):
+            risk.halt("daily loss cap hit (-12.00 USD)", sticky=False)
+        return payload
+
+    ex._send = send_then_halt
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "flat"  # leg 1, then the unwind
+    assert risk.halted, "a halt we did not raise must survive our unwind"
+    assert "daily loss cap hit" in risk.halt_reason and "ALSO: cycle aborted mid-way" in risk.halt_reason
+
+
+def test_unwind_retries_a_partial_fill_then_writes_the_tail_off_as_dust(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    slept = _record_sleeps(monkeypatch)
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010,
+                           _unwind_fill("0.00500", "498.745", status="EXPIRED"),
+                           _unwind_fill("0.00498", "496.71", order_id=3)])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 4  # never a fifth
+    assert "quantity=0.00498" in _posts(session)[3][2]  # the remainder, recomputed from the ledger
+    assert "price=99749.00" in _posts(session)[3][2]
+    assert rec.unwound == "flat" and not risk.halted and len(rec.fills) == 3
+    assert ex.dust_assets == {"BTC": pytest.approx(1e-8, rel=1e-3)}
+    assert slept == [0.25]
+
+
+def test_unwind_prices_every_attempt_against_the_touch_at_the_abort(monkeypatch):
+    """The bound is anchored once. Re-deriving it from the current touch would follow a
+    falling book all the way down while every single order honoured its own bound."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    slept = _record_sleeps(monkeypatch)
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    nothing = ("/api/v3/order", 200, {"executedQty": "0", "cummulativeQuoteQty": "0", "status": "EXPIRED", "fills": []})
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, nothing, nothing, nothing])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner = ex._send
+
+    async def send_then_drop(params, client_id):
+        payload = await inner(params, client_id)
+        if client_id.startswith("unw"):
+            book.update(quote(BTC_BINANCE, 99000, 99001, ts=1000.0))  # the book falls under us
+        return payload
+
+    ex._send = send_then_drop
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 5
+    assert "price=99749.00" in _posts(session)[4][2]  # still the anchor, not 98752.50
+    assert rec.unwound == "failed" and risk.halted and risk.halt_sticky
+    assert f"{STRANDED_BTC:.8f} BTC" in risk.halt_reason and "3 attempt(s)" in risk.halt_reason
+    assert slept == [0.25, 0.75]
+
+
+def test_unwind_refuses_without_a_fresh_quote(monkeypatch):
+    """The freshness gate is the stand-in for 'is this symbol still trading', and it only
+    works because the unwind ages the book against real elapsed time."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    ex._now_plus_elapsed = lambda now, t0: now + 10.0  # the book's max_age_s is 2.0
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "failed"
+    assert "no fresh sane quote" in rec.reason and risk.halt_sticky
+
+
+def test_stranded_ranks_by_usd_and_ignores_fee_shorts_and_the_start_asset(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    ex = _live(book, FakeSession([]))
+    only_btc = ex._stranded(opp, {"USDT": -999.0, "BNB": -0.001, "BTC": STRANDED_BTC}, 1000.0)
+    assert [(a, s) for a, _q, s, _u in only_btc] == [("BTC", "BTCUSDT")]  # the fee short is not a position
+    assert only_btc[0][3] == pytest.approx(STRANDED_BTC * 99999.5)
+    both = ex._stranded(opp, {"USDT": -999.0, "BTC": 2e-06, "ETH": 0.25}, 1000.0)
+    assert [a for a, _q, _s, _u in both] == ["ETH", "BTC"]  # biggest exposure first
+    (xrp,) = ex._stranded(opp, {"XRP": 10.0}, 1000.0)
+    assert xrp[2] == "" and xrp[3] is None  # unroutable and unpriceable, but never silently dropped
+
+
+def test_unwind_halts_when_no_leg_sells_the_stranded_asset(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    session = FakeSession([])
+    ex = _live(book, session, real=True, cfg_real=True, risk=RiskManager(RiskConfig(), DetectionConfig()))
+    left = run(ex._unwind(opp, [], {"USDT": -999.0, "XRP": 10.0}, 1000.0, ex._t0))
+    assert left.startswith("no leg of this cycle sells") and not _posts(session)
+
+
+def test_unwind_halts_when_the_venue_rejects_a_residue_worth_more_than_dust(monkeypatch):
+    """A filter rejection on something worth real money means our cached filters or our mark
+    disagree with the venue. That is a broken assumption, not dust."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner = ex._send
+
+    async def send_then_raise_the_floor(params, client_id):
+        payload = await inner(params, client_id)
+        # the venue's real minimum turns out to be far above what we cached
+        book.register(Market(BINANCE, "BTCUSDT", "BTC", "USDT", tick_size=0.01, step_size=0.00001,
+                             min_qty=0.00001, min_notional=10000.0))
+        return payload
+
+    ex._send = send_then_raise_the_floor
+    rec = run(ex.execute(opp, 1000.0))
+    assert len(_posts(session)) == 2 and rec.unwound == "failed"
+    assert "our cached filters disagree with the venue" in rec.reason and risk.halt_sticky
+    assert ex.dust_assets == {}  # nothing was written off
+
+
+def test_unwind_halts_on_disk_before_the_first_unwind_order_leaves(monkeypatch, tmp_path):
+    """A crash at any instant between 'we hold something' and 'we are flat' must come back
+    to a halted process."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    state = tmp_path / "risk.json"
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig(), state_file=state, now=1000.0)
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, _unwind_fill("0.00998", "995.495")])
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk, tmp_path=tmp_path)
+    seen = {}
+    inner = ex._send
+
+    async def capture(params, client_id):
+        if client_id.startswith("unw"):
+            seen.update(json.loads(state.read_text()))
+        return await inner(params, client_id)
+
+    ex._send = capture
+    rec = run(ex.execute(opp, 1000.0))
+    assert seen["halted"] is True and seen["halt_sticky"] is True and seen["halt_token"]
+    assert rec.unwound == "flat"
+    after = json.loads(state.read_text())
+    assert after["halted"] is False and after["halt_token"] == ""
+    kinds = [json.loads(l)["kind"] for l in (tmp_path / "intents.jsonl").read_text().splitlines()]
+    assert kinds == ["intent", "response", "intent", "error", "unwind_plan", "unwind_intent", "unwind_response",
+                     "unwind_dust", "unwind_done"]
+    cid = [json.loads(l) for l in (tmp_path / "intents.jsonl").read_text().splitlines()
+           if json.loads(l)["kind"] == "unwind_intent"][0]["client_id"]
+    assert cid.startswith("unw") and len(cid) <= 36
+    # a fresh manager on the same file comes back clean, because the unwind finished
+    assert not RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0).halted
+
+
+def test_risk_resume_only_lifts_its_own_halt(tmp_path):
+    state = tmp_path / "risk.json"
+    rm = RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0)
+    rm.halt("cycle aborted mid-way", sticky=True, token="unw:A")
+    assert rm.resume("unw:B") is False and rm.halted
+    assert rm.resume("") is False and rm.halted
+    assert rm.resume("unw:A") is True and not rm.halted and not rm.halt_sticky and rm.halt_token == ""
+    rm.halt("binance rate limit (418); back off before re-arming", sticky=True)  # no token
+    assert rm.resume("unw:A") is False and rm.halted and rm.halt_sticky
+    reloaded = RiskManager(RiskConfig(), DetectionConfig(), state_file=state, now=1000.0)
+    assert reloaded.halted and reloaded.halt_token == ""  # a halt from a dead process is never resumable
+
+
+def test_position_known_after_and_send_blocked_by():
+    from arbbot.execution.live import BinanceHTTPError, OrderNeverArrived, position_known_after, send_blocked_by
+    assert position_known_after(None) is True
+    assert position_known_after(OrderNeverArrived("never arrived")) is True
+    assert position_known_after(AmbiguousOrderState("unknown")) is False
+    assert position_known_after(BinanceHTTPError(400, {"code": -2010, "msg": "no balance"})) is True
+    assert position_known_after(BinanceHTTPError(400, {"raw": "<html>blocked</html>"})) is False
+    assert position_known_after(BinanceHTTPError(404, None)) is False
+    assert position_known_after(BinanceHTTPError(502, {"code": -1007, "msg": "timeout"})) is False
+    assert position_known_after(asyncio.TimeoutError()) is False
+    assert position_known_after(asyncio.CancelledError()) is False
+    assert send_blocked_by(BinanceHTTPError(418, {"code": -1003})) is not None
+    assert send_blocked_by(BinanceHTTPError(429, {"code": -1003})) is not None
+    assert send_blocked_by(BinanceHTTPError(400, {"code": -2010})) is None
+    assert send_blocked_by(None) is None
+
+
+def test_reconcile_requires_a_terminal_order_status(monkeypatch):
+    """A lookup can race the matching engine. A NEW snapshot is not an outcome, and reading
+    it as one writes off an order the venue is about to fill."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    working = ("/api/v3/order", 200, {"clientOrderId": None, "status": "NEW", "executedQty": "0",
+                                      "cummulativeQuoteQty": "0"})
+    session = FakeSession([TIME, ("/api/v3/order", 0, asyncio.TimeoutError()), working, working, working])
+
+    def same_id(url):
+        return session
+
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    # the lookup echoes whatever client id was asked for
+    orig_get = session.get
+
+    def echoing_get(url, headers=None, timeout=None):
+        cid = url.split("origClientOrderId=")[1].split("&")[0] if "origClientOrderId=" in url else None
+        for entry in session.script:
+            if "/api/v3/order" in entry[0] and isinstance(entry[2], dict) and entry[2].get("status") == "NEW":
+                entry[2]["clientOrderId"] = cid
+                break
+        return orig_get(url, headers=headers, timeout=timeout)
+
+    session.script = [list(e) for e in session.script]
+    session.get = echoing_get
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.status == "rejected" and "ambiguous" in rec.reason.lower()
+    assert risk.halted and risk.halt_sticky and len(_posts(session)) == 1
+
+
+def test_unwind_circuit_breaker_halts_after_repeated_unwinds(monkeypatch):
+    """A successful unwind resumes trading, so the next cycle can strand again. Breaking this
+    often means the edge model or the venue is misbehaving."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    ex = _live(book, FakeSession([]), real=True, cfg_real=True, risk=risk)
+    for i in range(4):
+        book, opp = triangle_book_and_opp()
+        ex.book = book
+        ex.rest._session_obj = None
+        session = FakeSession([TIME, LEG1_FILL, REJECT_2010, _unwind_fill("0.00998", "995.495")])
+        ex.rest.session = session
+        rec = run(ex.execute(opp, 1000.0))
+        assert rec.unwound == "flat", i
+        if i < 3:
+            assert not risk.halted, i
+    assert risk.halted and risk.halt_sticky and "were unwound in the last hour" in risk.halt_reason
+
+
+def test_unwind_does_not_resume_when_an_asset_cannot_be_priced(monkeypatch):
+    """Resuming on a realized number we know is incomplete would hide the loss."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, opp = triangle_book_and_opp()
+    risk = RiskManager(RiskConfig(max_daily_loss_usd=1e9), DetectionConfig())
+    unwind_with_bnb_fee = ("/api/v3/order", 200, {"executedQty": "0.00998", "cummulativeQuoteQty": "995.495",
+                                                  "status": "FILLED", "orderId": 2,
+                                                  "fills": [{"commission": "0.001", "commissionAsset": "BNB"}]})
+    session = FakeSession([TIME, LEG1_FILL, REJECT_2010, unwind_with_bnb_fee])
+    book.register(Market(BINANCE, "BNBUSDT", "BNB", "USDT", tick_size=0.01, step_size=0.001, min_qty=0.001,
+                         min_notional=5.0))
+    book.update(quote(Market(BINANCE, "BNBUSDT", "BNB", "USDT"), 600.0, 600.1, ts=1000.0))
+    ex = _live(book, session, real=True, cfg_real=True, risk=risk)
+    inner_apply = ex._apply_fill
+
+    def apply_then_lose_bnb(deltas, leg, fill):
+        carry = inner_apply(deltas, leg, fill)
+        if leg.symbol == "BTCUSDT" and leg.side == "sell":
+            book.invalidate_venue(BINANCE)  # the feed drops before we can mark the ledger
+            book.update(quote(BTC_BINANCE, 99999, 100000, ts=1000.0))  # BTC comes back, BNB does not
+        return carry
+
+    ex._apply_fill = apply_then_lose_bnb
+    rec = run(ex.execute(opp, 1000.0))
+    assert rec.unwound == "failed" and "could not be priced" in rec.reason
+    assert risk.halted and risk.halt_sticky and "BNB" in ex.unmarked_assets
+
+
+def test_unwind_extends_the_shutdown_wait(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, _opp = triangle_book_and_opp()
+    on = _live(book, FakeSession([]), real=True, cfg_real=True)
+    off = _live(book, FakeSession([]), real=True, cfg_real=True, auto_unwind=False)
+    assert on.worst_case_s > off.worst_case_s  # the engine must wait out an unwind in flight
+    test_mode_on = _live(book, FakeSession([]), real=False, cfg_real=False)
+    test_mode_off = _live(book, FakeSession([]), real=False, cfg_real=False, auto_unwind=False)
+    assert test_mode_on.worst_case_s == test_mode_off.worst_case_s  # inert without real orders
+
+
+def test_preflight_refuses_auto_unwind_on_an_account_holding_foreign_coins(monkeypatch):
+    """The unwind cannot tell a venue rejection from a sale of coins the operator owns."""
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    now = __import__("time").time()
+    book = QuoteBook(max_age_s=1e9)
+    book.register(BTC_BINANCE)
+    book.update(quote(BTC_BINANCE, 99999, 100000, ts=now))
+
+    def session(balances):
+        return FakeSession([
+            PING,
+            ("/api/v3/time", 200, {"serverTime": int(__import__("time").time() * 1000)}),
+            ("/api/v3/exchangeInfo", 200, {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]}),
+            ("/sapi/v1/account/apiRestrictions", 200, {"enableWithdrawals": False, "enableSpotAndMarginTrading": True}),
+            ("/api/v3/account", 200, {"balances": balances}),
+            ("/api/v3/order", 200, {"executedQty": "0", "status": "EXPIRED"}),
+        ])
+
+    held = [{"asset": "USDT", "free": "1000", "locked": "0"}, {"asset": "BTC", "free": "0.5", "locked": "0"}]
+    s1 = session(held)
+    problems = run(_live(book, s1, real=True, cfg_real=True).preflight(["BTCUSDT"]))
+    assert len(problems) == 1 and "auto_unwind" in problems[0] and "BTC" in problems[0]
+    assert len([c for c in s1.calls if "/api/v3/account" in c[1]]) == 1  # no extra round trip
+    assert run(_live(book, session(held), real=True, cfg_real=True, auto_unwind=False).preflight(["BTCUSDT"])) == []
+    crumb = [{"asset": "USDT", "free": "1000", "locked": "0"}, {"asset": "BTC", "free": "0.00001", "locked": "0"}]
+    assert run(_live(book, session(crumb), real=True, cfg_real=True).preflight(["BTCUSDT"])) == []
+
+
+def test_apply_fill_books_a_cycle_leg_and_an_unwind_identically(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    book, _opp = triangle_book_and_opp()
+    ex = _live(book, FakeSession([]))
+    buy_leg = Leg(BINANCE, "BTCUSDT", "buy", "BTC", "USDT", 100000.0, 0.01, 0.001)
+    buy = Fill(BINANCE, "BTCUSDT", "buy", 100000.0, 0.01, 0.00001, "BTC", 1000.0, "x",
+               fees_by_asset={"BTC": 0.000005, "BNB": 0.001})
+    deltas = {}
+    carry = ex._apply_fill(deltas, buy_leg, buy)
+    assert deltas["USDT"] == pytest.approx(-1000.0) and deltas["BTC"] == pytest.approx(0.01 - 0.000005)
+    assert deltas["BNB"] == pytest.approx(-0.001) and carry == pytest.approx(0.01 - 0.000005)
+    sell_leg = Leg(BINANCE, "BTCUSDT", "sell", "BTC", "USDT", 100000.0, 0.01, 0.001)
+    sell = Fill(BINANCE, "BTCUSDT", "sell", 100000.0, 0.01, 1.0, "USDT", 1000.0, "y", fees_by_asset={"USDT": 1.0})
+    d2 = {}
+    carry2 = ex._apply_fill(d2, sell_leg, sell)
+    assert d2["BTC"] == pytest.approx(-0.01) and d2["USDT"] == pytest.approx(1000.0 - 1.0)
+    assert carry2 == pytest.approx(1000.0 - 1.0)

@@ -10,7 +10,8 @@ import pytest
 
 from arbbot.cli import build_parser, cmd_reconcile
 from arbbot.execution.live import BinanceRest
-from arbbot.execution.reconcile import clear_halt, describe_entry, mark_in_usdt, reconcile_report, tail_journal
+from arbbot.execution.reconcile import (clear_halt, describe_entry, format_report, mark_in_usdt,
+                                        reconcile_report, tail_journal)
 from tests.test_execution import PING, TIME, FakeSession, run
 
 PRICES = [{"symbol": "BTCUSDT", "price": "81000"}, {"symbol": "UNIUSDT", "price": "9.02"}, {"symbol": "BNBUSDT", "price": "612.3"},
@@ -99,7 +100,8 @@ def test_clear_halt_keeps_the_day_and_its_loss(tmp_path):
     previous = clear_halt(state)
     assert previous["halt_reason"] == "reconcile me"
     after = json.loads(state.read_text(encoding="utf-8"))
-    assert after == {"day": "2026-09-20", "daily_realized_usd": -1.2345, "halted": False, "halt_sticky": False, "halt_reason": ""}
+    assert after == {"day": "2026-09-20", "daily_realized_usd": -1.2345, "halted": False, "halt_sticky": False,
+                     "halt_reason": "", "halt_token": ""}
     (tmp_path / "bad.json").write_text("{", encoding="utf-8")
     with pytest.raises(ValueError):
         clear_halt(tmp_path / "bad.json")
@@ -152,8 +154,9 @@ def test_cli_exit_codes_and_clear_halt_guard(tmp_path, monkeypatch, capsys):
     state.write_text(json.dumps({"day": "2026-09-20", "daily_realized_usd": -2.0, "halted": True, "halt_sticky": True,
                                  "halt_reason": "reconcile me"}), encoding="utf-8")
     assert run(cmd_reconcile(_args(tmp_path, "--clear-halt"), session=_session(flat))) == 0
-    assert json.loads(state.read_text(encoding="utf-8")) == {"day": "2026-09-20", "daily_realized_usd": -2.0, "halted": False,
-                                                              "halt_sticky": False, "halt_reason": ""}
+    assert json.loads(state.read_text(encoding="utf-8")) == {"day": "2026-09-20", "daily_realized_usd": -2.0,
+                                                              "halted": False, "halt_sticky": False,
+                                                              "halt_reason": "", "halt_token": ""}
     capsys.readouterr()  # drop the text reports printed so far
     assert run(cmd_reconcile(_args(tmp_path, "--json"), session=_session(flat))) == 0
     rep = json.loads(capsys.readouterr().out)
@@ -300,3 +303,50 @@ def test_network_failures_after_the_ping_are_fail_lines_with_the_documented_code
     flaky = FakeSession([PING, TIME, ("/api/v3/account", 503, {"raw": "maintenance"})])
     assert run(cmd_reconcile(_args(tmp_path), session=flaky)) == 3
     assert "HTTP 503" in capsys.readouterr().err
+
+
+def test_reconcile_report_flags_an_unwind_with_no_answer(tmp_path, capsys):
+    """An unwind intent with no recorded answer is the one state in which a human selling by
+    hand can double-sell, so it must reach the verdict and block --clear-halt."""
+    journal = tmp_path / "intents.jsonl"
+    entries = [
+        {"ts": 1789795661.0, "kind": "intent", "client_id": "arb0001", "real": True,
+         "params": {"symbol": "BTCUSDT", "side": "BUY", "quantity": "0.00999", "price": "100000"}},
+        {"ts": 1789795661.1, "kind": "response", "client_id": "arb0001",
+         "payload": {"status": "FILLED", "executedQty": "0.00999", "cummulativeQuoteQty": "999"}},
+        {"ts": 1789795661.2, "kind": "unwind_plan", "start_asset": "USDT", "stranded": {"BTC": 0.00998001},
+         "route": {"BTC": "BTCUSDT"}, "opportunity": "USDT->BTC->ETH->USDT"},
+        {"ts": 1789795661.3, "kind": "unwind_intent", "client_id": "unw1f3c8a", "attempt": 1, "of": 3,
+         "params": {"symbol": "BTCUSDT", "side": "SELL", "quantity": "0.00998", "price": "99749.00"}},
+    ]
+    journal.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    held = [{"asset": "USDT", "free": "450.5", "locked": "0"}, {"asset": "BTC", "free": "0.00998", "locked": "0"}]
+    rep = run(reconcile_report(_rest(_session(held)), 500.0, 10.0, None, journal, 10, 5.0, "BNB", 0.0, None))
+    assert rep["unwind_in_flight"] == ["unw1f3c8a"]
+    assert "look them up on Binance by client order id" in rep["verdict"]
+    text = format_report(rep)
+    assert "unw1f3c8a" in text and "LOOK THIS ORDER UP BY CLIENT ID" in text
+    assert "[unwind] intent" in "\n".join(rep["journal"])
+    assert "sell 0.00998001 BTC via BTCUSDT" in "\n".join(rep["journal"])
+
+
+def test_unwind_in_flight_blocks_clear_halt_without_force(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BINANCE_API_KEY", "k")
+    monkeypatch.setenv("BINANCE_API_SECRET", "s")
+    state = tmp_path / "logs" / "live" / "risk_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"day": "2026-09-20", "daily_realized_usd": -2.0, "halted": True, "halt_sticky": True,
+                                 "halt_reason": "cycle aborted mid-way"}), encoding="utf-8")
+    journal = tmp_path / "logs" / "live" / "live_intents.jsonl"
+    journal.write_text(json.dumps({"ts": 1789795661.2, "kind": "unwind_plan", "start_asset": "USDT",
+                                   "stranded": {"BTC": 0.00998001}, "route": {"BTC": "BTCUSDT"}}) + "\n"
+                       + json.dumps({"ts": 1789795661.3, "kind": "unwind_intent", "client_id": "unw1f3c8a",
+                                     "attempt": 1, "of": 3,
+                                     "params": {"symbol": "BTCUSDT", "side": "SELL", "quantity": "0.00998",
+                                                "price": "99749.00"}}) + "\n", encoding="utf-8")
+    flat = [{"asset": "USDT", "free": "500", "locked": "0"}]
+    assert run(cmd_reconcile(_args(tmp_path, "--clear-halt"), session=_session(flat))) == 1
+    assert "have no recorded answer" in capsys.readouterr().err
+    assert json.loads(state.read_text(encoding="utf-8"))["halted"] is True  # untouched
+    assert run(cmd_reconcile(_args(tmp_path, "--clear-halt", "--force"), session=_session(flat))) == 0
+    assert json.loads(state.read_text(encoding="utf-8"))["halted"] is False

@@ -290,6 +290,21 @@ What the live path does to protect you:
 - Before every leg: kill switch, halt flag and the current book are re-checked; a
   cycle whose edge decayed is not sent. HTTP 418/429 halt trading.
 - Live executions run one at a time, off the quote path.
+**Auto-unwind.** A cycle that fills leg 1 and then fails leaves the account holding an
+asset it never wanted, with full market exposure. With `live.auto_unwind` on, the bot
+sells that position straight back to the cycle's start asset with a bounded LIMIT IOC and
+carries on trading; the record is still `status partial`, with a new `unwound` field
+saying `flat`, `failed`, `skipped` or `off`. The bound is anchored to the touch at the
+moment of the abort, not re-derived per attempt, so the total price given up across the
+whole unwind is capped at `live.unwind_max_slippage_bps` and the worst degradation is
+"fills nothing, halts holding it", which is what it did before. It never runs when the
+fill state is unknown, when Binance is rate-limiting, or when the STOP file exists: an
+unwind that sells an asset you may not hold is worse than a halt. It halts before the
+first exit order and lifts that halt only once flat, so a crash at any instant in between
+comes back halted. Preflight refuses to arm with it on while the account holds coins
+besides USDT and the declared BNB fee float, because the unwind cannot tell a venue
+rejection from a sale of coins you own.
+
 - `python3 -m arbbot reconcile` is the read-only check for after a halt: every balance
   marked in USDT, the stake against its kill floor, resting orders, the persisted halt
   state, the kill-switch file, the last order intents, and a verdict naming what to sell
@@ -300,9 +315,9 @@ Only single-venue (triangular) opportunities can be sent live. Cross-exchange
 execution would need order placement on Coinbase and Kraken as well; this project does
 not implement that, because a bot that can fire market orders on three exchanges from a
 2-day-old codebase is a liability, not a feature. Live mode does not rebalance
-inventory or unwind a cycle that fails halfway (it halts and tells you). Treat the live
-executor as a reference for signing, filters and idempotency, not as a production
-trading system. None of it could be exercised from the machine this was written on:
+inventory. It does unwind a cycle that fails halfway (`live.auto_unwind`, on by default):
+see below. Treat the live executor as a reference for signing, filters and idempotency,
+not as a production trading system. None of it could be exercised from the machine this was written on:
 Binance's order endpoints and even its testnet answer HTTP 451 there.
 
 ## Go-live protocol: measure first, then decide

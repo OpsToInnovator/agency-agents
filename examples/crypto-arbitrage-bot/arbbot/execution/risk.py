@@ -34,6 +34,10 @@ class RiskManager:
         self.halted = False
         self.halt_reason = ""
         self.halt_sticky = False  # sticky halts (live errors) survive the day roll; daily-cap halts do not
+        # Only a halt raised WITH a token can be lifted by resume(). The auto-unwind halts
+        # before it sends anything and lifts its own halt once the position is flat; a 418
+        # halt, an ambiguity halt or a halt restored from disk carries no token and stands.
+        self.halt_token = ""
         # Drawdown is measured on this session's own PnL curve against the capital
         # in play, so it is comparable across restarts (equity is not: paper runs
         # restart from their configured balances). The budget is per UTC day and per
@@ -66,6 +70,14 @@ class RiskManager:
         elif data.get("halted") and data.get("day") == today:
             self.halted = True
             self.halt_reason = str(data.get("halt_reason", "halted (persisted)"))
+        # A halt restored from disk belongs to a process that is gone: nothing may resume it.
+        self.halt_token = ""
+        if data.get("day") == today:
+            # Persisted so a crash loop cannot re-fire the same cycle every few seconds and
+            # blow past max_trades_per_minute while systemd restarts us.
+            self._trade_times = deque(float(t) for t in data.get("trade_times", []) if isinstance(t, (int, float)))
+            self._last_by_key = {str(k): float(v) for k, v in (data.get("last_by_key") or {}).items()
+                                 if isinstance(v, (int, float))}
         if self.halted or self.daily_realized_usd:
             log.warning("risk state restored from %s: day=%s realized=%.4f halted=%s %s",
                         self.state_file, data.get("day"), self.daily_realized_usd, self.halted, self.halt_reason)
@@ -74,7 +86,9 @@ class RiskManager:
         if self.state_file is None:
             return
         payload = {"day": self._day, "daily_realized_usd": round(self.daily_realized_usd, 8), "halted": self.halted,
-                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason}
+                   "halt_sticky": self.halt_sticky, "halt_reason": self.halt_reason, "halt_token": self.halt_token,
+                   "trade_times": [round(t, 3) for t in self._trade_times],
+                   "last_by_key": {k: round(v, 3) for k, v in self._last_by_key.items()}}
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".risk_state", dir=str(self.state_file.parent))
@@ -93,16 +107,41 @@ class RiskManager:
             if self.halted and not self.halt_sticky:
                 self.halted = False
                 self.halt_reason = ""
+                self.halt_token = ""
             if self.peak_pnl_usd is not None:
                 self.peak_pnl_usd = self.last_pnl_usd  # a fresh drawdown budget from the day's opening PnL
             self._save_state()
 
-    def halt(self, reason: str, sticky: bool = True) -> None:
+    def halt(self, reason: str, sticky: bool = True, token: str | None = None) -> None:
         self.halted = True
         self.halt_reason = reason
         self.halt_sticky = self.halt_sticky or sticky
+        self.halt_token = token or ""  # only a halt raised WITH a token can ever be lifted by resume()
         log.error("TRADING HALTED: %s", reason)
         self._save_state()
+
+    def resume(self, token: str) -> bool:
+        """Lift ONLY the halt this process raised under exactly `token`. A rate-limit halt from
+        the sender, an ambiguity halt from the order lookup, a halt that was already standing
+        when we arrived, and any halt restored from disk all carry a different token or none at
+        all, so they survive. Returns whether a halt was actually lifted."""
+        if not token or not self.halted or self.halt_token != token:
+            return False
+        self.halted = False
+        self.halt_sticky = False
+        self.halt_reason = ""
+        self.halt_token = ""
+        self._save_state()
+        return True
+
+    def allow_unwind(self, now: float) -> tuple[bool, str]:
+        """The gate for a risk-REDUCING order. A halt must not block it: halts stop the bot
+        OPENING exposure, and refusing to flatten because we are halted for holding inventory
+        is circular. The operator's explicit STOP file is the one thing that does. Deliberately
+        does not roll the day: flattening is not a new trading day's business."""
+        if self.kill_switch_engaged():
+            return False, f"kill switch file {self.cfg.kill_switch_file!r} present"
+        return True, ""
 
     def kill_switch_engaged(self) -> bool:
         return bool(self.cfg.kill_switch_file) and os.path.exists(self.cfg.kill_switch_file)

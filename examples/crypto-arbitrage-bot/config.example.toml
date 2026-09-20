@@ -67,6 +67,12 @@ capital_usd = 0.0             # stake at risk, USD; live mode measures risk.max_
 max_cumulative_loss_pct = 10.0  # preflight refuses to re-arm once USDT on the exchange is below capital_usd less this budget
 fee_float_usd = 0.0           # BNB deposited for fees, USD; `reconcile` calls BNB above this inventory (0 = any BNB is)
 compound = false              # re-base the stake from the exchange's USDT daily and scale the caps with it (kill floor stays anchored)
+auto_unwind = true            # a cycle that breaks after leg 1 sells its position back to the start asset instead of halting
+unwind_max_slippage_bps = 25.0  # worst exit price accepted, anchored to the touch at the abort
+unwind_max_attempts = 3       # total unwind orders for one broken cycle
+unwind_dust_usd = 5.0         # a filter-rejected residue at or below this is dust, written off at zero
+unwind_dust_halt_usd = 25.0   # cumulative dust written off in a session before halting sticky
+unwind_halt_after = 3         # successful unwinds in a rolling hour before halting sticky
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

@@ -52,6 +52,16 @@ compound = true                     # before the first cycle of each UTC day the
                                     # scale with it (10% / 1% / 5% of that stake); the kill floor stays at 900, 90% of
                                     # capital_usd, and that re-base halts sticky when the stake is under it. false: the
                                     # three caps above stay at the figures written here
+auto_unwind = true                  # leg 1 filled and leg 2 failed: sell the position straight back to USDT (a bounded
+                                    # LIMIT IOC) and keep trading, instead of halting with an unwanted coin until you
+                                    # notice. Never runs when the fill state is unknown, when Binance is rate-limiting
+                                    # us, or when the STOP file exists; inert unless real_orders is on
+unwind_max_slippage_bps = 25.0      # worst exit price accepted, anchored to the touch at the moment of the abort
+unwind_max_attempts = 3             # total unwind orders for one broken cycle (not per asset)
+unwind_dust_usd = 5.0               # a residue the venue's filters reject, worth this or less, is written off at zero
+unwind_dust_halt_usd = 25.0         # cumulative dust written off in one session before halting sticky
+unwind_halt_after = 3               # successful unwinds in a rolling hour before halting sticky: breaking that often
+                                    # means the edge model or the venue is misbehaving
 api_key_env = "BINANCE_API_KEY"
 api_secret_env = "BINANCE_API_SECRET"
 recv_window_ms = 5000

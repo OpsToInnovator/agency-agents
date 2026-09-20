@@ -124,6 +124,18 @@ class LiveConfig:
     # anchored to the original capital_usd, so a slow bleed cannot re-base it away: a re-base
     # that finds the stake below capital_usd less max_cumulative_loss_pct halts sticky.
     compound: bool = False
+    # A cycle that fills leg 1 and then fails leaves the account holding an asset it never
+    # wanted, with full market exposure, until a human runs `arbbot reconcile`. On: sell it
+    # straight back to the cycle's start asset (a bounded LIMIT IOC) and keep trading when
+    # that worked. Off: book the loss and halt sticky, as before. It NEVER runs when the
+    # fill state is unknown, when the venue is rate-limiting us, or when the STOP file
+    # exists, and it is inert unless real_orders is on.
+    auto_unwind: bool = True
+    unwind_max_slippage_bps: float = 25.0  # worst price accepted, ANCHORED to the touch at the abort
+    unwind_max_attempts: int = 3           # TOTAL orders for one broken cycle, not per asset
+    unwind_dust_usd: float = 5.0           # at or below this, a filter-rejected residue is dust
+    unwind_dust_halt_usd: float = 25.0     # cumulative dust written off this session before halting
+    unwind_halt_after: int = 3             # successful unwinds in a rolling hour before halting sticky
     api_key_env: str = "BINANCE_API_KEY"
     api_secret_env: str = "BINANCE_API_SECRET"
     recv_window_ms: int = 5000
@@ -298,6 +310,16 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("live.fee_float_usd must be >= 0")
     if cfg.live.compound and cfg.live.capital_usd <= 0:
         raise ConfigError("live.compound needs live.capital_usd > 0: the caps are scaled as ratios to it")
+    if not 0 < cfg.live.unwind_max_slippage_bps <= 200:
+        raise ConfigError("live.unwind_max_slippage_bps must be in (0, 200]: a wider bound costs more than the halt it avoids")
+    if not 1 <= cfg.live.unwind_max_attempts <= 10:
+        raise ConfigError("live.unwind_max_attempts must be between 1 and 10")
+    if cfg.live.unwind_dust_usd < 0:
+        raise ConfigError("live.unwind_dust_usd must be >= 0")
+    if cfg.live.unwind_dust_halt_usd < cfg.live.unwind_dust_usd:
+        raise ConfigError("live.unwind_dust_halt_usd must be >= live.unwind_dust_usd")
+    if cfg.live.unwind_halt_after < 1:
+        raise ConfigError("live.unwind_halt_after must be >= 1")
     band = cfg.detection.stable_rate_band
     if len(band) != 2 or not 0 < band[0] < 1 < band[1]:
         raise ConfigError("detection.stable_rate_band must be [low, high] around 1.0")
