@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -305,6 +306,57 @@ async def cmd_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_reconcile(args: argparse.Namespace, session: Any | None = None) -> int:
+    """Show what the live account holds against what the bot recorded; lift a halt on request.
+
+    Exit codes: 0 flat and not halted, 1 attention needed (inventory, halt, or a refused
+    --clear-halt), 2 usage or keys, 3 the trading host is unreachable."""
+    from .execution.live import BinanceRest, check_reachability
+    from .execution.reconcile import clear_halt, format_report, reconcile_report
+
+    cfg = load_config(args.config, _overrides(args))
+    api_key = os.environ.get(cfg.live.api_key_env, "")
+    api_secret = os.environ.get(cfg.live.api_secret_env, "")
+    if not api_key or not api_secret:
+        print(f"set {cfg.live.api_key_env} and {cfg.live.api_secret_env} in the environment (read-only spot keys are enough)",
+              file=sys.stderr)
+        return 2
+    rest = BinanceRest(cfg.venues.binance_trade_rest, api_key, api_secret, cfg.live.recv_window_ms, session,
+                       public_base_url=cfg.venues.binance_rest)
+    try:
+        reason = await check_reachability(rest)
+        if reason:
+            print(f"FAIL {reason}", file=sys.stderr)
+            return 3
+        await rest.sync_time()
+        state_file = Path(cfg.risk.state_file) if cfg.risk.state_file else None
+        intent_log = Path(cfg.live.intent_log) if cfg.live.intent_log else None
+        rep = await reconcile_report(rest, cfg.live.capital_usd, cfg.live.max_cumulative_loss_pct, state_file, intent_log,
+                                     last_n=args.last, dust_usd=args.dust_usd)
+    finally:
+        await rest.close()
+    if args.json:
+        print(json.dumps(rep, indent=2, default=str))
+    else:
+        print(format_report(rep))
+    if args.clear_halt:
+        if state_file is None or rep["state"] is None:
+            print("nothing to clear: no risk state file", file=sys.stderr)
+            return 1
+        if not rep["halted"]:
+            print("nothing to clear: not halted", file=sys.stderr)
+            return 0
+        if not rep["flat"] and not args.force:
+            print("refusing --clear-halt: the account is not flat (see the verdict). Sell the inventory back to USDT first, "
+                  "or pass --force to keep the position on purpose", file=sys.stderr)
+            return 1
+        previous = clear_halt(state_file)
+        print(f"halt cleared in {state_file} (was: {previous.get('halt_reason', '')!r}); the next scan --live may arm",
+              file=sys.stderr)
+        return 0
+    return 0 if (rep["flat"] and not rep["halted"]) else 1
+
+
 async def cmd_markets(args: argparse.Namespace) -> int:
     cfg = load_config(args.config, _overrides(args))
     markets = await _markets(cfg, args.static)
@@ -359,6 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--connectivity", action="store_true",
                     help="only ask the Binance trading host whether it serves this machine's IP (no keys needed)")
     pf.set_defaults(func=cmd_preflight)
+
+    rc = sub.add_parser("reconcile", help="show the live account marked in USDT, the halt state and the last order intents; "
+                                          "lift a halt once the account is flat")
+    common(rc)
+    rc.add_argument("--last", type=int, default=10, help="journal entries to show (default 10)")
+    rc.add_argument("--dust-usd", type=float, default=5.0, dest="dust_usd",
+                    help="balances worth less than this are dust, not inventory (default 5, Binance's minimum notional)")
+    rc.add_argument("--json", action="store_true", help="machine-readable output")
+    rc.add_argument("--clear-halt", action="store_true", dest="clear_halt",
+                    help="lift the halt in the risk state file once the account is flat")
+    rc.add_argument("--force", action="store_true", help="with --clear-halt: lift it even with inventory outstanding")
+    rc.set_defaults(func=cmd_reconcile)
     return p
 
 

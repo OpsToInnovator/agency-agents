@@ -1,0 +1,14 @@
+[Unit]
+Description=arbbot daily roll-up and scorecard (live fills and the paper measurement)
+
+[Service]
+Type=oneshot
+User=arbbot
+Group=arbbot
+WorkingDirectory=/var/lib/arbbot
+ExecStart=/bin/bash /opt/arbbot/ops/rollup_daily.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arbbot
+PrivateTmp=true

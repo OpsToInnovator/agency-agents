@@ -1,0 +1,23 @@
+[Unit]
+Description=arbbot latency probe (warm round trips to each venue, once a minute)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arbbot
+Group=arbbot
+WorkingDirectory=/var/lib/arbbot
+ExecStart=/bin/bash /opt/arbbot/scripts/rtt_probe.sh
+StandardOutput=append:/var/lib/arbbot/rtt.log
+StandardError=append:/var/lib/arbbot/rtt.log
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arbbot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

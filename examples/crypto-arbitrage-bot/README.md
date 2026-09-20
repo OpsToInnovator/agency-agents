@@ -287,6 +287,10 @@ What the live path does to protect you:
 - Before every leg: kill switch, halt flag and the current book are re-checked; a
   cycle whose edge decayed is not sent. HTTP 418/429 halt trading.
 - Live executions run one at a time, off the quote path.
+- `python3 -m arbbot reconcile` is the read-only check for after a halt: every balance
+  marked in USDT, the stake against its kill floor, open orders, the persisted halt state,
+  the last order intents, and a verdict naming what to sell; `--clear-halt` lifts a halt
+  only once the account is flat. It never sends an order.
 
 Only single-venue (triangular) opportunities can be sent live. Cross-exchange
 execution would need order placement on Coinbase and Kraken as well; this project does
@@ -390,7 +394,9 @@ change, a venue-disagreement anomaly on an asset traded that day, clock drift ov
 Even a passing stage C is a fill-quality test, not income: the GO bar scales to about
 US$0.28/day at A$20, below the cost of the VPS.
 
-**If you would rather commit money now: a US$500 start.** The stake changes nothing
+**If you would rather commit money now: a US$500 start.** `RUNBOOK.md` is the step-by-step
+operator's version of this section, with the commands, the systemd services in `ops/`, and
+what to do at each halt. The stake changes nothing
 about the expectancy, so treat it as buying real fill data with a fixed loss budget, not as
 income. `live.example.toml` is sized for it; every limit is a fraction of the stake, and the
 paper measurement runs alongside on the same machine rather than before.
@@ -482,7 +488,7 @@ affiliation with any exchange.
 
 ```
 arbbot/
-  cli.py            scan / replay / markets / preflight commands
+  cli.py            scan / replay / markets / preflight / reconcile commands
   config.py         dataclasses + TOML loader (unknown keys are errors)
   models.py         Market, Quote, Leg, Opportunity, Fill, TradeRecord
   quotes.py         QuoteBook: latest top-of-book, staleness, USDT→USD rate, marks, quarantine
@@ -493,13 +499,16 @@ arbbot/
   report.py         periodic and final summaries, JSONL logs
   feeds/            binance.py, coinbase.py, kraken.py, replay.py, base.py (reconnects)
   detectors/        cross_exchange.py, triangular.py, anomaly.py
-  execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated)
+  execution/        paper.py (instant + arrival fill models), risk.py (persisted caps), live.py (Binance, gated),
+                    reconcile.py (read-only account check after a halt)
 scripts/sweep.py    fee / haircut / slippage sensitivity sweep over a recorded tape
 scripts/read_fees.py  prints your accounts' real taker fees as a [venues] block (read-only keys, env only)
 scripts/rtt_probe.sh  logs warm-connection round trips to each venue once a minute
 scripts/rollup.py     daily roll-up of a measurement run and the GO / NO-GO scorecard
 measure7d.toml      the 7-day measurement config (paper only)
 live.example.toml   a US$500 live start: stage B by default, limits as fractions of the stake
+RUNBOOK.md          the operator's sequence for that start: day 0 to stage C, halts, reconciliation, kill criteria
+ops/                systemd units (live, measurement, latency probe, daily roll-up), env template, install.sh
 tests/              pytest suite; fixtures/feed_fixture.jsonl is 10 s of live quotes (2026-09-19)
 ```
 
