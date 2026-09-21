@@ -1,0 +1,20 @@
+[project]
+name = "edgecheck"
+version = "0.1.0"
+description = "Demonstrates whether a trading strategy reads the future, from its code and its data"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["edgecheck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
