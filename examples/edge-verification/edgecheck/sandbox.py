@@ -25,21 +25,27 @@ model and is written down rather than implied away.
 
 What is actually enforced, in two tiers:
 
-    namespace   (default when ``unshare`` can create user, mount, pid and network namespaces)
+    namespace   (default when ``unshare`` can create user, mount, pid and network namespaces
+                and pivot into a new root)
                 Fresh interpreter per run. No network at the kernel level: connect() and
-                DNS both fail, by any route, ctypes and child processes included. tmpfs
-                over the home directory, /root, /tmp, /var/tmp, /dev/shm, the working root
-                and the strategy's source directory; only the run directory is bound back
-                in, and the strategy's copy of itself is read-only. /proc remounted so the
-                host's process table is not there to read. Scrubbed environment. rlimits on
-                CPU, memory, processes, file size, open files. Wall-clock kill. Nothing
-                written outside the run directory survives the process.
+                DNS both fail, by any route, ctypes and child processes included. A NEW
+                ROOT: an empty tmpfs into which only what the interpreter needs is bound,
+                read-only -- /usr, /etc, the lib and bin trees, the interpreter's prefix --
+                plus a fresh /proc, four device nodes, a tmpfs /tmp that dies with the
+                process, and the run directory. Nothing else exists. The home directory,
+                /opt, /var, /run, the working root, the source tree, the repository: not
+                hidden, absent. A second red team had cached through /opt and injected a
+                module into the interpreter's own dist-packages, because the first version
+                hid a LIST of paths and a list can never name every writable directory on
+                a host. Scrubbed environment. rlimits on CPU, memory, processes, file size,
+                open files. Wall-clock kill. Nothing written anywhere but the run directory
+                survives the process, and the run directory is deleted after it.
 
     plain       Everything above except the namespaces. The audit hook still records every
                 in-process socket use and every attempt to spawn a process, and refuses
                 them; ``ctypes`` walks past it, and so would a process it managed to start.
-                The parent's environment is readable through /proc. Files written to /tmp
-                or to the source directory survive, so state CAN carry between runs. This
+                The parent's environment is readable through /proc. Files written anywhere
+                outside the run directory survive, so state CAN carry between runs. This
                 tier stops accidents and runaway loops. It is a correctness boundary, not a
                 security boundary, and the report says which tier ran.
 
@@ -70,7 +76,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
-from edgecheck.causality import Report, check_causality, continuation, default_boundaries
+from edgecheck.causality import Report, check_causality, continuation
 
 __all__ = ["Limits", "Sandbox", "SandboxError", "StrategyError", "Timeout", "ResourceExceeded",
            "NetworkAttempt", "ContractViolation", "BadOutput", "Precheck", "precheck", "prove",
@@ -78,8 +84,9 @@ __all__ = ["Limits", "Sandbox", "SandboxError", "StrategyError", "Timeout", "Res
 
 Isolation = Literal["namespace", "plain"]
 CHILD = Path(__file__).with_name("_child.py")
-HIDDEN_CANDIDATES = ("/root", "/tmp", "/var/tmp", "/dev/shm", "/etc/arbbot")
-SHELVES = ("/dev/shm", "/mnt", "/media")   # a fresh tmpfs goes here; the run dir is bound under it
+SYSTEM_ROOTS = ("/usr", "/etc", "/lib", "/lib64", "/bin", "/sbin")   # bound read-only into the new root
+MASKED = ("/etc/arbbot",)                                             # exists on the host; not in the new root
+SHELVES = ("/dev/shm", "/mnt", "/media")   # the new root is a fresh tmpfs mounted here, then pivoted to
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +135,7 @@ class RunRecord:
     cpu_s: float
     returncode: int
     isolation: str
-    hidden: tuple[str, ...]
+    visible: tuple[str, ...]
     files_written: tuple[str, ...]
     violations: tuple[str, ...]
 
@@ -137,20 +144,29 @@ _ISOLATION_CACHE: dict[str, Isolation] = {}
 
 
 def detect_isolation() -> Isolation:
-    """Can this host create the namespaces? Probed once, with a real command, not a guess."""
+    """Can this host build the new root? Probed once, by running the REAL namespace script
+    against a stub child that exits 0. An earlier probe used its own shorter sequence,
+    which bound fewer trees than the real one and failed where the real one succeeded --
+    a probe that diverges from what it probes measures nothing.
+    """
     if "v" in _ISOLATION_CACHE:
         return _ISOLATION_CACHE["v"]
-    unshare = shutil.which("unshare")
     ok = False
+    unshare = shutil.which("unshare")
     if unshare:
+        run = Path(tempfile.mkdtemp(prefix="edgecheck-probe-"))
         try:
-            r = subprocess.run([unshare, "--user", "--map-root-user", "--mount", "--net", "--pid",
-                                "--fork", "--", "sh", "-c",
-                                "mount -t proc proc /proc && mount -t tmpfs -o size=1m tmpfs /dev/shm"],
-                               capture_output=True, timeout=10)
+            (run / "strategy").mkdir()
+            (run / "_child.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
+            cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "--",
+                   "sh", "-c", _NS_SCRIPT, "sh", sys.executable, str(run), "x", "x", "1", "2",
+                   Sandbox._shelf(), *Sandbox._bound_roots()]
+            r = subprocess.run(cmd, cwd=run, env=_scrubbed_env(), capture_output=True, timeout=20)
             ok = r.returncode == 0
         except (OSError, subprocess.SubprocessError):
             ok = False
+        finally:
+            shutil.rmtree(run, ignore_errors=True)
     _ISOLATION_CACHE["v"] = "namespace" if ok else "plain"
     return _ISOLATION_CACHE["v"]
 
@@ -158,13 +174,16 @@ def detect_isolation() -> Isolation:
 def _scrubbed_env() -> dict[str, str]:
     """Built from nothing. Whatever the parent had -- keys, tokens, proxies -- stays with the parent."""
     return {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        # sbin too: pivot_root and umount live there, and the namespace script runs under this
+        # environment. A manual test passed on a shell whose PATH had them; the probe did not.
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "PYTHONHASHSEED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
         "LANG": "C.UTF-8",
+        "HOME": "/tmp",
     }
 
 
@@ -182,24 +201,34 @@ def _rlimit_installer(limits: Limits):
 
 
 # Executed by sh inside the namespaces. Positional arguments only -- nothing is interpolated
-# into this string, so nothing a caller passes can become shell. Order matters: the run
-# directory is bound onto a fresh tmpfs shelf BEFORE its ancestors are covered, and the bind
-# outlives the covering because it references the directory itself, not its path.
+# into this string, so nothing a caller passes can become shell. The new root is built in a
+# fresh tmpfs: each system root is bound in read-only (or recreated as the same symlink where
+# the host has one), the run directory is bound in writable with the strategy's own copy made
+# read-only, then pivot_root makes it the root and the old root is detached.
 _NS_SCRIPT = r'''
 set -e
-py="$1"; child="$2"; run="$3"; entry="$4"; func="$5"; ofd="$6"; vfd="$7"; shelf="$8"; shift 8
-mount -t proc proc /proc
-mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$shelf"
-mkdir "$shelf/run"
-mount --bind "$run" "$shelf/run"
-mount --bind "$shelf/run/strategy" "$shelf/run/strategy"
-mount -o remount,bind,ro,nodev,nosuid "$shelf/run/strategy"
+py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; shift 7
+mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$new"
+cd "$new"
+mkdir -p proc dev tmp work oldroot
 for p in "$@"; do
-  [ "$p" = "$shelf" ] && continue
-  mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$p"
+  if [ -L "$p" ]; then
+    mkdir -p "$(dirname "$new$p")"; ln -s "$(readlink "$p")" "$new$p"
+  elif [ -d "$p" ]; then
+    mkdir -p "$new$p"; mount --rbind "$p" "$new$p"; mount -o remount,bind,ro,nosuid,nodev "$new$p"
+  fi
 done
-cd "$shelf/run"
-exec "$py" -s -B "$child" "$shelf/run" "$entry" "$func" "$ofd" "$vfd"
+for m in /etc/arbbot; do [ -d "$new$m" ] && mount -t tmpfs -o size=1m,nodev,nosuid tmpfs "$new$m" || true; done
+for f in null zero urandom random; do touch "dev/$f"; mount --bind "/dev/$f" "dev/$f"; done
+mount -t tmpfs -o nodev,nosuid,size=64m tmpfs tmp
+mount -t proc proc proc
+mount --bind "$run" work
+mount --bind work/strategy work/strategy
+mount -o remount,bind,ro,nodev,nosuid work/strategy
+pivot_root . oldroot
+umount -l /oldroot
+cd /work
+exec "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd"
 '''
 
 
@@ -254,36 +283,26 @@ class Sandbox:
         shutil.copy2(src, d / src.name)
         return cls(d, entry=src.stem, **kw)
 
-    # -- what gets hidden, and what must not be ------------------------------------------
+    # -- what exists inside, and nothing else -------------------------------------------
 
-    def _hidden_paths(self) -> tuple[str, ...]:
-        """Paths to cover with tmpfs. Never one that holds the interpreter or the child runner.
+    @staticmethod
+    def _bound_roots() -> tuple[str, ...]:
+        """The read-only whitelist: the system trees plus wherever this interpreter lives.
 
-        The working root and the source directory are candidates like any other: the run
-        directory reaches the child through a bind, not through its path.
+        A virtualenv under a home directory is bound at its own path and nothing around it.
         """
-        keep_visible = [Path(sys.executable).resolve(), CHILD.resolve()]
-        candidates = [*HIDDEN_CANDIDATES, str(self.work_root), str(self.source_dir)]
-        home = os.environ.get("HOME")
-        if home:
-            candidates.append(home)
-        out: list[str] = []
-        for c in sorted(set(candidates), key=lambda s: (len(Path(s).parts), s)):
-            p = Path(c)
-            if not p.is_dir():
-                continue
-            if any(k == p or p in k.parents for k in keep_visible):
-                continue
-            if any(Path(o) == p or Path(o) in p.parents for o in out):
-                continue
-            out.append(str(p))
-        return tuple(out)
+        roots = [r for r in SYSTEM_ROOTS if Path(r).exists()]
+        for extra in {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(),
+                      Path(sys.executable).resolve().parent.parent}:
+            if not any(extra == Path(r) or Path(r) in extra.parents for r in roots):
+                roots.append(str(extra))
+        return tuple(roots)
 
     @staticmethod
     def _shelf() -> str:
-        for s in SHELVES:
-            if Path(s).is_dir():
-                return s
+        for sh in SHELVES:
+            if Path(sh).is_dir():
+                return sh
         return "/tmp"
 
     # -- one run ------------------------------------------------------------------------------
@@ -298,25 +317,25 @@ class Sandbox:
     def _run(self, run: Path, tape: Sequence[Any]) -> list[int]:
         shutil.copytree(self.strategy_dir, run / "strategy",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(CHILD, run / "_child.py")      # so the repository need not exist inside
         with (run / "tape.jsonl").open("w", encoding="utf-8") as fh:
             for b in tape:
                 fh.write(json.dumps({"ts": b.ts, "open": b.open, "high": b.high, "low": b.low,
                                      "close": b.close, "volume": b.volume}) + "\n")
-        before = self._snapshot(run)
+        before = self._snapshot(run) - {"_child.py"}
 
         out_r, out_w = os.pipe()
         viol_r, viol_w = os.pipe()
         err_r, err_w = os.pipe()
-        hidden: tuple[str, ...] = ()
+        visible: tuple[str, ...] = ()
         if self.isolation == "namespace":
-            hidden = self._hidden_paths()
-            shelf = self._shelf()
+            visible = self._bound_roots()
             cmd = [shutil.which("unshare") or "unshare", "--user", "--map-root-user", "--mount",
                    "--net", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
-                   sys.executable, str(CHILD), str(run), self.entry, self.func,
-                   str(out_w), str(viol_w), shelf, *hidden]
+                   sys.executable, str(run), self.entry, self.func,
+                   str(out_w), str(viol_w), self._shelf(), *visible]
         else:
-            cmd = [sys.executable, "-s", "-B", str(CHILD), str(run), self.entry, self.func,
+            cmd = [sys.executable, "-s", "-B", str(run / "_child.py"), str(run), self.entry, self.func,
                    str(out_w), str(viol_w)]
 
         t0 = time.monotonic()
@@ -345,7 +364,7 @@ class Sandbox:
         cpu1 = resource.getrusage(resource.RUSAGE_CHILDREN)
         cpu_used = (cpu1.ru_utime - cpu0.ru_utime) + (cpu1.ru_stime - cpu0.ru_stime)
         rec = self._record(run, t0, cpu_used, proc.returncode if proc.returncode is not None else -9,
-                           hidden, before, viols[0] if viols else b"")
+                           visible, before, viols[0] if viols else b"")
         if timed_out:
             raise Timeout(f"strategy exceeded {self.limits.wall_s:.0f}s wall clock")
 
@@ -401,9 +420,9 @@ class Sandbox:
     def _snapshot(run: Path) -> set[str]:
         return {str(p.relative_to(run)) for p in run.rglob("*") if p.is_file()}
 
-    def _record(self, run: Path, t0: float, cpu_used: float, rc: int, hidden: tuple[str, ...],
+    def _record(self, run: Path, t0: float, cpu_used: float, rc: int, visible: tuple[str, ...],
                 before: set[str], viol_bytes: bytes) -> RunRecord:
-        written = sorted(self._snapshot(run) - before)
+        written = sorted(self._snapshot(run) - before - {"_child.py"})
         violations: list[str] = []
         for line in viol_bytes.decode("utf-8", "replace").splitlines():
             try:
@@ -411,7 +430,7 @@ class Sandbox:
                 violations.append(f"{d['kind']}: {d['detail']}")
             except (ValueError, KeyError, TypeError):
                 violations.append("unparsed: " + line[:200])
-        rec = RunRecord(time.monotonic() - t0, cpu_used, rc, self.isolation, hidden,
+        rec = RunRecord(time.monotonic() - t0, cpu_used, rc, self.isolation, visible,
                         tuple(written), tuple(violations))
         self.records.append(rec)
         return rec
@@ -433,24 +452,30 @@ class Sandbox:
 @dataclass(frozen=True, slots=True)
 class Precheck:
     deterministic: bool
+    deterministic_on_varied: bool
     input_dependent: bool
     isolation: str
-    hidden: tuple[str, ...]
+    visible: tuple[str, ...]
     files_written: tuple[str, ...]
     first_boundary: int
     hash_seed_pinned: bool = True
 
     @property
     def provable(self) -> bool:
-        return self.deterministic and self.input_dependent
+        return self.deterministic and self.deterministic_on_varied and self.input_dependent
 
     def describe(self) -> str:
-        lines = [f"isolation: {self.isolation}" + (f" (hidden: {', '.join(self.hidden)})" if self.hidden else "")]
+        lines = [f"isolation: {self.isolation}" +
+                 (f" (inside: {', '.join(self.visible)}, read-only; plus /proc, /dev, /tmp and the run directory)"
+                  if self.visible else "")]
         if self.isolation == "plain":
-            lines.append("  plain tier: files written to /tmp or the source directory survive between runs, "
+            lines.append("  plain tier: files written outside the run directory survive between runs, "
                          "so state CAN carry; the namespace tier is what prevents it")
-        lines.append("same tape twice           -> " + ("identical output" if self.deterministic else
+        lines.append("same tape twice            -> " + ("identical output" if self.deterministic else
                      "DIFFERENT output: the strategy is nondeterministic, so no divergence could be attributed to the data"))
+        lines.append("same varied tape twice     -> " + ("identical output" if self.deterministic_on_varied else
+                     "DIFFERENT output: deterministic on the real tape but not on a varied one -- the strategy "
+                     "is telling the two apart, and nothing it does under a probe can be trusted"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
                      "IDENTICAL output: the output does not change when the bars we can vary change, so nothing can be proved about it"))
         if self.files_written:
@@ -461,27 +486,36 @@ class Precheck:
         return "\n".join(lines)
 
 
-def precheck(sandbox: Sandbox, tape: Sequence[Any], *, boundaries: Sequence[int] | None = None) -> Precheck:
-    """The two conditions under which a probe result carries meaning. Run before any probe.
+GATE_BOUNDARY = 4   # the earliest bar any probe can vary; the gate varies everything from here
 
-    The input-dependence gate replaces the bars from the FIRST PROBE BOUNDARY onward with a
-    fresh continuation and requires the output to change. A strategy whose output depends
-    only on bars before that point -- bar 0 alone, in one red-team case -- is unmoved by
-    every probe, and would otherwise be certified provable and then found clean.
+
+def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
+    """The conditions under which a probe result carries meaning. Run before any probe.
+
+    Determinism is checked on the pristine tape AND on a varied one. A second red team
+    built a strategy that leaks on the real tape, recognises it by a checksum, and returns
+    random output on anything else: deterministic exactly where the old gate looked, and
+    "nondeterministic" everywhere the probes looked, which downgraded PROVEN to inconclusive.
+    Now that pattern fails the gate, and the report says what it is.
+
+    The input-dependence gate replaces every bar from the earliest probe boundary on with a
+    fresh continuation and requires the output to change; a strategy unmoved by that is a
+    strategy no probe can move.
     """
-    b0 = min(boundaries) if boundaries else min(default_boundaries(len(tape)))
-    other = continuation(tape, b0, seed=7)
+    varied = continuation(tape, GATE_BOUNDARY, seed=7)
     a = sandbox(tape)
-    c = sandbox(other)
-    b = sandbox(tape)          # the A/A pair is spaced by the other run on purpose
-    written = tuple(sorted({f for r in sandbox.records[-3:] for f in r.files_written}))
-    return Precheck(deterministic=(a == b), input_dependent=(a != c), isolation=sandbox.isolation,
-                    hidden=sandbox.records[-1].hidden, files_written=written, first_boundary=b0)
+    c1 = sandbox(varied)
+    b = sandbox(tape)          # the pairs are interleaved on purpose, to space them in time
+    c2 = sandbox(varied)
+    written = tuple(sorted({f for r in sandbox.records[-4:] for f in r.files_written}))
+    return Precheck(deterministic=(a == b), deterministic_on_varied=(c1 == c2), input_dependent=(a != c1),
+                    isolation=sandbox.isolation, visible=sandbox.records[-1].visible,
+                    files_written=written, first_boundary=GATE_BOUNDARY)
 
 
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:
     """Gates first, probes second, never the other way round."""
-    pc = precheck(sandbox, tape, boundaries=kw.get("boundaries"))
+    pc = precheck(sandbox, tape)
     if not pc.provable:
         return pc, None
     return pc, check_causality(sandbox, tape, **kw)

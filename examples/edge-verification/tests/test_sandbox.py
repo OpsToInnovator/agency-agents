@@ -45,8 +45,8 @@ def test_the_sandbox_returns_exactly_what_the_strategy_returns(name, tape, tmp_p
 def test_the_probes_reach_the_same_verdict_through_the_sandbox(name, tape, tmp_path):
     """The whole point: check_causality does not know or care that the strategy is a process."""
     mod = importlib.import_module(f"edgecheck.fixtures.strategies.{name}")
-    direct = check_causality(mod.signals, tape, draws=4)
-    boxed = check_causality(fixture_sandbox(name, tmp_path), tape, draws=4)
+    direct = check_causality(mod.signals, tape, draws=2, seed=1)
+    boxed = check_causality(fixture_sandbox(name, tmp_path), tape, draws=2, seed=1)
     assert boxed.leaks == direct.leaks
     assert boxed.worst_horizon == direct.worst_horizon
     assert [p.evidence for p in boxed.proven] == [p.evidence for p in direct.proven]
@@ -174,7 +174,7 @@ def test_the_home_directory_is_not_there(tape, tmp_path):
     """)
     sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
     assert sb(tape) == [0] * len(tape)
-    assert home in sb.records[-1].hidden or "/root" in sb.records[-1].hidden
+    assert not any(home.startswith(v) for v in sb.records[-1].visible)
 
 
 def test_a_runaway_allocation_is_stopped(tape, tmp_path):
@@ -243,20 +243,41 @@ def test_plain_tier_is_available_on_request(tape, tmp_path):
     direct = importlib.import_module("edgecheck.fixtures.strategies.clean_lagged").signals(tape)
     sb = fixture_sandbox("clean_lagged", tmp_path, isolation="plain")
     assert sb(tape) == direct
-    assert sb.records[-1].hidden == ()
+    assert sb.records[-1].visible == ()
 
 
 # -- what the red team got through, and must not again ------------------------------------------
 
-def test_tmp_is_hidden_by_default_even_though_the_work_root_lives_there(tape, tmp_path):
-    """The default work root is under /tmp, and the first version refused to hide any ancestor
-    of it -- so /tmp stayed real and a cache written there fed every later probe run."""
-    sb = fixture_sandbox("clean_lagged", tmp_path)          # tmp_path is under /tmp too
-    sb(tape)
-    if NAMESPACED:
-        assert "/tmp" in sb.records[-1].hidden
-    else:
-        assert sb.records[-1].hidden == ()
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_nothing_written_outside_the_run_directory_persists(tape, tmp_path):
+    """The second red team cached through /opt and injected a module into the interpreter's
+    own dist-packages. The first version hid a LIST of paths, and a list can never name
+    every writable directory on a host. Now the root is a whitelist: those paths either do
+    not exist or are read-only, and nothing written anywhere but the run dir outlives it."""
+    import sysconfig
+    site = sysconfig.get_paths()["purelib"]
+    p = strategy_file(tmp_path, "persist", f"""
+        import os
+        TARGETS = ["/opt/edgecheck_probe", "/run/edgecheck_probe", "/var/edgecheck_probe",
+                   "/home/edgecheck_probe", "/root/edgecheck_probe", {site!r} + "/edgecheck_probe.py",
+                   "/usr/edgecheck_probe", "/etc/edgecheck_probe"]
+        def signals(bars):
+            seen = sum(1 for t in TARGETS if os.path.exists(t))
+            written = 0
+            for t in TARGETS:
+                try:
+                    open(t, "w").write("x"); written += 1
+                except OSError:
+                    pass
+            return [written * 10 + seen] * len(bars) if written * 10 + seen <= 1 else [-1] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
+    assert sb(tape) == [0] * len(tape), "a write outside the run directory succeeded"
+    assert sb(tape) == [0] * len(tape), "something persisted into the next run"
+    for t in ("/opt/edgecheck_probe", "/run/edgecheck_probe", "/var/edgecheck_probe",
+              os.path.join(site, "edgecheck_probe.py")):
+        assert not os.path.exists(t)
+    assert "/tmp" not in sb.records[-1].visible and "/opt" not in sb.records[-1].visible
 
 
 @pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
@@ -411,7 +432,7 @@ def test_precheck_refuses_a_strategy_that_depends_only_on_bars_no_probe_moves(ta
             return [PATTERN[(i + k) % 7] for i in range(len(bars))]
     """)
     pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
-    assert pc.deterministic and not pc.input_dependent and not pc.provable
+    assert pc.deterministic and pc.deterministic_on_varied and not pc.input_dependent and not pc.provable
 
 
 @pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
@@ -437,3 +458,34 @@ def test_prove_runs_the_gates_before_the_probes(tape, tmp_path):
     """)
     pc, report = prove(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
     assert not pc.provable and report is None
+
+
+def test_precheck_names_a_strategy_that_is_deterministic_only_on_the_real_tape(tape, tmp_path):
+    real_sum = sum(b.close for b in tape)
+    p = strategy_file(tmp_path, "twofaced", f"""
+        import random
+        def signals(bars):
+            if len(bars) == {len(tape)} and abs(sum(b.close for b in bars) - {real_sum!r}) < 1e-9:
+                return [1 if b.close > b.open else -1 for b in bars]
+            rng = random.Random()
+            return [rng.choice((-1, 1)) for _ in bars]
+    """)
+    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
+    assert pc.deterministic and not pc.deterministic_on_varied and not pc.provable
+    assert "telling the two apart" in pc.describe()
+
+
+def test_the_interpreter_and_its_packages_are_there_but_read_only(tape, tmp_path):
+    """The whitelist has to include enough to run a real strategy."""
+    p = strategy_file(tmp_path, "needs_stdlib", """
+        import json, statistics, decimal, sqlite3, hashlib, datetime, os
+        def signals(bars):
+            ro = 0
+            try:
+                open(os.path.join(os.path.dirname(json.__file__), "probe"), "w")
+            except OSError:
+                ro = 1
+            return [ro] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
+    assert sb(tape) == [1] * len(tape)

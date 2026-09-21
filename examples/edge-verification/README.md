@@ -88,13 +88,39 @@ at every σ from 0.002 to 1.5. An earlier version of this README carried a table
 tradeoff between wide and narrow nudges. That tradeoff was an artifact of comparing perturbed
 runs only to each other, and it is gone.
 
+## Where the probe cuts decides what it can see
+
+At a boundary *k*, a same-bar read is visible **only at index *k***: bars before it are pristine
+and bars after it are not compared. So the set of perturbation boundaries is exactly the set of
+bars at which a same-bar leak can be caught at all. The first version cut at four fixed
+fractions of the tape; a second red team leaked on every bar *except* those four and got a clean
+report — a fixed public schedule is a schedule a leak can be written around.
+
+Two modes now, and the report states which and what it covered:
+
+- `probes="sparse"` (default) draws the boundary set from a nonce the strategy never sees. A
+  same-bar leak confined to one bar is caught with probability *B / (n − 4)* per audit — 14% on
+  a 300-bar tape — and the report prints that number as coverage rather than implying more.
+- `probes="every_bar"` probes every bar, one run each. Complete for a leak of any horizon at
+  any index; ~n runs. This is what a paid report should use.
+
+At a probed bar the boundary bar's move is forced up in one draw and down in the next, so a
+decision on the sign of close − open flips in one of them for certain rather than on a coin
+toss. Volume is varied too: a bar's traded volume is no more known at its open than its close
+is, and a red team read one behind a harmless price term because no probe had ever moved it.
+
 ## Nothing is proven until it reproduces
 
 A strategy seeded on a coarse clock passed the same-tape-twice gate — the two runs shared a
 one-second bucket — and was then convicted of a 130-bar lookahead that the clock, not the data,
 had produced. Now every candidate divergence is re-run on both sides, and only an exact
-reproduction becomes `Proven`. Anything else marks the whole report nondeterministic, in
-those words, and nothing in it is attributed to the data.
+reproduction becomes `Proven`. Which side fails says what the strategy is: if the pristine run
+does not reproduce, the strategy is nondeterministic and nothing in the report is attributed
+to the data. If the pristine run reproduces and a varied one does not, the strategy is telling
+real data from probe data — a second red team built exactly that, deterministic only on a
+tape it recognised by checksum and random everywhere else — and the report says so instead
+of calling it inconclusive. `precheck` catches the same pattern earlier by checking
+determinism on a varied tape as well as the real one.
 
 ## Truncation needs corroboration; perturbation does not
 
@@ -176,7 +202,7 @@ Reported reach matches each fixture's real mechanism exactly — the centred win
 own `K`, the back-fill reports its gap minus one.
 
 ```
-python3 -m pytest tests/ -q      # 22 tests, no network
+python3 -m pytest tests/ -q      # no network; namespace-only tests skip by name where the host cannot make one
 ```
 
 ## Running the customer's code
@@ -211,17 +237,24 @@ Two tiers, and the report says which ran:
 | audit hook that **records** every socket use and spawn, then refuses it | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
-| tmpfs over `$HOME`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, the work root and the source | yes | no |
-| only the run directory bound back in; the strategy's copy of itself read-only | yes | no |
-| `/proc` remounted, so the host's process table is not there | yes | no |
+| a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
+| plus a fresh `/proc`, four device nodes, a tmpfs `/tmp` that dies with the process, the run dir | yes | no |
+| the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
+| the strategy's copy of itself read-only; the run directory deleted after the run | yes | no |
 
 `plain` stops accidents and runaway loops. It is a correctness boundary, not a security one:
 `ctypes` walks past the audit hook, the parent's environment is readable through `/proc`, and
-files written to `/tmp` survive between runs. `namespace` closes each of those. Neither tier is
+files written anywhere outside the run directory survive between runs. `namespace` closes each
+of those — and it does so with a **whitelist**, not a list of paths to hide. The first version
+hid a list; a second red team cached through `/opt` and injected a module into the interpreter's
+own `dist-packages`, because a list can never name every writable directory on a host. Now
+everything the strategy can see is read-only except the run directory and a `/tmp` that does
+not outlive the process, and a test writes to eight places outside the run directory and
+asserts that every write fails and nothing persists. Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What the red team got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What two red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -231,7 +264,11 @@ record now travel over pipes the strategy did not create and cannot unlink, and 
 exits the instant the result is written. `importlib.reload(socket)` undid a monkeypatched
 ban; a PEP 578 audit hook cannot be removed. A multi-line exception message planted a
 reassuring last line in the report; messages are `repr`'d. A strategy claimed a CPU-limit
-death without consuming CPU; the claim is checked against the kernel's accounting.
+death without consuming CPU; the claim is checked against the kernel's accounting. In the
+second round: a cache in `/opt` (the whitelist root), a leak on every bar but the four fixed
+boundaries (nonce-drawn boundaries, every-bar mode, coverage stated), a same-bar volume read
+(volume varied), and a strategy deterministic only on the real tape (named as such, at the
+gate and in the report).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

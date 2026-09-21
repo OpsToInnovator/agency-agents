@@ -177,9 +177,10 @@ def test_a_clean_run_never_claims_innocence(tape):
 
 def test_the_same_input_gives_the_same_answer(tape):
     """A probe that is itself random would report a leak on a coin flip."""
-    a = check_causality(strat("leak_peak_threshold").signals, tape)
-    b = check_causality(strat("leak_peak_threshold").signals, tape)
+    a = check_causality(strat("leak_peak_threshold").signals, tape, seed=1)
+    b = check_causality(strat("leak_peak_threshold").signals, tape, seed=1)
     assert a.proven == b.proven
+    assert a.boundaries == b.boundaries
     assert (a.probes_run, a.worst_horizon) == (b.probes_run, b.worst_horizon)
 
 
@@ -276,3 +277,54 @@ def test_two_truncation_hits_are_proven(tape):
     assert report.leaks
     assert len(report.proven) == 2
     assert report.suspected == ()
+
+
+def test_a_leak_on_one_bar_is_caught_by_every_bar_and_reported_as_coverage_by_sparse(tape):
+    """A same-bar read is visible only at the boundary bar itself. A fixed schedule of
+    four boundaries is a schedule a leak can be written around -- a red team leaked on
+    every bar except those four and walked. Random boundaries make that a gamble the
+    report quantifies; every_bar makes it impossible."""
+    single = strat("leak_single_bar").signals
+    complete = check_causality(single, tape, probes="every_bar", seed=1)
+    assert complete.leaks and complete.worst_horizon == 0 and complete.coverage == 1.0
+    assert "every bar was probed" in complete.describe()
+
+    sparse = check_causality(single, tape, probes="sparse", seed=1)
+    assert 0 < sparse.coverage < 1.0
+    assert "possible boundaries" in sparse.describe()
+    # caught exactly when its bar is on the schedule, never otherwise
+    for seed in range(12):
+        r = check_causality(single, tape, probes="sparse", seed=seed)
+        assert r.leaks == (57 in r.boundaries)
+
+
+def test_a_same_bar_volume_read_is_a_leak(tape):
+    """No probe moved a volume until a red team read one."""
+    report = check_causality(strat("leak_same_bar_volume").signals, tape, probes="every_bar", seed=1)
+    assert report.leaks and report.worst_horizon == 0
+
+
+def test_boundaries_come_from_a_nonce_the_strategy_never_sees(tape):
+    a = check_causality(strat("clean_lagged").signals, tape, seed=1).boundaries
+    b = check_causality(strat("clean_lagged").signals, tape, seed=2).boundaries
+    c = check_causality(strat("clean_lagged").signals, tape, seed=1).boundaries
+    assert a == c and a != b
+    assert all(4 <= k < len(tape) for k in a)
+
+
+def test_a_strategy_that_reproduces_only_on_the_real_tape_is_named_for_it(tape):
+    """Deterministic on the pristine tape, random on anything else. The old guard called
+    that 'nondeterministic' and stopped; now it is reported as what it is."""
+    import random
+    real_sum = sum(b.close for b in tape)
+
+    def two_faced(bs):
+        if len(bs) == len(tape) and abs(sum(b.close for b in bs) - real_sum) < 1e-9:
+            return [1 if bs[i].close > bs[i].open else -1 for i in range(len(bs))]     # leaks
+        rng = random.Random()                                                          # os.urandom-seeded
+        return [rng.choice((-1, 1)) for _ in bs]
+
+    report = check_causality(two_faced, tape, seed=1)
+    assert report.recognises_input and not report.nondeterministic
+    assert report.proven == ()
+    assert "telling the two apart" in report.describe()
