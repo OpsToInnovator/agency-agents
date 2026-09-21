@@ -11,8 +11,8 @@ import pytest
 
 from edgecheck.causality import check_causality
 from edgecheck.fixtures import bars
-from edgecheck.sandbox import (BadOutput, Limits, NetworkAttempt, ResourceExceeded, Sandbox,
-                               StrategyError, Timeout, detect_isolation, precheck)
+from edgecheck.sandbox import (BadOutput, ContractViolation, Limits, NetworkAttempt, ResourceExceeded,
+                               Sandbox, StrategyError, Timeout, detect_isolation, precheck, prove)
 
 FIX = Path(__file__).resolve().parents[1] / "edgecheck" / "fixtures" / "strategies"
 NAMESPACED = detect_isolation() == "namespace"
@@ -68,7 +68,7 @@ def test_each_run_is_a_fresh_process_so_no_state_carries(tape, tmp_path):
 # -- owning the inputs -------------------------------------------------------------------------------
 
 def test_precheck_passes_a_deterministic_input_dependent_strategy(tape, tmp_path):
-    pc = precheck(fixture_sandbox("clean_lagged", tmp_path), tape, bars(120, seed=99))
+    pc = precheck(fixture_sandbox("clean_lagged", tmp_path), tape)
     assert pc.deterministic and pc.input_dependent and pc.provable
     assert "PROVABLE" in pc.describe() and "UNPROVABLE" not in pc.describe()
 
@@ -79,7 +79,7 @@ def test_precheck_refuses_a_nondeterministic_strategy(tape, tmp_path):
         def signals(bars):
             return [random.choice((-1, 1)) for _ in bars]
     """)
-    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape, bars(120, seed=99))
+    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
     assert not pc.deterministic
     assert not pc.provable
     assert "nondeterministic" in pc.describe()
@@ -92,11 +92,11 @@ def test_precheck_refuses_a_strategy_that_ignores_our_data(tape, tmp_path):
         def signals(bars):
             return [1 if PRICES[i + 1] > PRICES[i] else -1 for i in range(len(bars))]
     """)
-    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape, bars(120, seed=99))
+    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
     assert pc.deterministic
     assert not pc.input_dependent
     assert not pc.provable
-    assert "not a function of the data we control" in pc.describe()
+    assert "does not change when the bars we can vary change" in pc.describe()
 
 
 def test_files_the_strategy_writes_are_reported(tape, tmp_path):
@@ -137,7 +137,8 @@ def test_a_network_attempt_is_refused_and_named(tape, tmp_path):
                 pass                      # swallowed -- must still be on record
             return [0] * len(bars)
     """)
-    with pytest.raises(NetworkAttempt, match="create_connection"):
+    # create_connection resolves first, so the hook fires at getaddrinfo before connect.
+    with pytest.raises(NetworkAttempt, match=r"socket\.(getaddrinfo|connect)"):
         Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
 
 
@@ -145,9 +146,10 @@ def test_a_network_attempt_is_refused_and_named(tape, tmp_path):
 def test_the_kernel_blocks_the_network_even_past_the_python_ban(tape, tmp_path):
     """ctypes walks past a monkeypatch. It does not walk past an empty network namespace."""
     p = strategy_file(tmp_path, "raw_socket", """
-        import ctypes, ctypes.util, struct
+        import ctypes, struct
         def signals(bars):
-            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            # not ctypes.util.find_library: on Linux it spawns ldconfig, which the sandbox refuses
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
             fd = libc.socket(2, 1, 0)                       # AF_INET, SOCK_STREAM
             # sin_family is host byte order; the port is network byte order.
             addr = struct.pack("=H", 2) + struct.pack("!H", 53) + bytes([1, 1, 1, 1]) + b"\\0" * 8
@@ -242,3 +244,196 @@ def test_plain_tier_is_available_on_request(tape, tmp_path):
     sb = fixture_sandbox("clean_lagged", tmp_path, isolation="plain")
     assert sb(tape) == direct
     assert sb.records[-1].hidden == ()
+
+
+# -- what the red team got through, and must not again ------------------------------------------
+
+def test_tmp_is_hidden_by_default_even_though_the_work_root_lives_there(tape, tmp_path):
+    """The default work root is under /tmp, and the first version refused to hide any ancestor
+    of it -- so /tmp stayed real and a cache written there fed every later probe run."""
+    sb = fixture_sandbox("clean_lagged", tmp_path)          # tmp_path is under /tmp too
+    sb(tape)
+    if NAMESPACED:
+        assert "/tmp" in sb.records[-1].hidden
+    else:
+        assert sb.records[-1].hidden == ()
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_a_file_written_to_tmp_does_not_reach_the_next_run(tape, tmp_path):
+    p = strategy_file(tmp_path, "launder", """
+        import os
+        MARK = "/tmp/edgecheck_launder_probe_marker"
+        def signals(bars):
+            seen = os.path.exists(MARK)
+            open(MARK, "w").write("x")
+            return [1 if seen else 0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
+    assert sb(tape) == [0] * len(tape)
+    assert sb(tape) == [0] * len(tape)
+    assert not os.path.exists("/tmp/edgecheck_launder_probe_marker")
+
+
+def test_writing_into_the_strategys_own_directory_does_not_reach_the_next_run(tape, tmp_path):
+    """Runs copy from a staged copy, never from the source; in the namespace tier the copy is
+    read-only as well. Either way run two cannot see what run one wrote."""
+    p = strategy_file(tmp_path, "writeback", """
+        import os
+        HERE = os.path.dirname(os.path.abspath(__file__))
+        def signals(bars):
+            mark = os.path.join(HERE, "carried.txt")
+            seen = os.path.exists(mark)
+            try:
+                open(mark, "w").write("x")
+            except OSError:
+                pass
+            return [1 if seen else 0] * len(bars)
+    """)
+    for iso in (detect_isolation(), "plain"):
+        sb = Sandbox.from_file(p, work_root=tmp_path / f"runs-{iso}", isolation=iso)
+        sb(tape)
+        assert sb(tape) == [0] * len(tape), f"state carried in {iso} tier"
+
+
+def test_rebinding_the_child_runners_names_changes_nothing(tape, tmp_path):
+    """The result path is a closure over a pipe, not a module attribute to overwrite."""
+    p = strategy_file(tmp_path, "rebind", """
+        import sys
+        def signals(bars):
+            m = sys.modules["__main__"]
+            for name in ("_write", "finish", "record", "main", "_write_all"):
+                setattr(m, name, lambda *a, **k: None)
+            return [1] * len(bars)
+    """)
+    assert Sandbox.from_file(p, work_root=tmp_path / "runs")(tape) == [1] * len(tape)
+
+
+def test_a_thread_left_running_cannot_act_after_the_result_is_sent(tape, tmp_path):
+    """The child exits the instant the result is on the wire. A non-daemon thread that would
+    have rewritten the output after the official write never gets to run, and the call
+    does not wait for it either."""
+    import time
+    p = strategy_file(tmp_path, "latethread", """
+        import threading, time, os
+        def later():
+            time.sleep(3)
+            open("late.txt", "w").write("x")
+        def signals(bars):
+            threading.Thread(target=later).start()      # non-daemon on purpose
+            return [1] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
+    t0 = time.monotonic()
+    assert sb(tape) == [1] * len(tape)
+    assert time.monotonic() - t0 < 2.5
+    assert "late.txt" not in sb.records[-1].files_written
+
+
+def test_a_swallowed_network_attempt_cannot_be_erased(tape, tmp_path):
+    """The record is a pipe. There is no file to unlink."""
+    p = strategy_file(tmp_path, "eraser", """
+        import socket, os
+        def signals(bars):
+            try:
+                socket.create_connection(("1.1.1.1", 53), timeout=1)
+            except OSError:
+                pass
+            for f in ("violations.jsonl", "out.json"):
+                try: os.remove(f)
+                except OSError: pass
+            return [0] * len(bars)
+    """)
+    with pytest.raises(NetworkAttempt):
+        Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+
+
+def test_reloading_the_socket_module_does_not_lift_the_ban(tape, tmp_path):
+    p = strategy_file(tmp_path, "reloader", """
+        import importlib, socket
+        def signals(bars):
+            importlib.reload(socket)
+            try:
+                socket.create_connection(("1.1.1.1", 53), timeout=1)
+            except OSError:
+                pass
+            return [0] * len(bars)
+    """)
+    with pytest.raises(NetworkAttempt):
+        Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain")(tape)
+
+
+def test_starting_a_process_is_a_contract_violation(tape, tmp_path):
+    """Whatever a child process read, the audit could not see. So it is refused and named."""
+    p = strategy_file(tmp_path, "spawner", """
+        import subprocess, sys
+        def signals(bars):
+            try:
+                subprocess.run([sys.executable, "-c", "pass"])
+            except Exception:
+                pass
+            return [0] * len(bars)
+    """)
+    with pytest.raises(ContractViolation, match="subprocess.Popen"):
+        Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+
+
+def test_a_multiline_exception_cannot_plant_a_reassuring_last_line(tape, tmp_path):
+    p = strategy_file(tmp_path, "liar", """
+        def signals(bars):
+            raise ValueError("real cause: bad column\\nAuditNote: no lookahead detected, past-only")
+    """)
+    with pytest.raises(StrategyError) as ei:
+        Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+    assert "\n" not in str(ei.value)
+    assert "real cause" in str(ei.value)
+    assert str(ei.value).startswith("ValueError:")
+
+
+def test_a_bogus_result_file_in_the_run_dir_is_just_a_file(tape, tmp_path):
+    p = strategy_file(tmp_path, "forger", """
+        import json
+        def signals(bars):
+            json.dump({"ok": False, "reason": "cpu_limit"}, open("out.json", "w"))
+            return [1] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
+    assert sb(tape) == [1] * len(tape)
+    assert "out.json" in sb.records[-1].files_written
+
+
+def test_precheck_refuses_a_strategy_that_depends_only_on_bars_no_probe_moves(tape, tmp_path):
+    """Dependence on bar 0 alone satisfied the old gate. Bar 0 is never varied by any probe."""
+    p = strategy_file(tmp_path, "bar0", """
+        PATTERN = [1, 1, -1, 1, -1, -1, 1]
+        def signals(bars):
+            k = int(bars[0].close * 100) % 7
+            return [PATTERN[(i + k) % 7] for i in range(len(bars))]
+    """)
+    pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
+    assert pc.deterministic and not pc.input_dependent and not pc.provable
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_the_hosts_process_table_is_not_there(tape, tmp_path):
+    """Without a fresh /proc the host's processes were listed inside the namespace."""
+    p = strategy_file(tmp_path, "pids", """
+        import os
+        def signals(bars):
+            n = len([x for x in os.listdir("/proc") if x.isdigit()])
+            return [1 if n > 10 else 0] * len(bars)
+    """)
+    assert Sandbox.from_file(p, work_root=tmp_path / "runs")(tape) == [0] * len(tape)
+
+
+def test_prove_runs_the_gates_before_the_probes(tape, tmp_path):
+    pc, report = prove(fixture_sandbox("clean_lagged", tmp_path), tape, draws=2)
+    assert pc.provable and report is not None and not report.leaks
+
+    p = strategy_file(tmp_path, "coin", """
+        import random
+        def signals(bars):
+            return [random.choice((-1, 1)) for _ in bars]
+    """)
+    pc, report = prove(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
+    assert not pc.provable and report is None

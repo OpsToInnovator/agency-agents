@@ -19,28 +19,21 @@ this needs the code rather than a trade list:
                  bar k's close is still sitting in the data -- and deciding at the open
                  using the close is the most common real lookahead there is.
 
-The perturbation is deliberately GENTLE, and the size of it is a real tradeoff rather than
-a detail. An early version drew replacement prices uniformly from 50 to 200 against a series
-trading near 100, and detection collapsed: every comparison inside the strategy saturated the
-same way on every draw, so a strategy that was plainly reading the future sat there reporting
-nothing. But a very small nudge is not free either. Measured across the fixtures, findings by
-sigma (out of four probe boundaries):
+The perturbation is drawn from the tape's own scale and re-threaded into a plausible walk,
+for one reason: a strategy must not be able to tell probe data from real data. A red team's
+first evasion keyed on the seam an early version left -- opens redrawn independently, so
+open no longer equalled the previous close -- and its second on a fixed one-percent nudge
+that pushed moves outside anything the tape ever showed. Both strategies leaked on real data
+and behaved when they smelled a probe, and both got a clean report.
 
-    sigma                     0.002   0.01   0.05    0.3    1.5
-    reads its own bar             4      4      4      4      4
-    reads the next bar            4      4      4      4      4
-    centred window                4      4      4      4      4
-    full-sample z-score           4      2      0      0      0
-    back-filled level             2      4      4      4      4
-    full-sample quantile          3      1      1      1      1
-
-A leak that reads a specific cell is caught at any sigma. A leak that works through a
-statistic of the whole sample is caught only while the nudge stays small enough not to
-dominate that statistic -- widen it and the z-score's denominator inflates until every real
-signal collapses toward zero on every draw alike. A back-filled level wants the opposite: a
-nudge large enough to flip a comparison. The default of one percent sits between them, and
-the reason that is survivable is that truncation convicts the full-sample family regardless.
-Neither probe is the safety net for the other by accident.
+What actually convicts them is not the absence of tells. It is that every perturbed run is
+compared against the PRISTINE run: for i <= k a causal strategy must reproduce the pristine
+output exactly, because nothing it may legitimately read has changed. A strategy that leaks
+on real data used the boundary bar's close there, and no causal fallback can reproduce that
+value on a tape where the close has moved. Measured after this landed, detection no longer
+depends on the size of the nudge at all -- every leak, at every sigma from 0.002 to 1.5 --
+which overturned a table an earlier version published about a tradeoff between them. The
+tradeoff was an artifact of comparing perturbed runs only to each other.
 
 What this proves, and what it does not. A divergence is proof of a causal dependency: the
 output is a function of something in the future, and the evidence is the pair of runs. The
@@ -58,12 +51,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, Sequence
 
 __all__ = ["Bar", "Strategy", "Divergence", "Proven", "Suspected", "Report",
-           "check_causality", "DEFAULT_DRAWS", "DEFAULT_SIGMA"]
+           "check_causality", "default_boundaries", "continuation", "realized_sigma",
+           "DEFAULT_DRAWS", "SIGMA_FLOOR"]
 
 DEFAULT_DRAWS = 12
-DEFAULT_SIGMA = 0.01
-UNKNOWABLE_AT_OPEN = ("high", "low", "close", "volume")
-UNKNOWABLE_ENTIRELY = ("open", "high", "low", "close", "volume")
+SIGMA_FLOOR = 0.002
 
 
 class Bar(Protocol):
@@ -138,6 +130,7 @@ class Report:
     suspected: tuple[Suspected, ...] = ()
     probes_run: int = 0
     bars_tested: int = 0
+    nondeterministic: bool = False
 
     @property
     def leaks(self) -> bool:
@@ -148,6 +141,10 @@ class Report:
         return max((p.horizon for p in self.proven), default=None)
 
     def describe(self) -> str:
+        if self.nondeterministic:
+            return ("NOTHING PROVED: the strategy gave different output on identical input while being "
+                    "probed, so no divergence can be attributed to the data.\n" +
+                    "\n".join(f"  {s.summary}\n    {s.reason}" for s in self.suspected))
         if not self.proven:
             base = (f"No causal dependency on future data was demonstrated over {self.bars_tested} bars "
                     f"and {self.probes_run} probe runs. This is not a clean bill of health: a leak on a "
@@ -172,36 +169,73 @@ def _replace(bar: Any, **kw: float) -> Any:
     raise TypeError(f"cannot vary a {type(bar).__name__}; bars must be a dataclass")
 
 
-def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float) -> list[Any]:
+def default_boundaries(n: int) -> list[int]:
+    """Where the probes cut. Shared with the gates, so the gates test what the probes reach."""
+    return sorted({max(4, int(n * f)) for f in (0.15, 0.4, 0.65, 0.9) if max(4, int(n * f)) < n})
+
+
+def realized_sigma(tape: Sequence[Any]) -> float:
+    """The tape's own per-bar |log(close/open)| scale. The nudge is drawn from this, not from
+    a constant, so a perturbed bar sits inside the envelope a genuine bar sits in."""
+    moves = [abs(math.log(b.close / b.open)) for b in tape if b.open > 0 and b.close > 0]
+    if len(moves) < 2:
+        return SIGMA_FLOOR
+    mu = sum(moves) / len(moves)
+    var = sum((m - mu) ** 2 for m in moves) / (len(moves) - 1)
+    return max(SIGMA_FLOOR, math.sqrt(mu * mu + var))
+
+
+def _rethread(tape: Sequence[Any], boundary: int, move_of) -> list[Any]:
+    """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has.
+
+    Each new bar keeps the pristine bar's gap to its predecessor, its wick ratios and its
+    volume; only the open-to-close move is supplied by ``move_of``. So where the pristine
+    tape has open == previous close, the rebuilt one does too; where it has gaps, the gaps
+    are preserved; high still covers open and close, low still sits under them. A strategy
+    looking for the seam between real data and probe data has nothing to find, which is the
+    point: a red team's first successful evasion keyed on exactly that seam.
+    """
+    out = list(tape)
+    prev_close = tape[boundary - 1].close
+    for i in range(boundary, len(tape)):
+        b = tape[i]
+        top, bot = max(b.open, b.close), min(b.open, b.close)
+        wick_up = b.high / top if top > 0 else 1.0
+        wick_dn = b.low / bot if bot > 0 else 1.0
+        gap = (b.open / tape[i - 1].close) if i > 0 and tape[i - 1].close > 0 else 1.0
+        opened = b.open if i == boundary else prev_close * gap
+        closed = opened * move_of(i, b)
+        hi, lo = max(opened, closed), min(opened, closed)
+        out[i] = _replace(b, open=opened, close=closed,
+                          high=max(hi * wick_up, hi), low=min(lo * wick_dn, lo))
+        prev_close = closed
+    return out
+
+
+def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | None) -> list[Any]:
     """Nudge everything unknowable at the moment bar ``boundary``'s position was chosen.
 
-    The replacement bar must still be a POSSIBLE bar. An earlier version drew each field
-    independently, which broke ``high >= low`` on 42% of perturbed bars and put the close
-    outside its own range on 78% of them. Two things go wrong with that, and the second is
-    worse than the first: a strategy that validates its input dies mid-audit, and a strategy
-    that merely behaves differently on an impossible bar has that difference recorded as
-    evidence of lookahead. A probe that manufactures its own findings is not a probe.
-
-    So each field is nudged, and then the envelope is repaired -- the high is lifted to
-    cover whatever the open and close became, the low dropped likewise. Intra-bar
-    relationships still move, which is what keeps the probe sensitive, but every bar it
-    hands the strategy is one the market could have printed.
-
-    The multiplier is lognormal rather than ``1 + gauss``. At the default sigma the two are
-    indistinguishable, but a wide sigma sends ``1 + gauss`` negative, and a negative price
-    is the same class of mistake as an inverted bar.
+    The nudge is a small multiplicative change to each bar's own move, applied to the pristine
+    move and then re-threaded, so the result is a plausible walk that shares its prefix with
+    the pristine tape and differs only after the boundary -- in a way the strategy cannot tell
+    from ordinary market variation. The multiplier is lognormal, so it can never send a price
+    negative however wide sigma is set.
     """
     rng = random.Random(seed)
-    out = list(tape)
-    for i in range(boundary, len(tape)):
-        bar = tape[i]
-        nudge = lambda v: v * math.exp(rng.gauss(0.0, sigma))
-        # Bar ``boundary``'s open is knowable -- it is the moment the position is chosen.
-        opened = bar.open if i == boundary else nudge(bar.open)
-        closed, high, low, volume = nudge(bar.close), nudge(bar.high), nudge(bar.low), nudge(bar.volume)
-        out[i] = _replace(bar, open=opened, close=closed, volume=volume,
-                          high=max(high, opened, closed), low=min(low, opened, closed))
-    return out
+    sg = realized_sigma(tape) if sigma is None else sigma
+    return _rethread(tape, boundary, lambda i, b: (b.close / b.open) * math.exp(rng.gauss(0.0, sg)))
+
+
+def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
+    """A fresh continuation from ``boundary`` on: same prefix, same shape, different moves.
+
+    This is what the input-dependence gate feeds the strategy. It differs from the pristine
+    tape exactly where the probes can reach and nowhere else, so a strategy unmoved by it is
+    a strategy no probe can move.
+    """
+    rng = random.Random(seed)
+    sg = realized_sigma(tape)
+    return _rethread(tape, boundary, lambda i, b: math.exp(rng.gauss(0.0, sg)))
 
 
 def _first_disagreement(a: Sequence[int], b: Sequence[int], upto: int) -> int | None:
@@ -212,48 +246,83 @@ def _first_disagreement(a: Sequence[int], b: Sequence[int], upto: int) -> int | 
 
 
 def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequence[int] | None = None,
-                    draws: int = DEFAULT_DRAWS, sigma: float = DEFAULT_SIGMA) -> Report:
+                    draws: int = DEFAULT_DRAWS, sigma: float | None = None) -> Report:
     """Run both probes and return what could be demonstrated.
 
     ``strategy`` takes the tape and returns one position per bar: the position held during
     that bar, entered at its open. So ``signals(tape)[i]`` may read ``tape[0..i-1]`` and
     bar i's own ts and open, and nothing else.
+
+    Every perturbed run is compared against the PRISTINE run, never merely against another
+    perturbed run. For i <= k a causal strategy must reproduce the pristine output exactly,
+    because nothing it may legitimately read has changed -- the same invariant truncation
+    relies on. Comparing perturbed runs only to each other let a strategy that leaks on real
+    data and behaves the moment it recognises a probe walk out clean.
+
+    No divergence becomes Proven until both of its runs reproduce exactly. A strategy seeded
+    on a coarse clock passed the same-tape-twice gate and was then convicted on a divergence
+    the clock produced; reproduction is what makes the word "proven" mean what it says.
     """
     n = len(tape)
     if n < 8:
         raise ValueError(f"need at least 8 bars to probe, got {n}")
-    if boundaries is None:
-        boundaries = [max(4, int(n * f)) for f in (0.15, 0.4, 0.65, 0.9)]
-    boundaries = sorted({b for b in boundaries if 4 <= b < n})
+    bounds = sorted({b for b in (boundaries or default_boundaries(n)) if 4 <= b < n})
 
-    proven: list[Proven] = []
-    suspected: list[Suspected] = []
     runs = 0
     full = list(strategy(tape))
     runs += 1
 
-    truncation_hits: list[Divergence] = []
-    for k in boundaries:
-        truncated = list(strategy(tape[:k]))
+    # candidates: (divergence, replay) where replay() recomputes the variant run
+    candidates: list[tuple[Divergence, Callable[[], list[int]], list[int]]] = []
+
+    for k in bounds:
+        cut = tape[:k]
+        truncated = list(strategy(cut))
         runs += 1
         idx = _first_disagreement(truncated, full, k)
         if idx is not None:
-            truncation_hits.append(Divergence(index=idx, boundary=k, baseline=full[idx],
-                                              variant=truncated[idx], probe="truncation",
-                                              detail="removed"))
+            d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=truncated[idx],
+                           probe="truncation", detail="removed")
+            candidates.append((d, (lambda c=cut: list(strategy(c))), truncated))
 
-    for k in boundaries:
-        base = list(strategy(_perturbed(tape, k, seed=1000, sigma=sigma)))
-        runs += 1
-        for d_i in range(1, draws):
-            variant = list(strategy(_perturbed(tape, k, seed=1000 + d_i, sigma=sigma)))
+    for k in bounds:
+        for d_i in range(draws):
+            varied = _perturbed(tape, k, seed=1000 + d_i, sigma=sigma)
+            variant = list(strategy(varied))
             runs += 1
-            idx = _first_disagreement(base, variant, k + 1)
+            idx = _first_disagreement(full, variant, k + 1)
             if idx is not None:
-                d = Divergence(index=idx, boundary=k, baseline=base[idx], variant=variant[idx],
-                               probe="perturbation", detail="varied within a percent of its true value")
-                proven.append(Proven(d, f"signals[{idx}] depends on fields of bar {k} onward that were not knowable"))
+                d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=variant[idx],
+                               probe="perturbation", detail="varied within the tape's own range")
+                candidates.append((d, (lambda v=varied: list(strategy(v))), variant))
                 break
+
+    proven: list[Proven] = []
+    suspected: list[Suspected] = []
+    truncation_hits: list[Divergence] = []
+
+    if candidates:
+        # Reproduction before promotion. One extra pristine run, one extra variant run per
+        # candidate. If anything fails to reproduce, nothing below is attributable to data.
+        if list(strategy(tape)) != full:
+            runs += 1
+            return Report(proven=(), suspected=(Suspected(
+                summary="the pristine tape gave two different outputs",
+                reason="output changed between identical runs; the strategy is nondeterministic"),),
+                probes_run=runs, bars_tested=n, nondeterministic=True)
+        runs += 1
+        for d, replay, first in candidates:
+            again = replay()
+            runs += 1
+            if again != first:
+                return Report(proven=(), suspected=(Suspected(
+                    summary=f"the {d.probe} run at boundary {d.boundary} gave two different outputs",
+                    reason="output changed between identical runs; the strategy is nondeterministic"),),
+                    probes_run=runs, bars_tested=n, nondeterministic=True)
+            if d.probe == "truncation":
+                truncation_hits.append(d)
+            else:
+                proven.append(Proven(d, f"signals[{d.index}] depends on fields of bar {d.boundary} onward that were not knowable"))
 
     # Truncation changes the length of the array the strategy is handed, and length changes
     # the arithmetic. Measured here: an FFT-based causal filter, mathematically past-only,

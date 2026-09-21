@@ -9,13 +9,15 @@ import importlib
 
 import pytest
 
-from edgecheck.causality import Divergence, Proven, Report, _perturbed, check_causality
+from edgecheck.causality import (Divergence, Proven, Report, _perturbed, check_causality,
+                                 continuation, default_boundaries, realized_sigma)
 from edgecheck.fixtures import bars
 from edgecheck.fixtures.strategies import leak_backfill, leak_centered_window
 
 CLEAN = ["clean_lagged", "clean_but_costly"]
 LEAKY = ["leak_same_bar_close", "leak_future_close", "leak_centered_window",
          "leak_full_sample_zscore", "leak_backfill", "leak_peak_threshold"]
+EVASIVE = ["evade_continuity", "evade_envelope", "evade_intrabar"]
 TRUE_REACH = {"leak_same_bar_close": 0, "leak_future_close": 1,
               "leak_centered_window": leak_centered_window.K,
               "leak_backfill": leak_backfill.EVERY - 1}
@@ -55,12 +57,12 @@ def test_the_reported_reach_never_overclaims(name, reach, tape):
 def test_truncation_alone_is_blind_to_a_same_bar_leak(tape):
     """The finding that shaped the design: cut the tape at bar k and bar k's close is still in it.
 
-    With draws=1 no perturbation comparison happens, leaving truncation on its own. It
+    With draws=0 no perturbation run happens, leaving truncation on its own. It
     catches the leak that runs off the end of the data and misses the one sitting inside
     the current bar -- which is the most common lookahead in real code. If this test ever
     starts passing with the perturbation probe removed, the probe has been broken.
     """
-    truncation_only = check_causality(strat("leak_same_bar_close").signals, tape, draws=1)
+    truncation_only = check_causality(strat("leak_same_bar_close").signals, tape, draws=0)
     assert not truncation_only.leaks
 
     both = check_causality(strat("leak_same_bar_close").signals, tape)
@@ -71,49 +73,90 @@ def test_truncation_alone_is_blind_to_a_same_bar_leak(tape):
 
 def test_truncation_still_carries_the_leaks_that_run_off_the_end(tape):
     """The converse: the probe that is blind to same-bar leaks is the one that finds these."""
-    report = check_causality(strat("leak_full_sample_zscore").signals, tape, draws=1)
+    report = check_causality(strat("leak_full_sample_zscore").signals, tape, draws=0)
     assert report.leaks
     assert all(p.evidence.probe == "truncation" for p in report.proven)
 
 
-def test_a_wide_nudge_blinds_the_probe_to_full_sample_leaks(tape):
-    """Why the nudge is one percent and not fifty, measured rather than assumed.
+@pytest.mark.parametrize("sigma", [0.002, 0.05, 1.5])
+def test_detection_does_not_depend_on_the_size_of_the_nudge(sigma, tape):
+    """Measured after the pristine comparison landed, and it overturned an earlier table.
 
-    A leak that works through a statistic of the whole sample -- a mean, a standard
-    deviation, a quantile -- is detected by perturbation only while the nudge stays small.
-    Widen it and the nudge itself dominates the statistic: the z-score denominator inflates,
-    every real signal collapses toward zero on every draw alike, and the output stops moving
-    even though the leak is still there. Measured on this fixture, findings go 4 at sigma
-    0.002, 2 at 0.01, and 0 at 0.05 and above.
-
-    The leaks that survive a wide nudge (same-bar, next-bar, centred window) are the ones
-    that read a specific cell rather than a distribution. So sigma is a real tradeoff, and
-    the reason it is survivable is that truncation catches the full-sample family regardless.
+    When perturbed runs were compared only to each other, a wide nudge blinded the probe to
+    full-sample leaks and a narrow one weakened it against back-fills, and the docs carried
+    a sigma table explaining the tradeoff. Comparing every perturbed run against the
+    PRISTINE run instead, every leak is caught at every sigma. The nudge size is now chosen
+    for one reason only -- so a perturbed bar has no tell -- and this test keeps anyone from
+    reintroducing the tradeoff by weakening the comparison.
     """
-    def hits(sigma):
-        r = check_causality(strat("leak_full_sample_zscore").signals, tape, draws=8, sigma=sigma)
-        return len([p for p in r.proven if p.evidence.probe == "perturbation"])
-
-    assert hits(0.002) > hits(0.01) > hits(0.05)
-    assert hits(0.05) == 0, "a wide nudge should lose this leak entirely"
-
-    # And the safety net: the probe that does not care about sigma still convicts.
-    fallback = check_causality(strat("leak_full_sample_zscore").signals, tape, draws=8, sigma=0.05)
-    assert fallback.leaks
-    assert all(p.evidence.probe == "truncation" for p in fallback.proven)
+    for name in LEAKY:
+        report = check_causality(strat(name).signals, tape, draws=4, sigma=sigma)
+        hits = [p for p in report.proven if p.evidence.probe == "perturbation"]
+        assert hits, f"{name} not caught by perturbation at sigma {sigma}"
 
 
-def test_a_narrow_nudge_is_not_free_either(tape):
-    """The tradeoff runs both ways, which is why the default sits in the middle.
+def test_a_perturbed_tape_keeps_every_invariant_the_pristine_tape_has(tape):
+    """The seam is what the first evasion keyed on. There must not be one.
 
-    A nudge small enough to keep full-sample statistics sensitive is too small to reliably
-    flip a comparison against a back-filled level, so neither extreme dominates.
+    Where the pristine tape has open == previous close, so must the perturbed one; the
+    prefix up to the boundary is untouched; the boundary bar keeps the open the strategy
+    was entitled to; every bar is a possible bar; and the nudge is on the tape's own scale.
     """
-    def hits(sigma, name):
-        r = check_causality(strat(name).signals, tape, draws=8, sigma=sigma)
-        return len([p for p in r.proven if p.evidence.probe == "perturbation"])
+    k = 120
+    p = _perturbed(tape, k, seed=1000, sigma=None)
+    assert p[:k] == list(tape[:k])
+    assert p[k].open == tape[k].open and p[k].close != tape[k].close
+    for i in range(1, len(p)):
+        assert abs(p[i].open - p[i - 1].close) <= 1e-9 * abs(p[i - 1].close), f"seam at bar {i}"
+    for b in p:
+        assert b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high and b.low > 0
+    assert 0.001 <= realized_sigma(tape) <= 0.01
 
-    assert hits(0.002, "leak_backfill") < hits(0.01, "leak_backfill")
+
+def test_the_probe_aware_leaks_are_convicted(tape):
+    """Three strategies that leak on real data and behave when they smell a probe.
+
+    Each got PROVABLE and a clean report from the first version. The pristine comparison
+    convicts them all: on the real tape their output at the boundary used that bar's own
+    fields, and the causal fallback they switch to cannot reproduce it.
+    """
+    for name in EVASIVE:
+        report = check_causality(strat(name).signals, tape)
+        assert report.leaks, f"{name} ({strat(name).LEAKS}) walked out clean"
+        assert any(p.evidence.probe == "perturbation" for p in report.proven)
+
+
+def test_a_divergence_that_does_not_reproduce_is_not_proven(tape):
+    """A clock-bucket seed slipped the same-tape-twice gate and was then convicted of a
+    130-bar lookahead the clock had produced. Nothing is Proven until both runs reproduce."""
+    calls = [0]
+
+    def drifting(bs):
+        calls[0] += 1
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if calls[0] > 2:                      # the "clock" moves after the first two runs
+            out[10] = -out[10]
+        return out
+
+    report = check_causality(drifting, tape)
+    assert report.nondeterministic
+    assert report.proven == ()
+    assert "nondeterministic" in report.describe()
+    assert "PROVEN" not in report.describe()
+
+
+def test_the_gate_and_the_probes_share_their_boundaries(tape):
+    """The input-dependence gate must test the region the probes can reach, and only that.
+    One red-team strategy depended on bar 0 alone, which no probe moves, and was
+    certified provable."""
+    bounds = default_boundaries(len(tape))
+    assert bounds == [45, 120, 195, 270]
+    other = continuation(tape, bounds[0], seed=7)
+    assert other[:bounds[0]] == list(tape[:bounds[0]])
+    assert other[bounds[0]].open == tape[bounds[0]].open
+    assert [b.close for b in other[bounds[0]:]] != [b.close for b in tape[bounds[0]:]]
 
 
 def test_a_proof_cannot_be_filed_without_its_evidence():

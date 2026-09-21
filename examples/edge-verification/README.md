@@ -68,6 +68,66 @@ show up, and the report says so in those words rather than issuing a clean bill 
 
 Reported *horizon* is a lower bound — "at least this far" — never an exact depth.
 
+## The probe compares against the pristine run, and the tape carries no tell
+
+A red team's first two evasions were strategies that leak on real data and behave the moment
+they recognise a probe — one keyed on a seam (opens redrawn independently, so open no longer
+equalled the previous close), one on a fixed one-percent nudge that pushed intrabar moves past
+anything the tape ever showed. Both got `PROVABLE` and a clean report.
+
+Two changes. The perturbed walk is now **re-threaded** — each bar keeps its gap, wick ratios
+and volume; only the move is nudged, on the tape's own realized scale — so it preserves every
+invariant the pristine tape has and there is no seam to find. And every perturbed run is
+compared against the **pristine** run: for `i <= k` a causal strategy must reproduce it exactly,
+because nothing it may legitimately read has changed. A strategy that leaked on real data used
+the boundary bar's close there, and no causal fallback can reproduce that value once the close
+has moved. All three evasions are now fixtures, and all three are `PROVEN`.
+
+Measured after this landed: detection no longer depends on the nudge size at all — every leak,
+at every σ from 0.002 to 1.5. An earlier version of this README carried a table showing a
+tradeoff between wide and narrow nudges. That tradeoff was an artifact of comparing perturbed
+runs only to each other, and it is gone.
+
+## Nothing is proven until it reproduces
+
+A strategy seeded on a coarse clock passed the same-tape-twice gate — the two runs shared a
+one-second bucket — and was then convicted of a 130-bar lookahead that the clock, not the data,
+had produced. Now every candidate divergence is re-run on both sides, and only an exact
+reproduction becomes `Proven`. Anything else marks the whole report nondeterministic, in
+those words, and nothing in it is attributed to the data.
+
+## Truncation needs corroboration; perturbation does not
+
+Truncation changes the length of the array the strategy is handed, and length changes the
+arithmetic. Measured directly: an FFT-based causal filter — mathematically past-only —
+returns values differing by **4–6e-14** between a 400-bar run and a 100-bar run, because the
+transform pads to a power of two derived from the total length. The outputs compared here
+are categorical, so there is no tolerance to apply: a 1e-14 wobble either flips a threshold
+or it does not, and when it does it is perfectly reproducible, which is exactly what a real
+finding looks like.
+
+A clean numpy strategy built on that filter was **not** falsely accused on this tape — the
+difference never landed on a crossing. That is luck, not safety.
+
+So a truncation finding standing alone at a single boundary is filed as `Suspected`, not
+`Proven`. A real dependence on the future shows up wherever you cut; a float artifact is a
+knife-edge coincidence at one particular boundary. Perturbation holds row count and index
+fixed and changes only values, so it cannot produce this artifact at all — its corroboration
+promotes. Checked: `np.cumsum` is bit-identical under truncation, so the ordinary vectorised
+idiom is unaffected.
+
+## What it proves, and what it does not
+
+A divergence proves a causal dependency. The evidence is the pair of runs, and it is in the
+report: index, the two conflicting outputs, and which probe produced them. A `Proven` cannot
+be constructed without that evidence — the split between proof and suspicion is enforced by
+the type, not by a flag someone remembers to set.
+
+The absence of a divergence proves nothing. A leak on a branch this tape never took will not
+show up, and the report says so in those words rather than issuing a clean bill of health.
+
+Reported *horizon* is a lower bound — "at least this far" — never an exact depth.
+
 ## The nudge is one percent, and that is a tradeoff
 
 An early version replaced prices uniformly across 50–200 against a series trading near 100.
@@ -123,53 +183,66 @@ python3 -m pytest tests/ -q      # 22 tests, no network
 
 `edgecheck.sandbox.Sandbox` runs a strategy directory as a callable that plugs straight into
 `check_causality`: one fresh process, in one fresh directory, with a fresh copy of the
-strategy, per call. That costs tens of milliseconds and buys something the probes need — no
-state can carry from one run to the next, so a feature cache written during the baseline run
-cannot launder the future into a poisoned one.
+strategy, per call. `prove` runs the gates and then the probes, never the other way round.
 
 The threat model is stated rather than assumed. The customer is paying to audit their own
-code; the sandbox is for accidents — a vendor SDK phoning home, a runaway allocation, an
-infinite loop — and above all for **owning the inputs**. Every probe works by changing the
-data and watching the output. A strategy that brought its own prices, or fetches them, is
-unmoved by anything we do, and "nothing moved" is what a clean strategy looks like. So
-`precheck` runs two gates before any probe:
+code; the sandbox is for accidents, for **owning the inputs**, and — a red team showed this is
+not a theoretical category — for casual cheating. Every probe works by changing the data and
+watching the output. A strategy that brought its own prices is unmoved by anything we do, and
+"nothing moved" is what a clean strategy looks like. So `precheck` runs two gates first:
 
-- **same tape twice → identical output**, else the strategy is nondeterministic and no
-  divergence could be attributed to the data;
-- **a different tape → different output**, else the output is not a function of the data we
-  control and nothing can be proved about it, whatever the reason.
+- **same tape twice → identical output**, else nondeterministic and no divergence could be
+  attributed to the data;
+- **the bars from the first probe boundary on replaced with a fresh continuation → different
+  output**, else the output does not change when the bars we can vary change, and nothing can
+  be proved about it. (The first version tested a wholly different tape, which a strategy
+  depending on bar 0 alone — a bar no probe ever moves — passed.)
 
-Either failing is reported as `UNPROVABLE`, in those words.
+Either failing is reported `UNPROVABLE`, in those words.
 
 Two tiers, and the report says which ran:
 
 | | `namespace` (default where `unshare` works) | `plain` |
 |---|---|---|
 | fresh interpreter per run, `-s -B` | yes | yes |
-| environment built from scratch — no inherited keys or proxies | yes | yes |
+| child's environment built from scratch — no inherited keys or proxies | yes | yes |
 | rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
-| wall-clock kill of the whole process group | yes | yes |
-| socket ban that **records** the call before refusing it | yes | yes |
-| network blocked by the kernel — `connect()` and DNS both fail | yes | no |
-| tmpfs over the home directory, `/root`, `/tmp`, `/var/tmp`, `/dev/shm` | yes | no |
+| wall-clock kill of the whole process group, always, after every run | yes | yes |
+| audit hook that **records** every socket use and spawn, then refuses it | yes | yes |
+| results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
+| network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
+| tmpfs over `$HOME`, `/root`, `/tmp`, `/var/tmp`, `/dev/shm`, the work root and the source | yes | no |
+| only the run directory bound back in; the strategy's copy of itself read-only | yes | no |
+| `/proc` remounted, so the host's process table is not there | yes | no |
 
 `plain` stops accidents and runaway loops. It is a correctness boundary, not a security one:
-the socket ban is a monkeypatch and `ctypes` walks past it. `namespace` closes that — a raw
-`connect()` through `libc` returns `ENETUNREACH` — and hides the paths where secrets and
-other runs' files live. Neither tier is a boundary against a determined attacker, and the
-docs say so rather than imply otherwise.
+`ctypes` walks past the audit hook, the parent's environment is readable through `/proc`, and
+files written to `/tmp` survive between runs. `namespace` closes each of those. Neither tier is
+a boundary against a determined attacker — one running inside the child process can discover
+the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-Two things learned building it. `unshare --fork` reports **rc=1** for a child the kernel
-killed at its CPU limit, indistinguishable from an ordinary failure, so the sandbox does not
-classify on exit codes: the child catches `SIGXCPU` at the soft limit and writes down why
-it is dying, and the parent measures the run's real CPU consumption through `getrusage` as
-the backstop. And the child must not coerce the strategy's output — `int(0.5)` is `0`, a
-valid position, and a strategy emitting probabilities would have been audited as though it
-emitted decisions. The parent now insists on Python ints in `{-1, 0, 1}` and refuses
-everything else.
+**What the red team got through, and what closed it.** A cache written to `/tmp` and keyed on
+data the probes never move replayed a leaky answer to every probe: the default work root was
+under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
+hidden and only the run directory is bound back in. A strategy rebound the child runner's
+result function, another started a thread that rewrote the output after the official write,
+another deleted the violation record after a swallowed network attempt: results and the
+record now travel over pipes the strategy did not create and cannot unlink, and the child
+exits the instant the result is written. `importlib.reload(socket)` undid a monkeypatched
+ban; a PEP 578 audit hook cannot be removed. A multi-line exception message planted a
+reassuring last line in the report; messages are `repr`'d. A strategy claimed a CPU-limit
+death without consuming CPU; the claim is checked against the kernel's accounting.
 
-The hash seed is pinned to 0 for every run so dict and set order cannot differ between them;
-the report says so. Default memory limit is 2 GiB; a numpy strategy runs under 512 MiB.
+Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
+killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
+on exit codes: the child catches `SIGXCPU` and writes down why it is dying; the parent
+measures the run's real CPU through `getrusage`. And the child must not coerce output —
+`int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
+
+**A limit no probe can remove.** If the customer supplied the tape, a strategy can recognise
+it by hash and leak only on that exact data. Black-box probing cannot catch that. The audit
+must therefore never run on data the customer chose; that is a rule of the service, not a
+feature of this code.
 
 ## Not yet built
 

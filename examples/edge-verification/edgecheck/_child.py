@@ -5,12 +5,20 @@ package may be hidden, the environment is scrubbed and the interpreter runs with
 Bar defined here has the same five fields as the one in the fixtures; the strategy contract
 only requires attribute access, so a different class is fine.
 
-The network ban is installed HERE, before the strategy is imported, rather than through
-sitecustomize -- there is nothing for site machinery to pick up under a scrubbed
-environment, and putting it in the runner means it cannot be forgotten. It is a
-recording ban: the attempt is written to violations.jsonl before the exception is raised,
-so a strategy that swallows the exception is still on record. In namespace isolation the
-kernel blocks the connection as well; this layer exists so the report can name the call.
+Everything this process reports goes back over two pipes the parent created and handed us
+as file descriptors -- never through a file in the run directory. The red team showed why:
+a file the strategy's own process can write is a file the strategy can rewrite, delete, or
+race with a thread that wakes after the official write. A pipe cannot be unlinked, and the
+moment the result is written this process calls os._exit, so no thread, atexit handler or
+interpreter shutdown ever runs afterwards. The descriptors are made non-inheritable first
+thing, so a process the strategy spawns cannot hold them open and stall the parent.
+
+The network and spawn record is a PEP 578 audit hook rather than a monkeypatch. A
+monkeypatch on socket.socket is undone by importlib.reload(socket); an audit hook cannot be
+removed and fires for every in-process socket use and every attempt to start a process,
+whichever module made the call. It records first and refuses second, so a strategy that
+swallows the exception is still on record. This is about naming the call in the report;
+in namespace isolation the kernel blocks the connection regardless.
 """
 from __future__ import annotations
 
@@ -32,75 +40,89 @@ class Bar:
     volume: float
 
 
-def _install_network_ban(run_dir: str) -> None:
-    import socket
+def main(argv: list[str]) -> int:
+    run_dir, entry, func = argv[1], argv[2], argv[3]
+    out_fd, viol_fd = int(argv[4]), int(argv[5])
+    os.set_inheritable(out_fd, False)
+    os.set_inheritable(viol_fd, False)
+    os.chdir(run_dir)
+
+    # Everything this function needs AFTER the strategy has run is bound to a local name
+    # here, before the strategy is imported. A red team rebound __main__._write_all to a
+    # no-op and the result was never written; a name looked up in this module's globals at
+    # call time is a name the strategy can replace. A local is not.
+    write, exit_, dumps, format_exc = os.write, os._exit, json.dumps, traceback.format_exc
+
+    def write_all(fd: int, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            view = view[write(fd, view):]
+
+    def finish(payload: dict, code: int) -> None:
+        try:
+            write_all(out_fd, dumps(payload).encode("utf-8"))
+        finally:
+            exit_(code)
 
     def record(kind: str, detail: str) -> None:
-        with open(os.path.join(run_dir, "violations.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"kind": kind, "detail": detail}) + "\n")
+        try:
+            write_all(viol_fd, (dumps({"kind": kind, "detail": detail[:300]}) + "\n").encode("utf-8"))
+        except OSError:
+            pass
 
-    class BannedSocket(socket.socket):
-        def __init__(self, *a, **kw):  # noqa: D401
-            record("network", f"socket.socket{a!r}")
-            raise OSError("edgecheck: network is not available inside the sandbox")
-
-    def banned(name):
-        def _f(*a, **kw):
-            record("network", f"socket.{name}{a[:2]!r}")
-            raise OSError(f"edgecheck: socket.{name} is not available inside the sandbox")
-        return _f
-
-    socket.socket = BannedSocket  # type: ignore[misc]
-    socket.create_connection = banned("create_connection")  # type: ignore[assignment]
-    socket.getaddrinfo = banned("getaddrinfo")  # type: ignore[assignment]
-
-
-def _write(run_dir: str, payload: dict) -> None:
-    with open(os.path.join(run_dir, "out.json"), "w", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-
-
-def _install_cpu_notice(run_dir: str) -> None:
-    """At the soft CPU limit the kernel sends SIGXCPU; the hard limit, a little later, is
-    SIGKILL and cannot be caught. This window is for writing down what happened, because
-    the process that launched us cannot always tell a signal death from a clean exit."""
+    # -- the CPU limit: SIGXCPU at the soft limit is catchable, SIGKILL at the hard one is not ----
     import signal
 
     def on_xcpu(signum, frame):
-        _write(run_dir, {"ok": False, "reason": "cpu_limit"})
-        os._exit(3)
+        finish({"ok": False, "reason": "cpu_limit"}, 3)
 
     signal.signal(signal.SIGXCPU, on_xcpu)
 
+    # -- the record: every socket use and every spawn, from any module, unremovable ------------
+    NETWORK = {"socket.connect", "socket.getaddrinfo", "socket.sendto", "socket.sendmsg"}
+    SPAWN = {"subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork"}
 
-def main(argv: list[str]) -> int:
-    run_dir, entry, func = argv[1], argv[2], argv[3]
-    os.chdir(run_dir)
-    _install_cpu_notice(run_dir)
-    _install_network_ban(run_dir)
+    def audit(event: str, args: tuple) -> None:
+        if event in NETWORK:
+            record("network", f"{event}{args[1:3]!r}" if len(args) > 1 else event)
+            raise OSError(f"edgecheck: {event} is not available inside the sandbox")
+        if event in SPAWN:
+            record("spawn", f"{event}{args[:2]!r}")
+            raise RuntimeError(f"edgecheck: {event} is not available inside the sandbox")
 
+    sys.addaudithook(audit)
+
+    # -- the tape ----------------------------------------------------------------------------------
     bars = []
     with open(os.path.join(run_dir, "tape.jsonl"), encoding="utf-8") as fh:
         for line in fh:
             d = json.loads(line)
             bars.append(Bar(d["ts"], d["open"], d["high"], d["low"], d["close"], d["volume"]))
 
+    # -- the strategy ------------------------------------------------------------------------------
     sys.path.insert(0, os.path.join(run_dir, "strategy"))
     try:
         module = importlib.import_module(entry)
         signals = getattr(module, func)
         out = signals(bars)
-        # No coercion here. int(0.5) is 0, a valid position, and a strategy emitting
-        # probabilities would be audited as though it emitted decisions. numpy scalars are
-        # unwrapped with .item(), which keeps int64 an int and float64 a float; the parent
-        # then insists on ints in {-1, 0, 1} and refuses anything else.
-        payload = {"ok": True, "signals": [x.item() if hasattr(x, "item") else x for x in out]}
-    except BaseException:  # noqa: BLE001 -- the traceback IS the report
-        payload = {"ok": False, "traceback": traceback.format_exc()[-4000:]}
-
-    _write(run_dir, payload)
-    return 0
+        # No coercion. int(0.5) is 0, a valid position, and a strategy emitting probabilities
+        # would be audited as though it emitted decisions. numpy scalars are unwrapped with
+        # .item(), which keeps int64 an int and float64 a float; the parent insists on ints in
+        # {-1, 0, 1}. json.dumps happens inside the try so an unserialisable value is an error,
+        # not a half-written result.
+        values = [x.item() if hasattr(x, "item") else x for x in out]
+        body = dumps({"ok": True, "signals": values})
+    except BaseException as e:  # noqa: BLE001 -- the error IS the report
+        # The message is repr'd so a newline inside it cannot smuggle a reassuring last line
+        # into the parent's summary; the formatted traceback rides along as an attachment.
+        body = dumps({"ok": False,
+                      "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300]},
+                      "traceback": format_exc()[-4000:]})
+    try:
+        write_all(out_fd, body.encode("utf-8"))
+    finally:
+        exit_(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    main(sys.argv)
