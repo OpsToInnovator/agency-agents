@@ -62,7 +62,7 @@ not free either. Perturbation findings by sigma, out of four probe boundaries:
 | centred window | 4 | 4 | 4 | 4 | 4 |
 | full-sample z-score | 4 | 2 | **0** | **0** | **0** |
 | back-filled level | 2 | 4 | 4 | 4 | 4 |
-| full-sample quantile | 3 | 1 | 1 | 1 | **0** |
+| full-sample quantile | 3 | 1 | 1 | 1 | 1 |
 
 A leak reading a specific cell is caught at any sigma. A leak working through a statistic of
 the whole sample is caught only while the nudge stays too small to dominate that statistic.
@@ -104,3 +104,14 @@ python3 -m pytest tests/ -q      # 22 tests, no network
 Sandboxing of untrusted customer code, the static pre-filter that would narrow where to
 probe, adapters for pandas and event-driven strategies, and the other four checks. This
 module is the one that most justifies asking for the code.
+
+## Bars handed to the strategy are always possible bars
+
+The perturbation nudges each field and then repairs the envelope — the high is lifted to
+cover whatever the open and close became, the low dropped likewise. An earlier version drew
+each field independently and broke `high >= low` on 42% of perturbed bars, putting the close
+outside its own range on 78%. The obvious cost is that a strategy validating its input dies
+mid-audit. The real cost is subtler and worse: a strategy that merely *behaves differently*
+on an impossible bar would have that recorded as evidence of lookahead. A probe that
+manufactures its own findings is not a probe. `test_every_perturbed_bar_is_a_possible_bar`
+pins it.

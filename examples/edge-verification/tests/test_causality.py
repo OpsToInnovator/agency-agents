@@ -9,7 +9,7 @@ import importlib
 
 import pytest
 
-from edgecheck.causality import Divergence, Proven, Report, check_causality
+from edgecheck.causality import Divergence, Proven, Report, _perturbed, check_causality
 from edgecheck.fixtures import bars
 from edgecheck.fixtures.strategies import leak_backfill, leak_centered_window
 
@@ -154,3 +154,30 @@ def test_findings_are_ordered_worst_first(tape):
 def test_an_empty_report_is_falsey_about_leaking():
     assert Report().leaks is False
     assert Report().worst_horizon is None
+
+
+@pytest.mark.parametrize("sigma", [0.002, 0.01, 0.3, 1.5])
+def test_every_perturbed_bar_is_a_possible_bar(sigma, tape):
+    """The probe must never hand the strategy a bar the market could not have printed.
+
+    Nudging each field independently broke high >= low on 42% of perturbed bars. A strategy
+    that validates its input dies on that; a strategy that merely reacts to it has the
+    reaction recorded as evidence of lookahead, which is the failure this whole module
+    exists to avoid.
+    """
+    for seed in (1000, 1005, 1011):
+        for bar in _perturbed(tape, 120, seed=seed, sigma=sigma)[120:]:
+            assert bar.low <= bar.high, f"inverted bar at sigma {sigma}"
+            assert bar.low <= bar.open <= bar.high, f"open outside its range at sigma {sigma}"
+            assert bar.low <= bar.close <= bar.high, f"close outside its range at sigma {sigma}"
+            assert bar.low > 0, f"non-positive price at sigma {sigma}"
+            assert bar.volume >= 0, f"negative volume at sigma {sigma}"
+
+
+def test_the_boundary_bar_keeps_the_open_the_strategy_was_entitled_to(tape):
+    """Bar k's open is knowable at bar k's decision -- perturbing it would be unfair."""
+    for seed in (1000, 1007):
+        p = _perturbed(tape, 120, seed=seed, sigma=0.01)
+        assert p[120].open == tape[120].open
+        assert p[120].close != tape[120].close
+        assert p[121].open != tape[121].open

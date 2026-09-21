@@ -32,7 +32,7 @@ sigma (out of four probe boundaries):
     centred window                4      4      4      4      4
     full-sample z-score           4      2      0      0      0
     back-filled level             2      4      4      4      4
-    full-sample quantile          3      1      1      1      0
+    full-sample quantile          3      1      1      1      1
 
 A leak that reads a specific cell is caught at any sigma. A leak that works through a
 statistic of the whole sample is caught only while the nudge stays small enough not to
@@ -52,6 +52,7 @@ clean bill of health, only "nothing moved on this data".
 from __future__ import annotations
 
 import dataclasses
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, Sequence
@@ -168,13 +169,34 @@ def _replace(bar: Any, **kw: float) -> Any:
 
 
 def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float) -> list[Any]:
-    """Nudge everything unknowable at the moment bar ``boundary``'s position was chosen."""
+    """Nudge everything unknowable at the moment bar ``boundary``'s position was chosen.
+
+    The replacement bar must still be a POSSIBLE bar. An earlier version drew each field
+    independently, which broke ``high >= low`` on 42% of perturbed bars and put the close
+    outside its own range on 78% of them. Two things go wrong with that, and the second is
+    worse than the first: a strategy that validates its input dies mid-audit, and a strategy
+    that merely behaves differently on an impossible bar has that difference recorded as
+    evidence of lookahead. A probe that manufactures its own findings is not a probe.
+
+    So each field is nudged, and then the envelope is repaired -- the high is lifted to
+    cover whatever the open and close became, the low dropped likewise. Intra-bar
+    relationships still move, which is what keeps the probe sensitive, but every bar it
+    hands the strategy is one the market could have printed.
+
+    The multiplier is lognormal rather than ``1 + gauss``. At the default sigma the two are
+    indistinguishable, but a wide sigma sends ``1 + gauss`` negative, and a negative price
+    is the same class of mistake as an inverted bar.
+    """
     rng = random.Random(seed)
     out = list(tape)
     for i in range(boundary, len(tape)):
         bar = tape[i]
-        fields = UNKNOWABLE_AT_OPEN if i == boundary else UNKNOWABLE_ENTIRELY
-        out[i] = _replace(bar, **{f: getattr(bar, f) * (1.0 + rng.gauss(0.0, sigma)) for f in fields})
+        nudge = lambda v: v * math.exp(rng.gauss(0.0, sigma))
+        # Bar ``boundary``'s open is knowable -- it is the moment the position is chosen.
+        opened = bar.open if i == boundary else nudge(bar.open)
+        closed, high, low, volume = nudge(bar.close), nudge(bar.high), nudge(bar.low), nudge(bar.volume)
+        out[i] = _replace(bar, open=opened, close=closed, volume=volume,
+                          high=max(high, opened, closed), low=min(low, opened, closed))
     return out
 
 
