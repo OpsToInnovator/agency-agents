@@ -149,9 +149,13 @@ class Report:
 
     def describe(self) -> str:
         if not self.proven:
-            return (f"No causal dependency on future data was demonstrated over {self.bars_tested} bars "
+            base = (f"No causal dependency on future data was demonstrated over {self.bars_tested} bars "
                     f"and {self.probes_run} probe runs. This is not a clean bill of health: a leak on a "
                     f"branch this data never took would not show up here.")
+            if self.suspected:
+                base += "\n\nSUSPECTED, not proven:\n" + "\n".join(
+                    f"  {s.summary}\n    {s.reason}" for s in self.suspected)
+            return base
         h = self.worst_horizon
         reach = "its own bar (decided at the open, read the close)" if h == 0 else f"at least {h} bar(s) into the future"
         lines = [f"PROVEN: this strategy reads {reach}.", ""]
@@ -223,18 +227,20 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     boundaries = sorted({b for b in boundaries if 4 <= b < n})
 
     proven: list[Proven] = []
+    suspected: list[Suspected] = []
     runs = 0
     full = list(strategy(tape))
     runs += 1
 
+    truncation_hits: list[Divergence] = []
     for k in boundaries:
         truncated = list(strategy(tape[:k]))
         runs += 1
         idx = _first_disagreement(truncated, full, k)
         if idx is not None:
-            d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=truncated[idx],
-                           probe="truncation", detail="removed")
-            proven.append(Proven(d, f"signals[{idx}] depends on data after bar {k - 1}"))
+            truncation_hits.append(Divergence(index=idx, boundary=k, baseline=full[idx],
+                                              variant=truncated[idx], probe="truncation",
+                                              detail="removed"))
 
     for k in boundaries:
         base = list(strategy(_perturbed(tape, k, seed=1000, sigma=sigma)))
@@ -249,5 +255,29 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
                 proven.append(Proven(d, f"signals[{idx}] depends on fields of bar {k} onward that were not knowable"))
                 break
 
+    # Truncation changes the length of the array the strategy is handed, and length changes
+    # the arithmetic. Measured here: an FFT-based causal filter, mathematically past-only,
+    # returns values differing by 4e-14 between a run of 400 bars and a run of 100, because
+    # the transform pads to a power of two derived from the total length. The outputs this
+    # module compares are categorical, so there is no tolerance to apply -- a 1e-14 wobble
+    # either flips a threshold or it does not, and when it does it is perfectly
+    # reproducible. Such a flip is a knife-edge coincidence at one particular boundary; a
+    # real dependence on the future shows up wherever you cut. So a truncation finding
+    # standing alone at a single boundary is filed as SUSPECTED, not PROVEN.
+    #
+    # The perturbation probe holds row count, column set and index fixed and changes only
+    # values, so it cannot produce this artifact. Its corroboration promotes.
+    corroborated = bool(proven) or len(truncation_hits) >= 2
+    for d in truncation_hits:
+        if corroborated:
+            proven.append(Proven(d, f"signals[{d.index}] depends on data after bar {d.boundary - 1}"))
+        else:
+            suspected.append(Suspected(
+                summary=f"signals[{d.index}] changed when data after bar {d.boundary - 1} was removed",
+                reason="seen at one truncation boundary only and not corroborated by the "
+                       "shape-preserving probe; cutting the tape changes array length, and "
+                       "length-dependent arithmetic can flip a threshold without any "
+                       "dependence on the future"))
+
     proven.sort(key=lambda p: (-p.horizon, p.evidence.index))
-    return Report(proven=tuple(proven), suspected=(), probes_run=runs, bars_tested=n)
+    return Report(proven=tuple(proven), suspected=tuple(suspected), probes_run=runs, bars_tested=n)

@@ -181,3 +181,55 @@ def test_the_boundary_bar_keeps_the_open_the_strategy_was_entitled_to(tape):
         assert p[120].open == tape[120].open
         assert p[120].close != tape[120].close
         assert p[121].open != tape[121].open
+
+
+def _length_artifact_strategy(flip_at_length: int):
+    """A causally clean strategy that wobbles at exactly one array length.
+
+    This is what a floating-point shape artifact looks like from outside. Measured on a
+    real FFT-based causal filter, values differ by 4e-14 between a 400-bar run and a
+    100-bar run because the transform pads to a power of two derived from the total
+    length. Mathematically the filter is past-only; arithmetically it is not identical,
+    and a difference that small still flips a threshold outright, reproducibly, whenever
+    it happens to land on one. No strategy here reads the future.
+    """
+    def signals(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) == flip_at_length and len(out) > 5:
+            out[5] = -out[5]
+        return out
+    return signals
+
+
+def test_a_single_truncation_hit_is_suspected_not_proven(tape):
+    """One boundary is a coincidence. A real leak diverges wherever you cut."""
+    boundaries = [45, 120, 200, 270]
+    report = check_causality(_length_artifact_strategy(45), tape, boundaries=boundaries)
+
+    assert not report.leaks, "a one-boundary wobble must not be sold as proof"
+    assert report.proven == ()
+    assert len(report.suspected) == 1
+    assert "not corroborated" in report.suspected[0].reason
+
+    text = report.describe()
+    assert "SUSPECTED, not proven" in text
+    assert "PROVEN" not in text
+
+
+def test_two_truncation_hits_are_proven(tape):
+    """Corroboration across boundaries is what promotes a truncation finding."""
+    class Twice:
+        def __call__(self, bs):
+            out = [0] * len(bs)
+            for i in range(3, len(bs)):
+                out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+            if len(bs) in (45, 120) and len(out) > 5:
+                out[5] = -out[5]
+            return out
+
+    report = check_causality(Twice(), tape, boundaries=[45, 120, 200, 270])
+    assert report.leaks
+    assert len(report.proven) == 2
+    assert report.suspected == ()

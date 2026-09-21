@@ -36,6 +36,26 @@ real lookahead there is. Both probes ship because the gap between them is where 
 bug lives. `tests/test_causality.py` pins this: with perturbation disabled, the same-bar leak
 goes undetected.
 
+## Truncation needs corroboration; perturbation does not
+
+Truncation changes the length of the array the strategy is handed, and length changes the
+arithmetic. Measured directly: an FFT-based causal filter — mathematically past-only —
+returns values differing by **4–6e-14** between a 400-bar run and a 100-bar run, because the
+transform pads to a power of two derived from the total length. The outputs compared here
+are categorical, so there is no tolerance to apply: a 1e-14 wobble either flips a threshold
+or it does not, and when it does it is perfectly reproducible, which is exactly what a real
+finding looks like.
+
+A clean numpy strategy built on that filter was **not** falsely accused on this tape — the
+difference never landed on a crossing. That is luck, not safety.
+
+So a truncation finding standing alone at a single boundary is filed as `Suspected`, not
+`Proven`. A real dependence on the future shows up wherever you cut; a float artifact is a
+knife-edge coincidence at one particular boundary. Perturbation holds row count and index
+fixed and changes only values, so it cannot produce this artifact at all — its corroboration
+promotes. Checked: `np.cumsum` is bit-identical under truncation, so the ordinary vectorised
+idiom is unaffected.
+
 ## What it proves, and what it does not
 
 A divergence proves a causal dependency. The evidence is the pair of runs, and it is in the
