@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkillCurrent</title>
+<meta name="description" content="Shared methods. Clear ownership. One approved version. Edit, test, release and follow a team skill from draft to adoption.">
+<meta name="theme-color" content="#286445">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23286445'/%3E%3Cpath d='M6 8h12l-4 7h12L14 28l4-9H5l5-7H6V8Z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fcfcfa; --side: #f2f3ee; --paper: #ffffff; --ink: #232d29; --muted: #66716a; --line: #dfe4dc;
+    --accent: #286445; --accent-hover: #1d5137; --accent-soft: #eaf2e8; --accent-text: #295d3b; --accent-ink: #ffffff;
+    --amber: #885b20; --amber-soft: #faf2e4; --red: #a34b3d; --red-soft: #fcf0eb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "General Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #18201c; --side: #1b251f; --paper: #171f1b; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
+      --accent: #a6cbaa; --accent-hover: #bbdbba; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712;
+      --amber: #ebc48c; --amber-soft: #413624; --red: #efb2a2; --red-soft: #402c27;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #18201c; --side: #1b251f; --paper: #171f1b; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
+    --accent: #a6cbaa; --accent-hover: #bbdbba; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712;
+    --amber: #ebc48c; --amber-soft: #413624; --red: #efb2a2; --red-soft: #402c27;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
+  a { color: var(--accent-text); }
+  button, .btn { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.primary:hover { background: var(--accent-hover); }
+  button.danger { color: var(--red); border-color: var(--red); }
+  button.quiet { border-color: transparent; background: transparent; color: var(--accent-text); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select, textarea { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  textarea { width: 100%; min-height: 380px; font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 13px; white-space: pre-wrap; margin: 0; }
+  pre.diff .add { color: var(--accent-text); } pre.diff .del { color: var(--red); } pre.diff .hunk { color: var(--muted); }
+  code { font-family: var(--mono); font-size: 12px; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+  .layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+  aside { background: var(--side); border-right: 1px solid var(--line); padding: 20px 16px; display: flex; flex-direction: column; gap: 18px; position: sticky; top: 0; height: 100vh; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+  .brand svg { flex: none; }
+  .workspace { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .workspace b { display: block; } .workspace span { color: var(--muted); font-size: 12px; }
+  .navlabel { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 6px 0 -8px; }
+  nav { display: flex; flex-direction: column; gap: 2px; }
+  nav button { text-align: left; display: flex; justify-content: space-between; align-items: center; border: none; background: none; padding: 9px 12px; border-radius: 8px; color: var(--ink); }
+  nav button.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+  nav button:hover { background: var(--accent-soft); }
+  nav .count { font-size: 12px; color: var(--muted); background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; }
+  .me { margin-top: auto; border-top: 1px solid var(--line); padding-top: 12px; display: flex; align-items: center; gap: 8px; }
+  .avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex: none; }
+  .me .who { min-width: 0; flex: 1; }
+  .me .who b, .me .who span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .me .who span { color: var(--muted); font-size: 12px; }
+  .me button { padding: 4px 8px; font-size: 12px; white-space: nowrap; }
+  main { padding: 28px 36px 60px; max-width: 1180px; }
+  .crumbs { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent-text); margin-bottom: 8px; }
+  h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h2 { font-size: 18px; margin: 0 0 8px; }
+  h3 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+  .lede { color: var(--muted); margin: 0 0 18px; font-size: 15px; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .between { justify-content: space-between; }
+  .grid2 { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--paper); margin-bottom: 16px; }
+  .tile { padding: 14px 16px; border-right: 1px solid var(--line); }
+  .tile:last-child { border-right: none; }
+  .tile .k { color: var(--muted); font-size: 12px; } .tile .v { font-size: 26px; font-weight: 600; } .tile .v small { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .tile .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 8px; } .tile .bar i { display: block; height: 3px; background: var(--accent); border-radius: 2px; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); color: var(--muted); background: var(--bg); }
+  .badge.published, .badge.current, .badge.pass, .badge.task_tested, .badge.loaded { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; }
+  .badge.in_review, .badge.stale, .badge.outdated, .badge.installed { color: var(--amber); background: var(--amber-soft); border-color: transparent; }
+  .badge.deprecated, .badge.fail, .badge.missing, .badge.modified { color: var(--red); background: var(--red-soft); border-color: transparent; }
+  .badge.approved, .badge.verified { color: var(--accent-text); border-color: var(--accent); background: transparent; }
+  .tag { display: inline-block; background: var(--accent-soft); color: var(--accent-text); border-radius: 4px; padding: 0 6px; font-size: 12px; margin-right: 4px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  tr.link { cursor: pointer; } tr.link:hover td { background: var(--accent-soft); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--paper); margin: 18px 0; }
+  .step { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-right: 1px solid var(--line); background: none; border-top: none; border-bottom: none; border-left: none; border-radius: 0; text-align: left; color: var(--ink); }
+  .step:last-child { border-right: none; }
+  .step.active { background: var(--accent-soft); }
+  .step .n { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); flex: none; }
+  .step.active .n { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .step.done .n { color: var(--accent-text); border-color: var(--accent); }
+  .step b { display: block; } .step span { color: var(--muted); font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; font-size: 14px; }
+  .kv dt { color: var(--muted); margin: 0; } .kv dd { margin: 0; text-align: right; }
+  .check { display: grid; grid-template-columns: 28px 1fr auto; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: start; }
+  .check .n { color: var(--muted); font-size: 12px; padding-top: 2px; }
+  .check .rule { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .note { background: var(--accent-soft); color: var(--accent-text); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+  .note.warn { background: var(--amber-soft); color: var(--amber); }
+  .note.bad { background: var(--red-soft); color: var(--red); }
+  .feed { list-style: none; padding: 0; margin: 0; } .feed li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .list { display: flex; flex-direction: column; gap: 10px; }
+  .item { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .login { max-width: 420px; margin: 80px auto; }
+  .login input { width: 100%; margin: 6px 0 14px; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; display: none; max-width: 90vw; z-index: 5; }
+  #toast.bad { background: var(--red); color: #fff; }
+  .topbar { display: none; }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; } aside { position: static; height: auto; }
+    main { padding: 16px; } .grid2 { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr 1fr; }
+    td:nth-child(n+5), th:nth-child(n+5) { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="layout" id="app"></div>
+<div id="toast"></div>
+<script>
+(() => {
+  const $ = (sel, el = document) => el.querySelector(sel);
+  const RANK = { viewer: 0, contributor: 1, maintainer: 2, owner: 3 };
+  const NAV = [['library', 'Skill library'], ['reviews', 'Reviews'], ['adoption', 'Adoption'], ['rules', 'Check rules'], ['members', 'Members'], ['activity', 'Activity']];
+  const STEPS = [['edit', 'Edit', 'Improve the method'], ['test', 'Test', 'Rehearse the change'], ['release', 'Release', 'Approve exact bytes'], ['adoption', 'Adoption', 'Follow the evidence']];
+  const state = { token: null, team: null, user: null, me: null, teamInfo: null, auth: 'token', view: 'library', slug: null, step: 'edit', counts: {} };
+
+  const h = (tag, attrs = {}, ...children) => {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === 'class') el.className = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (v !== null && v !== undefined && v !== false) el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const c of children.flat(3)) if (c !== null && c !== undefined && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+    return el;
+  };
+  const when = (iso) => (iso ? iso.replace('T', ' ').replace('Z', ' UTC') : '');
+  const short = (hash) => (hash ? hash.slice(0, 12) + '…' : '—');
+  const initials = (s) => (s || '?').split(/[\s._-]+/).map((p) => p[0]).join('').slice(0, 2).toUpperCase();
+  const toast = (msg, bad = false) => { const t = $('#toast'); t.textContent = msg; t.className = bad ? 'bad' : ''; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), bad ? 6000 : 2500); };
+  const store = {
+    load() { try { return JSON.parse(localStorage.getItem('skillcurrent') || '{}'); } catch (e) { return {}; } },
+    save(o) { try { localStorage.setItem('skillcurrent', JSON.stringify(o)); } catch (e) { /* private mode */ } },
+    clear() { try { localStorage.removeItem('skillcurrent'); } catch (e) { /* ignore */ } },
+  };
+
+  async function rpc(op, args = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    if (state.team) headers['X-SkillCurrent-Team'] = state.team;
+    if (state.user) headers['X-SkillCurrent-User'] = state.user;
+    const res = await fetch('/api/rpc', { method: 'POST', headers, body: JSON.stringify({ op, args }) });
+    const payload = await res.json();
+    if (!payload.ok) { const err = new Error(payload.error.message); err.code = payload.error.code; throw err; }
+    return payload.result;
+  }
+  const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); if (e.code === 'unauthorized') signOut(); } };
+  const can = (role) => state.me && RANK[state.me.role] >= RANK[role];
+  const canEdit = (s) => can('maintainer') || (can('contributor') && s.owner === state.me.handle);
+  const ask = (label, dflt = '') => { const v = prompt(label, dflt); return v === null ? null : v; };
+
+  // ------------------------------------------------------------------ shell
+  const app = $('#app');
+  function shell(content) {
+    app.innerHTML = '';
+    const side = h('aside', {},
+      h('div', { class: 'brand' }, logo(), 'skillcurrent.'),
+      h('div', { class: 'workspace' }, h('b', {}, state.teamInfo.name), h('span', {}, `${state.teamInfo.slug} · ${state.me.role}`)),
+      h('div', { class: 'navlabel' }, 'Workspace'),
+      h('nav', {}, NAV.map(([id, label]) => h('button', { class: state.view === id || (state.view === 'skill' && id === 'library') ? 'active' : '', onclick: () => go(id) }, label, state.counts[id] ? h('span', { class: 'count' }, state.counts[id]) : ''))),
+      h('div', { class: 'small muted' }, 'Better methods. Not more files.', h('br'), 'Make a change, rehearse it, then see where it lands.'),
+      h('div', { class: 'me' }, h('span', { class: 'avatar' }, initials(state.me.display_name)), h('div', { class: 'who' }, h('b', {}, state.me.display_name), h('span', {}, state.me.handle)), h('button', { class: 'quiet', onclick: signOut }, 'Sign out')));
+    app.append(side, h('main', {}, content));
+  }
+  const logo = () => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('width', '28'); s.setAttribute('height', '28'); s.setAttribute('viewBox', '0 0 32 32'); s.innerHTML = '<rect width="32" height="32" rx="6" fill="#286445"/><path d="M6 8h12l-4 7h12L14 28l4-9H5l5-7H6V8Z" fill="#fff"/>'; return s; };
+
+  async function boot() {
+    const health = await fetch('/api/health').then((r) => r.json()).catch(() => ({ auth: 'token' }));
+    state.auth = health.auth;
+    const saved = store.load();
+    Object.assign(state, { token: saved.token || null, team: saved.team || null, user: saved.user || null });
+    if (state.token || (state.team && state.user)) { try { await signIn(); return; } catch (e) { store.clear(); } }
+    renderLogin();
+  }
+  async function signIn() {
+    const info = await rpc('whoami');
+    state.me = info.member; state.teamInfo = info.team; state.team = info.team.slug; state.user = info.member.handle;
+    store.save({ token: state.token, team: state.team, user: state.user });
+    go('library');
+  }
+  function signOut() { store.clear(); Object.assign(state, { token: null, team: null, user: null, me: null }); renderLogin(); }
+  function renderLogin() {
+    app.innerHTML = '';
+    const tokenMode = state.auth !== 'none';
+    const form = h('form', { class: 'card login', onsubmit: guard(async (e) => { e.preventDefault(); if (tokenMode) state.token = $('#tok', form).value.trim(); else { state.team = $('#team', form).value.trim(); state.user = $('#user', form).value.trim(); } await signIn(); }) },
+      h('div', { class: 'brand', style: 'margin-bottom:14px' }, logo(), 'skillcurrent.'),
+      h('h2', {}, 'Sign in'),
+      tokenMode ? [h('label', {}, 'Member token'), h('input', { id: 'tok', placeholder: 'ts_…', autocomplete: 'off' }), h('p', { class: 'muted small' }, 'Tokens are issued when a member is added (', h('code', {}, 'skillcurrent members add'), ').')]
+        : [h('label', {}, 'Team slug'), h('input', { id: 'team', placeholder: 'acme' }), h('label', {}, 'Your handle'), h('input', { id: 'user', placeholder: 'ana' }), h('p', { class: 'muted small' }, 'This server runs without authentication.')],
+      h('button', { class: 'primary', type: 'submit' }, 'Continue'));
+    app.style.display = 'block'; app.append(form);
+  }
+
+  function go(view, slug = null, step = 'edit') { state.view = view; state.slug = slug; state.step = step; app.style.display = ''; render(); }
+  const render = guard(async () => {
+    shell(h('p', { class: 'muted' }, 'Loading…'));
+    const [pending, content] = await Promise.all([rpc('pending_reviews'), VIEWS[state.view]()]);
+    state.counts = { reviews: pending.length };
+    shell(content);
+  });
+
+  // ------------------------------------------------------------------ pieces
+  const badge = (s) => h('span', { class: 'badge ' + s }, String(s).replace('_', ' '));
+  const tags = (list) => (list || []).map((t) => h('span', { class: 'tag' }, t));
+  const tile = (k, v, total, sub) => h('div', { class: 'tile' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v, total !== undefined ? h('small', {}, ' / ' + total) : ''), sub ? h('div', { class: 'small muted' }, sub) : '', total ? h('div', { class: 'bar' }, h('i', { style: `width:${Math.round((100 * v) / Math.max(total, 1))}%` })) : '');
+  const kv = (pairs) => h('dl', { class: 'kv' }, pairs.map(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+  const table = (cols, rows, onRow) => h('table', {}, h('thead', {}, h('tr', {}, cols.map((c) => h('th', {}, c[0])))), h('tbody', {}, rows.map((r) => h('tr', { class: onRow ? 'link' : '', onclick: onRow ? () => onRow(r) : null }, cols.map((c) => h('td', {}, c[1](r)))))));
+  const feed = (items) => items.length ? h('ul', { class: 'feed' }, items.map((a) => {
+    const details = Object.entries(a.details || {}).filter(([, v]) => v !== '' && v !== null && !(Array.isArray(v) && !v.length)).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : v}`).join(' · ');
+    return h('li', {}, h('span', { class: 'muted small' }, when(a.at)), ' ', h('b', {}, a.actor), ' ', a.action.replace('.', ' '), ' ', a.skill ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('skill', a.skill); } }, a.skill) : '', details ? h('span', { class: 'muted small' }, ' — ' + details) : '');
+  })) : h('p', { class: 'muted' }, 'No activity yet.');
+
+  // ------------------------------------------------------------------ views
+  const VIEWS = {
+    async library() {
+      const filters = { status: '', query: '' };
+      const list = h('div', {});
+      const load = guard(async () => {
+        const rows = await rpc('list_skills', { status: filters.status || null, query: filters.query || null });
+        list.innerHTML = '';
+        list.append(rows.length ? table([
+          ['Skill', (s) => [h('b', {}, s.title), h('div', { class: 'small muted' }, s.slug + ' · ' + s.description)]],
+          ['Status', (s) => [badge(s.status), s.has_draft && s.status !== 'draft' ? h('div', { class: 'small muted' }, 'draft in progress') : '']],
+          ['Production', (s) => s.production_version || '—'],
+          ['Canary', (s) => (s.channels.canary ? s.channels.canary.version : '—')],
+          ['Approved', (s) => s.latest_version || '—'],
+          ['Owner', (s) => s.owner], ['Installs', (s) => s.installs], ['Tags', (s) => tags(s.tags)],
+        ], rows, (s) => go('skill', s.slug)) : h('p', { class: 'muted' }, 'No skills match.'));
+      });
+      const query = h('input', { placeholder: 'Search skills', oninput: (e) => { filters.query = e.target.value; clearTimeout(query.t); query.t = setTimeout(load, 200); } });
+      const status = h('select', { onchange: (e) => { filters.status = e.target.value; load(); } }, h('option', { value: '' }, 'Any status'), ['draft', 'in_review', 'approved', 'published', 'deprecated'].map((s) => h('option', { value: s }, s.replace('_', ' '))));
+      const wrap = h('div', {},
+        h('div', { class: 'crumbs' }, "The team's way of working"),
+        h('div', { class: 'row between' }, h('div', {}, h('h1', {}, 'Skill library'), h('p', { class: 'lede' }, 'Shared methods. Clear ownership. One approved version.')),
+          h('div', { class: 'row' }, query, status, can('contributor') ? h('button', { class: 'primary', onclick: () => newSkill(wrap) }, 'New skill') : '')),
+        h('div', { class: 'card' }, list));
+      await load();
+      return wrap;
+    },
+
+    async skill() {
+      const s = await rpc('get_skill', { slug: state.slug });
+      const wrap = h('div', {});
+      const done = { edit: s.has_draft || !!s.latest_version, test: !!(s.checks && s.checks.passed && s.checks.current) || (!s.has_draft && !!s.latest_version), release: !!s.production_version, adoption: false };
+      const stepper = h('div', { class: 'steps' }, STEPS.map(([id, label, sub], i) => h('button', { class: 'step' + (state.step === id ? ' active' : '') + (done[id] ? ' done' : ''), onclick: () => { state.step = id; render(); } }, h('span', { class: 'n' }, done[id] && state.step !== id ? '✓' : String(i + 1).padStart(2, '0')), h('div', {}, h('b', {}, label), h('span', {}, sub)))));
+      const passport = h('div', {});
+      wrap.append(
+        h('div', { class: 'crumbs' }, h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('library'); } }, 'Skill library'), ' / skill workspace'),
+        h('div', { class: 'row between' }, h('div', {}, h('div', { class: 'row' }, h('h1', {}, s.title), badge(s.status), s.production_version ? h('span', { class: 'muted' }, 'production ' + s.production_version) : '', s.channels.canary ? h('span', { class: 'muted' }, 'canary ' + s.channels.canary.version) : ''), h('p', { class: 'lede' }, s.description)),
+          h('button', { class: 'quiet', onclick: guard(async () => { if (passport.innerHTML) { passport.innerHTML = ''; return; } const p = await rpc('passport', { slug: s.slug }); passport.append(passportCard(p)); }) }, 'Skill passport ↗')),
+        passport, stepper);
+      wrap.append(await ({ edit: stepEdit, test: stepTest, release: stepRelease, adoption: stepAdoption })[state.step](s));
+      return wrap;
+    },
+
+    async reviews() {
+      const rows = await rpc('pending_reviews');
+      return h('div', {}, h('div', { class: 'crumbs' }, 'Change room'), h('h1', {}, 'Waiting for review'), h('p', { class: 'lede' }, 'Approval attaches to exact bytes. A submission must be approved by someone other than its author.'),
+        h('div', { class: 'card' }, rows.length ? table([['Skill', (r) => r.skill], ['Proposed', (r) => r.proposed_version], ['By', (r) => r.submitted_by], ['Submitted', (r) => when(r.created_at)], ['Note', (r) => r.note]], rows, (r) => go('skill', r.skill, 'release')) : h('p', { class: 'muted' }, 'Nothing waiting for review.')));
+    },
+
+    async adoption() {
+      const a = await rpc('adoption');
+      return h('div', {}, h('div', { class: 'crumbs' }, 'Evidence'), h('h1', {}, 'Adoption'), h('p', { class: 'lede' }, 'Know where each release landed. Installed is not the same as loaded.'), adoptionPanel(a, true));
+    },
+
+    async rules() {
+      const rows = await rpc('list_rules');
+      const wrap = h('div', {}, h('div', { class: 'crumbs' }, 'Test'), h('h1', {}, 'Check rules'), h('p', { class: 'lede' }, 'Transparent, phrase-based rules that every draft must pass before it can be submitted. They run on top of the built-in checks.'));
+      wrap.append(h('div', { class: 'card' }, rows.length ? table([['Rule', (r) => h('b', {}, r.name)], ['Kind', (r) => r.kind], ['Pattern', (r) => h('span', { class: 'mono' }, '/' + r.pattern + '/')], ['Category', (r) => r.category], ['Rationale', (r) => r.rationale], ['', (r) => (can('maintainer') ? h('button', { class: 'danger', onclick: guard(async () => { if (!confirm(`Remove rule ${r.name}?`)) return; await rpc('remove_rule', { name: r.name }); toast('Rule removed'); render(); }) }, 'Remove') : '')]], rows) : h('p', { class: 'muted' }, 'No team rules yet. The built-in checks (package, sections, placeholders, secrets, portable paths, actionable steps) still apply.')));
+      if (can('maintainer')) {
+        const name = h('input', { placeholder: 'rule-name' }), kind = h('select', {}, ['require', 'forbid', 'section'].map((k) => h('option', { value: k }, k))), pattern = h('input', { placeholder: 'regular expression', style: 'min-width:260px' });
+        const category = h('select', {}, ['team', 'package', 'selection', 'safety', 'authority', 'evidence'].map((k) => h('option', { value: k }, k))), rationale = h('input', { placeholder: 'why (shown with the result)', style: 'min-width:260px' });
+        wrap.append(h('div', { class: 'card' }, h('h3', {}, 'Add a rule'), h('div', { class: 'row' }, name, kind, pattern, category, rationale, h('button', { class: 'primary', onclick: guard(async () => { await rpc('add_rule', { name: name.value.trim(), kind: kind.value, pattern: pattern.value, category: category.value, rationale: rationale.value }); toast('Rule added'); render(); }) }, 'Add'))));
+      }
+      return wrap;
+    },
+
+    async members() {
+      const rows = await rpc('list_members');
+      const wrap = h('div', {}, h('div', { class: 'crumbs' }, 'Workspace'), h('h1', {}, 'Members'));
+      wrap.append(h('div', { class: 'card' }, table([
+        ['Handle', (m) => h('b', {}, m.handle)], ['Name', (m) => m.display_name],
+        ['Role', (m) => (can('owner') ? h('select', { onchange: guard(async (e) => { await rpc('set_role', { handle: m.handle, role: e.target.value }); toast('Role updated'); render(); }) }, ['viewer', 'contributor', 'maintainer', 'owner'].map((r) => h('option', { value: r, selected: r === m.role }, r))) : m.role)],
+        ['Since', (m) => h('span', { class: 'muted small' }, when(m.created_at))],
+        ['', (m) => (can('owner') ? [h('button', { onclick: guard(async () => { const r = await rpc('rotate_token', { handle: m.handle }); prompt(`New token for ${m.handle} (copy it now)`, r.token); }) }, 'New token'), ' ', h('button', { class: 'danger', onclick: guard(async () => { if (!confirm(`Remove ${m.handle}?`)) return; await rpc('remove_member', { handle: m.handle }); toast('Member removed'); render(); }) }, 'Remove')] : '')],
+      ], rows)));
+      if (can('owner')) {
+        const handle = h('input', { placeholder: 'handle' }), name = h('input', { placeholder: 'display name' }), role = h('select', {}, ['viewer', 'contributor', 'maintainer', 'owner'].map((r) => h('option', { value: r, selected: r === 'contributor' }, r)));
+        wrap.append(h('div', { class: 'card' }, h('h3', {}, 'Add member'), h('div', { class: 'row' }, handle, name, role, h('button', { class: 'primary', onclick: guard(async () => { const m = await rpc('add_member', { handle: handle.value.trim(), display_name: name.value.trim() || null, role: role.value }); prompt(`Token for ${m.handle} (shown once — copy it now)`, m.token); render(); }) }, 'Add'))));
+      }
+      return wrap;
+    },
+
+    async activity() {
+      const rows = await rpc('activity', { limit: 100 });
+      return h('div', {}, h('div', { class: 'crumbs' }, 'A history you can follow'), h('h1', {}, 'Activity'), h('div', { class: 'card' }, feed(rows)));
+    },
+  };
+
+  // ------------------------------------------------------------------ steps
+  function newSkill(wrap) {
+    const name = h('input', { placeholder: 'skill-slug', style: 'width:220px' });
+    const ta = h('textarea', {});
+    const tmpl = (n) => `---\nname: ${n || 'my-skill'}\ndescription: Say what this skill does and when an agent should use it.\ntags: []\n---\n\n# ${(n || 'My Skill').split('-').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')}\n\n## When to use this skill\n\nWrite the situations in which an agent should reach for this skill.\n\n## Steps\n\n1. The first concrete action.\n2. The second concrete action.\n\n## Guardrails\n\n- What the skill must never do.\n`;
+    ta.value = tmpl('');
+    name.oninput = () => { ta.value = ta.value.replace(/^name: .*$/m, `name: ${name.value}`); };
+    const card = h('div', { class: 'card' }, h('h2', {}, 'New skill'), h('div', { class: 'row' }, h('label', {}, 'Slug '), name, h('button', { onclick: () => { ta.value = tmpl(name.value); } }, 'Reset template')), h('div', { style: 'margin:12px 0' }, ta),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: guard(async () => { const s = await rpc('create_skill', { content: ta.value }); toast('Draft created'); go('skill', s.slug); }) }, 'Create draft'), h('button', { onclick: () => card.remove() }, 'Cancel')));
+    wrap.insertBefore(card, wrap.children[2]);
+  }
+
+  async function stepEdit(s) {
+    const editable = canEdit(s) && !s.pending_review;
+    const wrap = h('div', {});
+    const head = h('div', { class: 'row between' }, h('div', {}, h('h2', {}, 'Make the next version better.'), h('p', { class: 'lede', style: 'margin:0' }, s.production_version ? `Your draft is a safe place to improve. Production stays on ${s.production_version}.` : 'Draft only. Nothing is released until it is approved and released.')),
+      s.has_draft ? h('button', { class: 'primary', onclick: () => { state.step = 'test'; render(); } }, 'Run checks →') : '');
+    wrap.append(head);
+    if (!s.has_draft) {
+      wrap.append(h('div', { class: 'card' }, s.latest_version ? [h('p', {}, `No draft. The newest approved version is ${s.latest_version}.`), editable ? h('button', { class: 'primary', onclick: guard(async () => { const c = await rpc('get_content', { slug: s.slug, ref: 'latest' }); await rpc('update_draft', { slug: s.slug, content: c.content }); toast('Draft opened from ' + c.version); render(); }) }, 'Start a draft from ' + s.latest_version) : ''] : h('p', { class: 'muted' }, 'No draft.')));
+      if (s.latest_version) { const c = await rpc('get_content', { slug: s.slug, ref: s.production_version ? 'production' : 'latest' }); wrap.append(h('div', { class: 'card' }, h('h3', {}, (c.channel || 'latest approved') + ' · ' + c.version + ' · sha256 ' + short(c.content_hash)), h('pre', {}, c.content))); }
+      return wrap;
+    }
+    const c = await rpc('get_content', { slug: s.slug, ref: 'draft' });
+    const ta = h('textarea', {}); ta.value = c.content;
+    const status = h('span', { class: 'muted small' }, `${s.draft_editor} · ${when(s.draft_updated_at)} · ${c.content.split(/\s+/).filter(Boolean).length} words`);
+    const diffBox = h('div', {});
+    const editor = h('div', { class: 'card' },
+      h('div', { class: 'row between' }, h('div', {}, s.pending_review ? badge('in_review') : h('span', { class: 'badge' }, editable ? 'Ready to edit' : 'Read-only'), ' ', status),
+        h('div', { class: 'row' }, h('button', { onclick: guard(async () => { const d = await rpc('diff', { slug: s.slug }); diffBox.innerHTML = ''; diffBox.append(diffPre(d)); }) }, 'Changes vs ' + (s.production_version ? 'production' : 'latest')),
+          editable ? h('button', { class: 'primary', onclick: guard(async () => { await rpc('update_draft', { slug: s.slug, content: ta.value }); toast('Draft saved'); render(); }) }, 'Save draft') : '',
+          editable && s.latest_version ? h('button', { class: 'danger', onclick: guard(async () => { if (!confirm('Discard the draft?')) return; await rpc('discard_draft', { slug: s.slug }); toast('Draft discarded'); render(); }) }, 'Discard') : '',
+          can('maintainer') && !s.latest_version ? h('button', { class: 'danger', onclick: guard(async () => { if (!confirm('Delete this unapproved skill?')) return; await rpc('delete_skill', { slug: s.slug }); go('library'); }) }, 'Delete') : '')),
+      h('div', { style: 'margin-top:12px' }, editable ? ta : h('pre', {}, c.content)), diffBox,
+      h('p', { class: 'muted small', style: 'margin:10px 0 0' }, s.pending_review ? 'This draft is in review and frozen. Withdraw the review to edit it.' : 'Draft only. Nothing is released. No agent receives this draft.'));
+    wrap.append(editor);
+    return wrap;
+  }
+
+  function diffPre(d) {
+    if (!d.diff) return h('p', { class: 'muted' }, 'No differences.');
+    const pre = h('pre', { class: 'diff' });
+    for (const line of d.diff.split('\n')) pre.append(h('span', { class: line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : line.startsWith('@@') ? 'hunk' : '' }, line + '\n'));
+    return pre;
+  }
+
+  async function stepTest(s) {
+    const wrap = h('div', {});
+    const c = s.checks;
+    const results = h('div', {});
+    const render_results = (report) => {
+      results.innerHTML = '';
+      results.append(h('div', { class: 'row between', style: 'margin-bottom:6px' }, h('span', {}, report.passed ? badge('pass') : badge('fail'), ' ', `${report.total - (report.failed || 0)} of ${report.total} checks passed`), h('span', { class: 'muted small' }, report.run_at ? `run by ${report.run_by} · ${when(report.run_at)}` : 'not recorded')));
+      report.results.forEach((r, i) => results.append(h('div', { class: 'check' }, h('span', { class: 'n' }, i + 1), h('div', {}, h('b', {}, r.name), ' ', h('span', { class: 'muted small' }, r.category), h('div', { class: 'rule' }, r.rule), r.detail ? h('div', { class: 'small' }, r.detail) : ''), badge(r.passed ? 'pass' : 'fail'))));
+    };
+    wrap.append(h('div', { class: 'row between' }, h('div', {}, h('h2', {}, 'Rehearse before you release.'), h('p', { class: 'lede', style: 'margin:0' }, 'Local text checks against the exact draft bytes. No model or real agent is called.')),
+      s.has_draft && canEdit(s) && !s.pending_review ? h('button', { class: 'primary', onclick: guard(async () => { const report = await rpc('run_checks', { slug: s.slug }); report.run_at = new Date().toISOString(); render_results(report); toast(report.passed ? 'All checks passed' : `${report.failed} check(s) failed`); }) }, c && c.current ? 'Run checks again' : 'Run checks') : ''));
+    if (!s.has_draft) { wrap.append(h('div', { class: 'card' }, h('p', { class: 'muted' }, 'No draft to check. Start one in Edit.'))); return wrap; }
+    const card = h('div', { class: 'card' }, results);
+    if (c && c.current) {
+      const draft = await rpc('get_content', { slug: s.slug, ref: 'draft' });
+      const report = await rpc('check_content', { content: draft.content });
+      render_results({ ...report, run_by: c.run_by, run_at: c.run_at });
+    } else if (c) { results.append(h('div', { class: 'note warn' }, 'Draft changed since the last run. Previous checks no longer apply; run them again.')); }
+    else { results.append(h('p', { class: 'muted' }, 'No check run recorded for this draft yet.')); }
+    wrap.append(h('div', { class: 'grid2' }, card, h('div', { class: 'card' }, h('h3', {}, 'What a pass means'), h('p', { class: 'small' }, 'A passing check is specific evidence about these bytes: the rule found what it looked for. It is not a behavioural evaluation and not proof that an agent will follow the skill.'), h('p', { class: 'small' }, 'Team rules are listed under ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('rules'); } }, 'Check rules'), '.'), c && c.current && c.passed ? h('button', { class: 'primary', onclick: () => { state.step = 'release'; render(); } }, 'Review release →') : '')));
+    return wrap;
+  }
+
+  async function stepRelease(s) {
+    const wrap = h('div', {}, h('h2', {}, 'A deliberate step into production.'), h('p', { class: 'lede' }, 'Review the change. Approve exact bytes. Start with a small group.'));
+    const hist = await rpc('release_history', { slug: s.slug });
+    const left = h('div', {}), right = h('div', {});
+    const c = s.checks;
+    // Submission / review card
+    if (s.pending_review) {
+      const r = s.pending_review;
+      const mine = r.submitted_by === state.me.handle;
+      left.append(h('div', { class: 'card' }, h('h3', {}, 'Review candidate'), h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, `${s.title} ${r.proposed_version || ''}`), badge('in_review')),
+        kv([['Submitted by', r.submitted_by], ['Bump', r.bump], ['Note', r.note || '—'], ['Content identity', h('span', { class: 'mono' }, short(r.content_hash))], ['Submitted', when(r.created_at)]]),
+        h('div', { class: 'row', style: 'margin-top:14px' },
+          can('maintainer') && !mine ? h('button', { class: 'primary', onclick: guard(async () => { const comment = ask('Comment (optional)', ''); if (comment === null) return; const rel = confirm('Also release this version to the canary channel now?\n\nOK = approve and release to canary. Cancel = approve only.'); await rpc('approve', { slug: s.slug, comment, release: rel ? 'canary' : null }); toast('Approved'); render(); }) }, 'Approve exact bytes') : '',
+          can('maintainer') && mine ? h('span', { class: 'note warn' }, 'You submitted this. A different maintainer must approve it.') : '',
+          can('maintainer') ? h('button', { class: 'danger', onclick: guard(async () => { const reason = ask('Reason for rejecting'); if (!reason) return; await rpc('reject', { slug: s.slug, reason }); toast('Rejected'); render(); }) }, 'Reject') : '',
+          mine || can('maintainer') ? h('button', { onclick: guard(async () => { await rpc('withdraw_review', { slug: s.slug }); toast('Withdrawn'); render(); }) }, 'Withdraw') : ''),
+        h('p', { class: 'muted small' }, 'Approval stays with these bytes. Editing after approval starts a new draft and a new review.')));
+    } else if (s.has_draft && canEdit(s)) {
+      const ready = c && c.current && c.passed;
+      left.append(h('div', { class: 'card' }, h('h3', {}, 'Submit for review'), ready ? h('div', { class: 'row' }, h('select', { id: 'bump' }, ['minor', 'patch', 'major'].map((b) => h('option', { value: b }, b + ' bump'))), h('input', { id: 'note', placeholder: 'What changes, in one line', style: 'flex:1;min-width:220px' }),
+        h('button', { class: 'primary', onclick: guard(async () => { const r = await rpc('submit_review', { slug: s.slug, bump: $('#bump', left).value, note: $('#note', left).value }); toast('Submitted as ' + r.proposed_version); render(); }) }, 'Submit')) : h('div', { class: 'note warn' }, 'Checks must pass on the current draft before it can be submitted. ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); state.step = 'test'; render(); } }, 'Go to checks'))));
+    }
+    // Release candidate: newest approved version not yet on production
+    const latest = hist.versions[0];
+    if (latest) {
+      const onProd = hist.channels.production && hist.channels.production.version === latest.version;
+      const onCanary = hist.channels.canary && hist.channels.canary.version === latest.version;
+      left.append(h('div', { class: 'card' }, h('h3', {}, onProd ? 'Production release' : 'Release candidate'), h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, `${s.title} ${latest.version}`), onProd ? badge('published') : badge('approved')),
+        kv([['What changes', latest.note || '—'], ['Author', latest.author], ['Approval owner', latest.approved_by], ['Approved', when(latest.created_at)], ['Target channel', `production · currently ${hist.channels.production ? hist.channels.production.version : 'nothing'}`], ['Canary', hist.channels.canary ? hist.channels.canary.version : 'nothing'], ['Content identity', h('span', { class: 'mono' }, latest.content_hash)]]),
+        can('maintainer') && s.lifecycle !== 'deprecated' ? h('div', { class: 'row', style: 'margin-top:14px' },
+          !onCanary && !onProd ? h('button', { onclick: guard(async () => { await rpc('release', { slug: s.slug, version: latest.version, channel: 'canary' }); toast('Released to canary'); render(); }) }, 'Start canary') : '',
+          !onProd ? h('button', { class: 'primary', onclick: guard(async () => { if (!confirm(`Release ${latest.version} to production? Every environment following production will pick it up on its next sync.`)) return; await rpc('release', { slug: s.slug, version: latest.version, channel: 'production' }); toast('Released to production'); render(); }) }, 'Release to the team') : '',
+          hist.channels.production && hist.events.filter((e) => e.channel === 'production').length > 1 ? h('button', { class: 'danger', onclick: guard(async () => { const reason = ask('Reason for rolling back production', ''); if (reason === null) return; const r = await rpc('rollback', { slug: s.slug, channel: 'production', reason }); toast(`Production is back on ${r.version}`); render(); }) }, 'Roll back production') : '') : '',
+        h('p', { class: 'muted small' }, 'Rollback changes the channel target. It does not erase downloaded files; environments update on their next sync.')));
+    }
+    // Lifecycle
+    if (can('maintainer') && s.latest_version) left.append(h('div', { class: 'row' }, s.lifecycle === 'deprecated' ? h('button', { onclick: guard(async () => { await rpc('restore', { slug: s.slug }); toast('Restored'); render(); }) }, 'Restore skill') : h('button', { class: 'danger', onclick: guard(async () => { const reason = ask('Reason for deprecating (optional)', ''); if (reason === null) return; await rpc('deprecate', { slug: s.slug, reason }); toast('Deprecated'); render(); }) }, 'Deprecate skill'), h('button', { onclick: guard(async () => { const handle = ask('New owner handle', s.owner); if (handle && handle !== s.owner) { await rpc('set_owner', { slug: s.slug, handle }); toast('Owner changed'); render(); } }) }, 'Transfer owner')));
+    // Right column: a small safe start + history
+    right.append(h('div', { class: 'card' }, h('h3', {}, 'A small, safe start'), h('ol', { style: 'padding-left:18px;margin:0' }, h('li', {}, h('b', {}, 'Review'), h('div', { class: 'small muted' }, 'Approve an immutable snapshot.')), h('li', {}, h('b', {}, 'Canary'), h('div', { class: 'small muted' }, 'Release to the canary channel; a few environments follow it.')), h('li', {}, h('b', {}, 'Team'), h('div', { class: 'small muted' }, 'Release to production, then inspect exceptions in Adoption.')))));
+    right.append(h('div', { class: 'card' }, h('h3', {}, 'Release history'), hist.events.length ? h('div', { class: 'list' }, hist.events.map((e) => h('div', { class: 'item small' }, h('b', {}, `${e.kind} · ${e.channel} → ${e.version}`), e.previous_version ? h('span', { class: 'muted' }, ` (was ${e.previous_version})`) : '', h('div', { class: 'muted' }, `${e.by} · ${when(e.at)}`), e.reason ? h('div', {}, e.reason) : ''))) : h('p', { class: 'muted small' }, 'No releases yet.'),
+      hist.versions.length ? [h('h3', { style: 'margin-top:14px' }, 'Approved versions'), h('div', { class: 'list' }, hist.versions.map((v) => h('div', { class: 'item small', style: 'cursor:pointer', onclick: guard(async () => { const cc = await rpc('get_content', { slug: s.slug, ref: v.version }); const box = h('div', { class: 'card' }, h('h3', {}, `version ${v.version} · sha256 ${v.content_hash}`), h('pre', {}, cc.content)); left.append(box); box.scrollIntoView({ behavior: 'smooth' }); }) }, h('b', {}, v.version), ' ', h('span', { class: 'mono muted' }, short(v.content_hash)), h('div', { class: 'muted' }, `${v.author}, approved by ${v.approved_by} · ${when(v.created_at)}`))))] : ''));
+    wrap.append(h('div', { class: 'grid2' }, left, right));
+    return wrap;
+  }
+
+  async function stepAdoption(s) {
+    const a = await rpc('adoption', { slug: s.slug });
+    return h('div', {}, h('h2', {}, 'Know where the change landed.'), h('p', { class: 'lede' }, `${s.production_version ? 'Production targets version ' + s.production_version + '. ' : 'Nothing is released to production yet. '}Installed is not the same as loaded.`), adoptionPanel(a, false),
+      h('div', { class: 'card' }, h('h3', {}, 'Send receipts from environments'), h('pre', {}, `skillcurrent install ${s.slug}                     # installed\nskillcurrent status                              # verified (re-hashes the file)\nskillcurrent report ${s.slug} loaded             # from a tool hook\nskillcurrent report ${s.slug} task_tested        # from a fixture task`)));
+  }
+
+  function adoptionPanel(a, showSkill) {
+    const s = a.summary;
+    const rows = a.environments;
+    const filt = { attention: false };
+    const body = h('div', {});
+    const draw = () => { body.innerHTML = ''; const list = filt.attention ? rows.filter((e) => e.needs_attention) : rows; body.append(list.length ? table([
+      ['Environment', (e) => [h('b', {}, e.environment), h('div', { class: 'small muted' }, e.handle)]], ['Runtime', (e) => e.runtime], ...(showSkill ? [['Skill', (e) => h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); go('skill', e.slug, 'adoption'); } }, e.slug)]] : []),
+      ['Version', (e) => h('span', { class: 'mono' }, e.version)], ['Channel has', (e) => h('span', { class: 'mono' }, e.target_version || '—')], ['Evidence', (e) => badge(e.evidence)], ['State', (e) => badge(e.state)], ['Last seen', (e) => h('span', { class: 'small muted' }, when(e.last_seen))],
+    ], list) : h('p', { class: 'muted' }, 'No environments recorded yet.')); };
+    draw();
+    return h('div', {},
+      h('div', { class: 'tiles' }, tile('Environments', s.environments, undefined, 'recorded installs'), tile('Installed', s.installed, s.environments, 'approved bytes written'), tile('Verified', s.verified, s.environments, 're-hashed and matched'), tile('Loaded', s.loaded, s.environments, 'reported by a runtime'), tile('Task-tested', s.task_tested, s.environments, 'named fixture passed')),
+      h('p', { class: 'small muted' }, h('b', {}, 'Evidence, not a blanket guarantee.'), ' A receipt reports a specific event. It cannot prove that an agent always follows a skill.'),
+      h('div', { class: 'card' }, h('div', { class: 'row', style: 'margin-bottom:8px' }, h('button', { class: !filt.attention ? 'primary' : '', onclick: (e) => { filt.attention = false; draw(); e.target.parentNode.querySelectorAll('button').forEach((b, i) => b.classList.toggle('primary', i === 0)); } }, `All environments ${s.environments}`), h('button', { class: filt.attention ? 'primary' : '', onclick: (e) => { filt.attention = true; draw(); e.target.parentNode.querySelectorAll('button').forEach((b, i) => b.classList.toggle('primary', i === 1)); } }, `Needs attention ${s.needs_attention}`)), body));
+  }
+
+  function passportCard(p) {
+    return h('div', { class: 'card' }, h('h3', {}, 'Skill passport'), kv([['Canonical ID', h('span', { class: 'mono' }, p.canonical_id)], ['Owner', p.owner], ['Status', badge(p.status)], ['Newest approved', p.latest_version ? `${p.latest_version} · ${short(p.latest_hash)}` : '—'],
+      ...Object.entries(p.channels).map(([k, v]) => [k[0].toUpperCase() + k.slice(1), h('span', { class: 'mono' }, `${v.version} · ${short(v.content_hash)}`)]),
+      ['Environments', `${p.environments.environments} (current ${p.environments.current}, needs attention ${p.environments.needs_attention})`], ['Team rules', p.rules.join(', ') || 'built-in checks only'], ['Tags', tags(p.tags)]]));
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

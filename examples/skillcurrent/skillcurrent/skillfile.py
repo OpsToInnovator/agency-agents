@@ -1,7 +1,7 @@
 """Parsing, validation and rendering of ``SKILL.md`` files.
 
 A skill file is Markdown with YAML front matter. ``name`` and ``description``
-are required by every Agent-Skills host; Team Skills additionally understands
+are required by every Agent-Skills host; SkillCurrent additionally understands
 ``version`` (stamped on publish), ``owner`` and ``tags``. Any other keys
 (``license``, ``allowed-tools``, ``metadata``, ...) are preserved verbatim.
 """

@@ -1,13 +1,18 @@
-"""Install published skills into the directories AI coding tools read them
+"""Install released skills into the directories AI coding tools read them
 from, and keep those copies in sync with the team catalog.
 
 Each target is a directory that holds one ``<skill>/SKILL.md`` per skill,
 which is the Agent-Skills layout shared by Claude Code, Antigravity, Osaurus,
 Codex and others. Global targets live under the member's home directory;
 project targets live under the current project.
+
+An *environment* is a member on a host with one target. Every install and
+every successful verification writes a receipt, which is what the team's
+adoption view is built from.
 """
 
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +21,7 @@ from .errors import Invalid, NotFound
 from .session import require_identity
 
 SKILL_FILE = "SKILL.md"
+DEFAULT_CHANNEL = "production"
 
 
 @dataclass(frozen=True)
@@ -31,7 +37,7 @@ class Target:
                 raise Invalid("target 'custom' needs a directory (--dir)")
             return Path(custom_dir).expanduser().resolve()
         if self.scope == "global":
-            root = Path(home) if home else Path(os.environ.get("TEAMSKILLS_HOME") or Path.home())
+            root = Path(home) if home else Path(os.environ.get("SKILLCURRENT_HOME") or Path.home())
             return (root / self.base[2:]).resolve()
         root = Path(project) if project else Path.cwd()
         return (root / self.base).resolve()
@@ -50,7 +56,7 @@ TARGETS: dict[str, Target] = {
     )
 }
 DEFAULT_TARGET = "claude-code"
-STATES = ("current", "outdated", "modified", "missing", "deprecated")
+STATES = ("current", "outdated", "modified", "missing", "deprecated", "unreleased")
 
 
 def target(target_id: str) -> Target:
@@ -58,6 +64,10 @@ def target(target_id: str) -> Target:
         return TARGETS[target_id]
     except KeyError:
         raise Invalid(f"unknown target {target_id!r}; choose one of {', '.join(TARGETS)}") from None
+
+
+def default_host() -> str:
+    return os.environ.get("SKILLCURRENT_HOST") or socket.gethostname().split(".")[0]
 
 
 def _read(path: Path) -> str | None:
@@ -68,12 +78,13 @@ def _read(path: Path) -> str | None:
 
 
 class Installer:
-    def __init__(self, session, home: Path | None = None, project: Path | None = None, custom_dir: str | Path | None = None):
+    def __init__(self, session, home: Path | None = None, project: Path | None = None, custom_dir: str | Path | None = None, host: str | None = None):
         require_identity(session)
         self.session = session
         self.home = home
         self.project = project
         self.custom_dir = custom_dir
+        self.host = host if host is not None else default_host()
 
     def _dir(self, target_id: str) -> Path:
         return target(target_id).directory(self.home, self.project, self.custom_dir)
@@ -81,19 +92,19 @@ class Installer:
     def path_for(self, slug: str, target_id: str) -> Path:
         return self._dir(target_id) / slug / SKILL_FILE
 
-    def install(self, slug: str, target_id: str = DEFAULT_TARGET, ref: str | None = None) -> dict:
-        """Write the published skill (or ``ref``) to the target and record it."""
-        content = self.session.call("get_content", slug=slug, ref=ref)
+    def install(self, slug: str, target_id: str = DEFAULT_TARGET, ref: str | None = None, channel: str = DEFAULT_CHANNEL) -> dict:
+        """Write the skill's release on ``channel`` (or an explicit ``ref``) to the target and record it."""
+        content = self.session.call("get_content", slug=slug, ref=ref or channel)
         path = self.path_for(slug, target_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content["content"], encoding="utf-8")
         self.session.call(
             "record_install", slug=slug, version=content["version"], target=target_id,
-            path=str(path), content_hash=content["content_hash"],
+            path=str(path), content_hash=content["content_hash"], host=self.host, channel=channel,
         )
         return {
-            "slug": slug, "version": content["version"], "target": target_id, "path": str(path),
-            "deprecated": content["lifecycle"] == "deprecated",
+            "slug": slug, "version": content["version"], "target": target_id, "path": str(path), "host": self.host,
+            "channel": channel, "content_hash": content["content_hash"], "deprecated": content["lifecycle"] == "deprecated",
         }
 
     def uninstall(self, slug: str, target_id: str = DEFAULT_TARGET) -> dict:
@@ -106,14 +117,18 @@ class Installer:
                 path.parent.rmdir()  # only if empty
             except OSError:
                 pass
-        result = self.session.call("remove_install", slug=slug, target=target_id)
+        result = self.session.call("remove_install", slug=slug, target=target_id, host=self.host)
         if not removed_file and not result["removed"]:
-            raise NotFound(f"{slug!r} is not installed for target {target_id!r}")
+            raise NotFound(f"{slug!r} is not installed for target {target_id!r} on this host")
         return {"slug": slug, "target": target_id, "removed_file": removed_file, "removed_record": result["removed"]}
 
-    def status(self, target_id: str | None = None) -> list[dict]:
-        """Compare every recorded install for the current member with disk and the catalog."""
-        rows = self.session.call("list_installs")
+    def status(self, target_id: str | None = None, report: bool = True) -> list[dict]:
+        """Compare every recorded install on this host with disk and with the channel it follows.
+
+        A copy whose bytes still match what was installed sends a ``verified``
+        receipt, so the team's adoption view shows it was seen recently.
+        """
+        rows = self.session.call("list_installs", host=self.host)
         out = []
         for row in rows:
             if target_id and row["target"] != target_id:
@@ -122,34 +137,43 @@ class Installer:
                 continue
             path = Path(row["path"])
             on_disk = _read(path)
+            intact = on_disk is not None and skillfile.content_hash(on_disk) == row["content_hash"]
             if on_disk is None:
                 state = "missing"
-            elif skillfile.content_hash(on_disk) != row["content_hash"]:
+            elif not intact:
                 state = "modified"
             elif row["lifecycle"] == "deprecated":
                 state = "deprecated"
-            elif row["latest_version"] and row["latest_version"] != row["version"]:
+            elif row["target_version"] is None:
+                state = "unreleased"
+            elif row["target_version"] != row["version"]:
                 state = "outdated"
             else:
                 state = "current"
+            if intact and report:
+                self.session.call("report", slug=row["slug"], event="verified", target=row["target"], host=self.host, version=row["version"], content_hash=row["content_hash"])
             out.append(
                 {
                     "slug": row["slug"], "target": row["target"], "path": row["path"], "installed": row["version"],
-                    "latest": row["latest_version"], "state": state, "lifecycle": row["lifecycle"],
+                    "channel": row["channel"], "target_version": row["target_version"], "state": state, "lifecycle": row["lifecycle"],
                 }
             )
         return out
 
     def sync(self, target_id: str | None = None, force: bool = False) -> list[dict]:
-        """Reinstall outdated or missing skills. Locally modified copies are kept unless ``force``."""
+        """Bring installs back to what their channel serves. Locally modified copies are kept unless ``force``."""
         actions = []
         for item in self.status(target_id):
             state = item["state"]
-            if state == "current" or state == "deprecated":
+            if state in ("current", "deprecated", "unreleased"):
                 actions.append({**item, "action": "kept"})
             elif state == "modified" and not force:
                 actions.append({**item, "action": "skipped", "reason": "local changes; use --force to overwrite"})
             else:
-                result = self.install(item["slug"], item["target"])
+                result = self.install(item["slug"], item["target"], channel=item["channel"])
                 actions.append({**item, "action": "updated", "installed": result["version"]})
         return actions
+
+    def report(self, slug: str, event: str, target_id: str = DEFAULT_TARGET, detail: str = "") -> dict:
+        """Send a ``loaded`` or ``task_tested`` receipt for an install on this host (for tool hooks and test runners)."""
+        return self.session.call("report", slug=slug, event=event, target=target_id, host=self.host, detail=detail)

@@ -1,4 +1,4 @@
-from teamskills import importer
+from skillcurrent import importer
 
 AGENT = """---
 name: Backend Architect

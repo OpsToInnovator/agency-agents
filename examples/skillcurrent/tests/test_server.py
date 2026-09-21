@@ -4,9 +4,9 @@ import urllib.request
 
 import pytest
 
-from teamskills.errors import Forbidden, Invalid, Unauthorized
-from teamskills.server import make_server
-from teamskills.session import RemoteSession
+from skillcurrent.errors import Forbidden, Invalid, Unauthorized
+from skillcurrent.server import make_server
+from skillcurrent.session import RemoteSession
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def test_health_and_ui(server):
     assert health["ok"] and health["auth"] == "token" and "approve" in health["ops"]
     with urllib.request.urlopen(url + "/") as resp:
         assert resp.headers["Content-Type"].startswith("text/html")
-        assert b"Team Skills" in resp.read()
+        assert b"SkillCurrent" in resp.read()
 
 
 def test_rpc_auth_and_errors(server):
@@ -59,7 +59,7 @@ def test_rpc_auth_and_errors(server):
 
 
 def test_remote_session_end_to_end(server, tmp_path):
-    from teamskills.installer import Installer
+    from skillcurrent.installer import Installer
     from tests.conftest import skill_text
 
     _, url, tokens = server
@@ -67,10 +67,11 @@ def test_remote_session_end_to_end(server, tmp_path):
     cai.whoami()
     assert cai.team == "acme" and cai.actor == "cai"
     cai.call("create_skill", content=skill_text())
+    assert cai.call("run_checks", slug="release-notes")["passed"]
     cai.call("submit_review", slug="release-notes", note="hello")
     with pytest.raises(Forbidden):
         cai.call("approve", slug="release-notes")
-    assert ben.call("approve", slug="release-notes")["latest_version"] == "1.0.0"
+    assert ben.call("approve", slug="release-notes", release="production")["production_version"] == "1.0.0"
     with pytest.raises(Invalid):
         dee.call("list_skills", status="nah")
     inst = Installer(dee, home=tmp_path)
@@ -86,7 +87,7 @@ def test_no_auth_mode(service, team):
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
         assert post(url, {"op": "whoami"})[0] == 401
-        status, payload = post(url, {"op": "whoami"}, {"X-TeamSkills-Team": "acme", "X-TeamSkills-User": "ana"})
+        status, payload = post(url, {"op": "whoami"}, {"X-SkillCurrent-Team": "acme", "X-SkillCurrent-User": "ana"})
         assert status == 200 and payload["result"]["member"]["role"] == "owner"
         session = RemoteSession(url, team="acme", actor="ben")
         assert session.call("whoami")["member"]["handle"] == "ben"

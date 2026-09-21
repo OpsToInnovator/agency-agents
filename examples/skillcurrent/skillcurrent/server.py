@@ -6,7 +6,7 @@
 
 Authentication is a member token (``Authorization: Bearer ts_...``), issued
 when a member is added. With ``--no-auth`` (demos, trusted networks) the
-caller names itself with ``X-TeamSkills-Team`` and ``X-TeamSkills-User``.
+caller names itself with ``X-SkillCurrent-Team`` and ``X-SkillCurrent-User``.
 """
 
 import json
@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__
-from .errors import Forbidden, Invalid, TeamSkillsError, Unauthorized
+from .errors import Forbidden, Invalid, SkillCurrentError, Unauthorized
 from .service import RPC_OPS, Service
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -22,7 +22,7 @@ MAX_BODY = 4 * 1024 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"TeamSkills/{__version__}"
+    server_version = f"SkillCurrent/{__version__}"
     service: Service
     no_auth: bool = False
 
@@ -56,11 +56,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise Unauthorized("invalid or revoked token")
             return found
         if self.no_auth:
-            team = self.headers.get("X-TeamSkills-Team", "").strip()
-            user = self.headers.get("X-TeamSkills-User", "").strip()
+            team = self.headers.get("X-SkillCurrent-Team", "").strip()
+            user = self.headers.get("X-SkillCurrent-User", "").strip()
             if team and user:
                 return team, user
-            raise Unauthorized("send X-TeamSkills-Team and X-TeamSkills-User headers (server runs with --no-auth)")
+            raise Unauthorized("send X-SkillCurrent-Team and X-SkillCurrent-User headers (server runs with --no-auth)")
         raise Unauthorized("send an 'Authorization: Bearer <token>' header")
 
     # -- routes ------------------------------------------------------------
@@ -103,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
             except TypeError as exc:
                 raise Invalid(f"bad arguments for {op}: {exc}") from None
             self._send_json(200, {"ok": True, "result": result})
-        except TeamSkillsError as exc:
+        except SkillCurrentError as exc:
             self._send_json(exc.http_status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
         except Exception as exc:  # pragma: no cover - defensive; never leak a traceback to clients
             self._send_json(500, {"ok": False, "error": {"code": "error", "message": f"internal error: {type(exc).__name__}"}})

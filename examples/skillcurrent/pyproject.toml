@@ -1,7 +1,7 @@
 [project]
-name = "teamskills"
+name = "skillcurrent"
 version = "0.1.0"
-description = "Shared skill management for teams: one reviewed catalog of SKILL.md files, installed and kept in sync across every member's AI coding tools"
+description = "SkillCurrent: shared skill management for teams. One reviewed catalog of SKILL.md files, taken from draft through checks, approval of exact bytes and channel releases to per-environment adoption receipts"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -9,17 +9,17 @@ dependencies = []
 dev = ["pytest>=8"]
 
 [project.scripts]
-teamskills = "teamskills.cli:main"
+skillcurrent = "skillcurrent.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["teamskills*"]
+include = ["skillcurrent*"]
 
 [tool.setuptools.package-data]
-teamskills = ["web/*.html"]
+skillcurrent = ["web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

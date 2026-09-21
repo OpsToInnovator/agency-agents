@@ -1,6 +1,6 @@
 import pytest
 
-from teamskills import frontmatter as fm
+from skillcurrent import frontmatter as fm
 
 
 def test_split_and_parse_scalars_lists_and_mappings():

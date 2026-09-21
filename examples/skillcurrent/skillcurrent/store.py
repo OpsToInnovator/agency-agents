@@ -69,18 +69,76 @@ CREATE TABLE IF NOT EXISTS reviews (
     decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS reviews_pending ON reviews(skill_id, decision);
+CREATE TABLE IF NOT EXISTS channels (
+    id INTEGER PRIMARY KEY,
+    skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    version_id INTEGER NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+    set_by TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    UNIQUE(skill_id, channel)
+);
+CREATE TABLE IF NOT EXISTS channel_history (
+    id INTEGER PRIMARY KEY,
+    skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    version TEXT NOT NULL,
+    previous_version TEXT,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    set_by TEXT NOT NULL,
+    set_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY,
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'team',
+    rationale TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(team_id, name)
+);
+CREATE TABLE IF NOT EXISTS check_runs (
+    id INTEGER PRIMARY KEY,
+    skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    results TEXT NOT NULL,
+    run_by TEXT NOT NULL,
+    run_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS check_runs_skill ON check_runs(skill_id, id);
 CREATE TABLE IF NOT EXISTS installs (
     id INTEGER PRIMARY KEY,
     team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     handle TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
     skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
     version TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'production',
     target TEXT NOT NULL,
     path TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     installed_at TEXT NOT NULL,
-    UNIQUE(team_id, handle, skill_id, target)
+    UNIQUE(team_id, handle, host, skill_id, target)
 );
+CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY,
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    handle TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL,
+    skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    version TEXT NOT NULL,
+    event TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS receipts_env ON receipts(team_id, skill_id, handle, host, target, id);
 CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY,
     team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
@@ -121,7 +179,19 @@ class Store:
         self.conn.execute("PRAGMA journal_mode = WAL") if self.path != ":memory:" else None
         self._lock = threading.RLock()
         self._depth = 0
+        self._migrate()
         self.conn.executescript(SCHEMA)
+
+    def _migrate(self) -> None:
+        """Bring a database created by an earlier layout up to date.
+
+        Only the ``installs`` table has changed shape (it gained ``host`` and
+        ``channel``); install records from the old layout are dropped and
+        members simply run ``install`` again.
+        """
+        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(installs)").fetchall()]
+        if cols and "host" not in cols:
+            self.conn.execute("DROP TABLE installs")
 
     def close(self) -> None:
         self.conn.close()
@@ -264,37 +334,121 @@ class Store:
             (decision, decided_by, reason, now(), review_id),
         )
 
-    # -- installs --------------------------------------------------------
-    def upsert_install(self, team_id: int, handle: str, skill_id: int, version: str, target: str, path: str, content_hash: str) -> None:
-        self.run(
-            "INSERT INTO installs (team_id, handle, skill_id, version, target, path, content_hash, installed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(team_id, handle, skill_id, target) DO UPDATE SET"
-            " version = excluded.version, path = excluded.path, content_hash = excluded.content_hash, installed_at = excluded.installed_at",
-            (team_id, handle, skill_id, version, target, path, content_hash, now()),
+    # -- channels --------------------------------------------------------
+    def channel(self, skill_id: int, channel: str) -> dict | None:
+        return self.one(
+            "SELECT c.*, v.version, v.content_hash, v.created_at AS published_at FROM channels c JOIN versions v ON v.id = c.version_id"
+            " WHERE c.skill_id = ? AND c.channel = ?",
+            (skill_id, channel),
         )
 
-    def installs(self, team_id: int, handle: str | None = None) -> list[dict]:
-        sql = (
-            "SELECT i.*, s.slug AS skill_slug FROM installs i JOIN skills s ON s.id = i.skill_id WHERE i.team_id = ?"
+    def channels(self, skill_id: int) -> dict[str, dict]:
+        rows = self.all(
+            "SELECT c.*, v.version, v.content_hash, v.created_at AS published_at FROM channels c JOIN versions v ON v.id = c.version_id"
+            " WHERE c.skill_id = ? ORDER BY c.channel",
+            (skill_id,),
         )
+        return {r["channel"]: r for r in rows}
+
+    def set_channel(self, skill_id: int, channel: str, version_id: int, version: str, previous: str | None, kind: str, reason: str, set_by: str) -> None:
+        with self.tx():
+            self.run(
+                "INSERT INTO channels (skill_id, channel, version_id, set_by, set_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(skill_id, channel) DO UPDATE SET version_id = excluded.version_id, set_by = excluded.set_by, set_at = excluded.set_at",
+                (skill_id, channel, version_id, set_by, now()),
+            )
+            self.run(
+                "INSERT INTO channel_history (skill_id, channel, version, previous_version, kind, reason, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (skill_id, channel, version, previous, kind, reason, set_by, now()),
+            )
+
+    def channel_history(self, skill_id: int, channel: str | None = None) -> list[dict]:
+        sql = "SELECT * FROM channel_history WHERE skill_id = ?"
+        params: tuple = (skill_id,)
+        if channel:
+            sql += " AND channel = ?"
+            params += (channel,)
+        return self.all(sql + " ORDER BY id DESC", params)
+
+    # -- rules and check runs --------------------------------------------
+    def insert_rule(self, team_id: int, name: str, kind: str, pattern: str, category: str, rationale: str, created_by: str) -> int:
+        return self.run(
+            "INSERT INTO rules (team_id, name, kind, pattern, category, rationale, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (team_id, name, kind, pattern, category, rationale, created_by, now()),
+        )
+
+    def rules(self, team_id: int) -> list[dict]:
+        return self.all("SELECT * FROM rules WHERE team_id = ? ORDER BY id", (team_id,))
+
+    def rule(self, team_id: int, name: str) -> dict | None:
+        return self.one("SELECT * FROM rules WHERE team_id = ? AND name = ?", (team_id, name))
+
+    def delete_rule(self, rule_id: int) -> None:
+        self.run("DELETE FROM rules WHERE id = ?", (rule_id,))
+
+    def insert_check_run(self, skill_id: int, content_hash: str, passed: bool, results: list, run_by: str) -> int:
+        return self.run(
+            "INSERT INTO check_runs (skill_id, content_hash, passed, results, run_by, run_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (skill_id, content_hash, int(passed), json.dumps(results), run_by, now()),
+        )
+
+    def latest_check_run(self, skill_id: int) -> dict | None:
+        row = self.one("SELECT * FROM check_runs WHERE skill_id = ? ORDER BY id DESC LIMIT 1", (skill_id,))
+        if row:
+            row["results"] = json.loads(row["results"])
+            row["passed"] = bool(row["passed"])
+        return row
+
+    # -- installs --------------------------------------------------------
+    def upsert_install(self, team_id: int, handle: str, host: str, skill_id: int, version: str, channel: str, target: str, path: str, content_hash: str) -> None:
+        self.run(
+            "INSERT INTO installs (team_id, handle, host, skill_id, version, channel, target, path, content_hash, installed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(team_id, handle, host, skill_id, target) DO UPDATE SET"
+            " version = excluded.version, channel = excluded.channel, path = excluded.path, content_hash = excluded.content_hash, installed_at = excluded.installed_at",
+            (team_id, handle, host, skill_id, version, channel, target, path, content_hash, now()),
+        )
+
+    def installs(self, team_id: int, handle: str | None = None, host: str | None = None, skill_id: int | None = None) -> list[dict]:
+        sql = "SELECT i.*, s.slug AS skill_slug FROM installs i JOIN skills s ON s.id = i.skill_id WHERE i.team_id = ?"
         params: tuple = (team_id,)
         if handle is not None:
             sql += " AND i.handle = ?"
             params += (handle,)
-        return self.all(sql + " ORDER BY i.handle, s.slug, i.target", params)
+        if host is not None:
+            sql += " AND i.host = ?"
+            params += (host,)
+        if skill_id is not None:
+            sql += " AND i.skill_id = ?"
+            params += (skill_id,)
+        return self.all(sql + " ORDER BY i.handle, i.host, s.slug, i.target", params)
 
-    def delete_install(self, team_id: int, handle: str, skill_id: int, target: str) -> int:
+    def delete_install(self, team_id: int, handle: str, host: str, skill_id: int, target: str) -> int:
         with self.tx() as c:
             cur = c.execute(
-                "DELETE FROM installs WHERE team_id = ? AND handle = ? AND skill_id = ? AND target = ?",
-                (team_id, handle, skill_id, target),
+                "DELETE FROM installs WHERE team_id = ? AND handle = ? AND host = ? AND skill_id = ? AND target = ?",
+                (team_id, handle, host, skill_id, target),
             )
             return cur.rowcount
 
     def install_counts(self, team_id: int) -> dict[int, int]:
         rows = self.all("SELECT skill_id, COUNT(*) AS n FROM installs WHERE team_id = ? GROUP BY skill_id", (team_id,))
         return {r["skill_id"]: r["n"] for r in rows}
+
+    # -- receipts --------------------------------------------------------
+    def insert_receipt(self, team_id: int, handle: str, host: str, target: str, skill_id: int, version: str, event: str, content_hash: str, detail: str) -> int:
+        return self.run(
+            "INSERT INTO receipts (team_id, handle, host, target, skill_id, version, event, content_hash, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (team_id, handle, host, target, skill_id, version, event, content_hash, detail, now()),
+        )
+
+    def receipts(self, team_id: int, skill_id: int | None = None, limit: int = 500) -> list[dict]:
+        sql = "SELECT r.*, s.slug AS skill_slug FROM receipts r JOIN skills s ON s.id = r.skill_id WHERE r.team_id = ?"
+        params: tuple = (team_id,)
+        if skill_id is not None:
+            sql += " AND r.skill_id = ?"
+            params += (skill_id,)
+        return self.all(sql + " ORDER BY r.id DESC LIMIT ?", params + (limit,))
 
     # -- activity --------------------------------------------------------
     def log(self, team_id: int, actor: str, action: str, skill_slug: str | None, details: dict) -> None:

@@ -1,4 +1,4 @@
-from teamskills import semver, skillfile
+from skillcurrent import semver, skillfile
 from tests.conftest import skill_text
 
 
