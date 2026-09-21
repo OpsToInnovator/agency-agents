@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS activity (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS activity_team ON activity(team_id, id);
+CREATE TABLE IF NOT EXISTS beta_signups (
+    id INTEGER PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    team_size TEXT NOT NULL DEFAULT '',
+    tools TEXT NOT NULL DEFAULT '[]',
+    note TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -449,6 +459,22 @@ class Store:
             sql += " AND r.skill_id = ?"
             params += (skill_id,)
         return self.all(sql + " ORDER BY r.id DESC LIMIT ?", params + (limit,))
+
+    # -- beta sign-ups (landing page waitlist) ----------------------------
+    def upsert_beta_signup(self, email: str, team_size: str, tools: list[str], note: str, source: str) -> None:
+        ts = now()
+        self.run(
+            "INSERT INTO beta_signups (email, team_size, tools, note, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(email) DO UPDATE SET team_size = excluded.team_size, tools = excluded.tools, note = excluded.note,"
+            " source = excluded.source, updated_at = excluded.updated_at",
+            (email, team_size, json.dumps(tools), note, source, ts, ts),
+        )
+
+    def beta_signups(self) -> list[dict]:
+        rows = self.all("SELECT * FROM beta_signups ORDER BY id DESC")
+        for r in rows:
+            r["tools"] = json.loads(r["tools"])
+        return rows
 
     # -- activity --------------------------------------------------------
     def log(self, team_id: int, actor: str, action: str, skill_slug: str | None, details: dict) -> None:

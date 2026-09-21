@@ -215,6 +215,16 @@ method minus `team` and `actor`, which come from the token. Notable ones:
 hash of the whole index, so two runtimes can prove they retrieved the same
 generation.
 
+## Beta landing page and waitlist
+
+`landing/index.html` is a single-file beta landing page (inline CSS, light
+and dark mode, no build step). `skillcurrent serve` serves it at `/beta`,
+and its form posts to `POST /api/beta` on the same server, which stores
+sign-ups (email, team size, tools in use, note) in the catalog database.
+Owners read them with `skillcurrent beta` or the `list_beta_signups`
+operation. The page also works from any static host; when no endpoint
+answers, the form shows the visitor their entry to send by hand.
+
 ## Layout
 
 ```
@@ -231,6 +241,7 @@ skillcurrent/
   server.py        ThreadingHTTPServer: POST /api/rpc, GET /api/health, GET /
   cli.py           argparse CLI
   web/index.html   single-file browser UI (vanilla JS): library, change room, adoption, rules
+landing/index.html beta landing page, served at /beta; form posts to /api/beta
 tests/             pytest: parser, checks, service rules, releases, installer, importer, server, CLI
 ```
 

@@ -416,6 +416,11 @@ def cmd_index(args, out):
     out.emit(idx, human)
 
 
+def cmd_beta(args, out):
+    rows = make_session(args).call("list_beta_signups")
+    out.emit(rows, lambda: table(rows, [("email", "EMAIL"), ("team_size", "TEAM"), ("tools", "TOOLS"), ("source", "SOURCE"), ("created_at", "SIGNED UP"), ("note", "NOTE")]) if rows else "(no beta sign-ups yet)")
+
+
 def cmd_targets(args, out):
     rows = [{"id": t.id, "label": t.label, "scope": t.scope, "base": t.base or "(--dir)"} for t in TARGETS.values()]
     out.emit(rows, lambda: table(rows, [("id", "TARGET"), ("label", "LABEL"), ("scope", "SCOPE"), ("base", "DIRECTORY")]))
@@ -582,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     rus.add_parser("remove").add_argument("name")
     ru.set_defaults(fn=cmd_rules)
     sub.add_parser("targets", help="list install targets").set_defaults(fn=cmd_targets)
+    sub.add_parser("beta", help="list landing-page beta sign-ups (owners)").set_defaults(fn=cmd_beta)
 
     im = sub.add_parser("import", help="import SKILL.md folders or Agency agent files as drafts")
     im.add_argument("path")

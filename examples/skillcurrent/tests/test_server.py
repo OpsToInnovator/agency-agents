@@ -81,6 +81,32 @@ def test_remote_session_end_to_end(server, tmp_path):
         RemoteSession(url, token="ts_nope").whoami()
 
 
+def test_landing_page_and_beta_signups(server, service):
+    _, url, tokens = server
+    with urllib.request.urlopen(url + "/beta") as resp:
+        body = resp.read()
+    assert resp.headers["Content-Type"].startswith("text/html") and b"Join the beta" in body and b"/api/beta" in body
+
+    def signup(body, headers=None):
+        req = urllib.request.Request(url + "/api/beta", data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    status, payload = signup({"email": "Lead@Example.com", "team_size": "5-15", "tools": ["claude-code", "codex"], "note": "we copy files today"})
+    assert status == 200 and payload["result"]["email"] == "lead@example.com"
+    assert signup({"email": "not-an-email"})[0] == 400
+    assert signup({"email": "lead@example.com", "team_size": "16-50", "tools": "cursor,other"})[0] == 200  # same email updates
+    with pytest.raises(Forbidden):
+        service.list_beta_signups("acme", "ben")  # maintainers cannot read the waitlist
+    rows = service.list_beta_signups("acme", "ana")
+    assert len(rows) == 1 and rows[0]["team_size"] == "16-50" and rows[0]["tools"] == ["cursor", "other"]
+    status, payload = post(url, {"op": "list_beta_signups"}, {"Authorization": f"Bearer {tokens['ana']}"})
+    assert status == 200 and payload["result"][0]["email"] == "lead@example.com"
+
+
 def test_no_auth_mode(service, team):
     srv = make_server(service, "127.0.0.1", 0, no_auth=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

@@ -18,7 +18,9 @@ from .errors import Forbidden, Invalid, SkillCurrentError, Unauthorized
 from .service import RPC_OPS, Service
 
 WEB_DIR = Path(__file__).parent / "web"
+LANDING = Path(__file__).parent.parent / "landing" / "index.html"
 MAX_BODY = 4 * 1024 * 1024
+MAX_BETA_BODY = 16 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -70,11 +72,38 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "version": __version__, "auth": "none" if self.no_auth else "token", "ops": RPC_OPS})
         elif path in ("/", "/index.html"):
             self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
+        elif path in ("/beta", "/beta/", "/landing", "/landing/"):
+            if LANDING.exists():
+                self._send_file(LANDING, "text/html; charset=utf-8")
+            else:
+                self._send_json(404, {"ok": False, "error": {"code": "not_found", "message": "landing/index.html is not present in this install"}})
         else:
             self._send_json(404, {"ok": False, "error": {"code": "not_found", "message": "no such route"}})
 
+    def _beta_signup(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BETA_BODY:
+                raise Invalid("request body too large")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                raise Invalid("request body must be JSON") from None
+            if not isinstance(payload, dict):
+                raise Invalid("request body must be a JSON object")
+            result = self.service.record_beta_signup(
+                payload.get("email", ""), payload.get("team_size", ""), payload.get("tools"), payload.get("note", ""), payload.get("source", "")
+            )
+            self._send_json(200, {"ok": True, "result": result})
+        except SkillCurrentError as exc:
+            self._send_json(exc.http_status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/api/rpc":
+        route = self.path.split("?", 1)[0]
+        if route == "/api/beta":
+            self._beta_signup()
+            return
+        if route != "/api/rpc":
             self._send_json(404, {"ok": False, "error": {"code": "not_found", "message": "no such route"}})
             return
         try:

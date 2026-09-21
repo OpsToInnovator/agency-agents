@@ -25,6 +25,7 @@ DEFAULT_CHANNEL = "production"
 RECEIPT_EVENTS = ("installed", "verified", "loaded", "task_tested")
 EVIDENCE_RANK = {e: i for i, e in enumerate(RECEIPT_EVENTS)}
 HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SLUG_RE = skillfile.NAME_RE
 TOKEN_PREFIX = "ts_"
 
@@ -222,6 +223,30 @@ class Service:
             return None
         m = self.store.member_by_token_hash(_hash_token(token))
         return (m["team_slug"], m["handle"]) if m else None
+
+    # ----------------------------------------------------------- beta waitlist
+    def record_beta_signup(self, email: str, team_size: str = "", tools=None, note: str = "", source: str = "") -> dict:
+        """Store a landing-page sign-up. Unauthenticated by design; validated and size-capped."""
+        email = (email or "").strip().lower()
+        if not EMAIL_RE.match(email) or len(email) > 254:
+            raise Invalid("enter a valid email address")
+        team_size = str(team_size or "").strip()[:32]
+        if isinstance(tools, str):
+            tools = [t for t in tools.split(",") if t.strip()]
+        tools = [str(t).strip().lower()[:32] for t in (tools or []) if str(t).strip()][:20]
+        note = str(note or "").strip()[:2000]
+        source = str(source or "").strip()[:200]
+        self.store.upsert_beta_signup(email, team_size, tools, note, source)
+        return {"email": email, "team_size": team_size, "tools": tools}
+
+    @rpc
+    def list_beta_signups(self, team: str, actor: str) -> list[dict]:
+        _, m = self._ctx(team, actor)
+        self._require(m, "owner", "reading beta sign-ups")
+        return [
+            {k: r[k] for k in ("email", "team_size", "tools", "note", "source", "created_at", "updated_at")}
+            for r in self.store.beta_signups()
+        ]
 
     # ------------------------------------------------------------------ members
     @rpc
