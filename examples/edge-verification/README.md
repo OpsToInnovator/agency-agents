@@ -119,10 +119,63 @@ own `K`, the back-fill reports its gap minus one.
 python3 -m pytest tests/ -q      # 22 tests, no network
 ```
 
+## Running the customer's code
+
+`edgecheck.sandbox.Sandbox` runs a strategy directory as a callable that plugs straight into
+`check_causality`: one fresh process, in one fresh directory, with a fresh copy of the
+strategy, per call. That costs tens of milliseconds and buys something the probes need — no
+state can carry from one run to the next, so a feature cache written during the baseline run
+cannot launder the future into a poisoned one.
+
+The threat model is stated rather than assumed. The customer is paying to audit their own
+code; the sandbox is for accidents — a vendor SDK phoning home, a runaway allocation, an
+infinite loop — and above all for **owning the inputs**. Every probe works by changing the
+data and watching the output. A strategy that brought its own prices, or fetches them, is
+unmoved by anything we do, and "nothing moved" is what a clean strategy looks like. So
+`precheck` runs two gates before any probe:
+
+- **same tape twice → identical output**, else the strategy is nondeterministic and no
+  divergence could be attributed to the data;
+- **a different tape → different output**, else the output is not a function of the data we
+  control and nothing can be proved about it, whatever the reason.
+
+Either failing is reported as `UNPROVABLE`, in those words.
+
+Two tiers, and the report says which ran:
+
+| | `namespace` (default where `unshare` works) | `plain` |
+|---|---|---|
+| fresh interpreter per run, `-s -B` | yes | yes |
+| environment built from scratch — no inherited keys or proxies | yes | yes |
+| rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
+| wall-clock kill of the whole process group | yes | yes |
+| socket ban that **records** the call before refusing it | yes | yes |
+| network blocked by the kernel — `connect()` and DNS both fail | yes | no |
+| tmpfs over the home directory, `/root`, `/tmp`, `/var/tmp`, `/dev/shm` | yes | no |
+
+`plain` stops accidents and runaway loops. It is a correctness boundary, not a security one:
+the socket ban is a monkeypatch and `ctypes` walks past it. `namespace` closes that — a raw
+`connect()` through `libc` returns `ENETUNREACH` — and hides the paths where secrets and
+other runs' files live. Neither tier is a boundary against a determined attacker, and the
+docs say so rather than imply otherwise.
+
+Two things learned building it. `unshare --fork` reports **rc=1** for a child the kernel
+killed at its CPU limit, indistinguishable from an ordinary failure, so the sandbox does not
+classify on exit codes: the child catches `SIGXCPU` at the soft limit and writes down why
+it is dying, and the parent measures the run's real CPU consumption through `getrusage` as
+the backstop. And the child must not coerce the strategy's output — `int(0.5)` is `0`, a
+valid position, and a strategy emitting probabilities would have been audited as though it
+emitted decisions. The parent now insists on Python ints in `{-1, 0, 1}` and refuses
+everything else.
+
+The hash seed is pinned to 0 for every run so dict and set order cannot differ between them;
+the report says so. Default memory limit is 2 GiB; a numpy strategy runs under 512 MiB.
+
 ## Not yet built
 
-Sandboxing of untrusted customer code, the static pre-filter that would narrow where to
-probe, adapters for pandas and event-driven strategies, and the other four checks. This
+The static pre-filter that would narrow where to probe and name the line, adapters for
+pandas and event-driven strategies, containment against a hostile author, and the other
+four checks. This
 module is the one that most justifies asking for the code.
 
 ## Bars handed to the strategy are always possible bars
