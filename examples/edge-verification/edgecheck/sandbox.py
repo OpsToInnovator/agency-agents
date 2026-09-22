@@ -39,7 +39,13 @@ What is actually enforced, in two tiers:
                 hid a LIST of paths and a list can never name every writable directory on
                 a host. Scrubbed environment. rlimits on CPU, memory, processes, file size,
                 open files. Wall-clock kill. Nothing written anywhere but the run directory
-                survives the process, and the run directory is deleted after it.
+                survives the process, and the run directory is deleted after it. The
+                strategy itself runs in one more user namespace, unmapped: no capabilities,
+                every mount locked, so the read-only trees stay read-only even against a
+                ctypes mount() call. And the parent bounds what it will take from the
+                child -- result and record sizes, run-directory entries and depth -- with
+                walks and teardown that never recurse, because a strategy that builds a
+                directory two thousand levels deep must get a verdict, not crash the auditor.
 
     plain       Everything above except the namespaces. The audit hook still records every
                 in-process socket use and every attempt to spawn a process, and refuses
@@ -97,6 +103,14 @@ class Limits:
     nproc: int = 64
     fsize_bytes: int = 256 * 1024 ** 2
     nofile: int = 256
+    # What the PARENT will take from the child. A third red team built a run directory two
+    # thousand levels deep with nothing but os.mkdir and os.chdir, and the auditor died of a
+    # RecursionError in its own recursive walk and teardown -- no verdict at all, on a
+    # strategy that was PROVEN on its own. Nothing the child does may crash the parent.
+    result_bytes: int = 64 * 1024 ** 2
+    violation_bytes: int = 1024 ** 2
+    run_dir_entries: int = 20_000
+    run_dir_depth: int = 64
 
 
 class SandboxError(Exception):
@@ -205,6 +219,14 @@ def _rlimit_installer(limits: Limits):
 # fresh tmpfs: each system root is bound in read-only (or recreated as the same symlink where
 # the host has one), the run directory is bound in writable with the strategy's own copy made
 # read-only, then pivot_root makes it the root and the old root is detached.
+#
+# The last line matters as much as the rest. Setup needs the mapped-root capabilities, but a
+# child that keeps them can undo the setup: it is root in this namespace, and a mount this
+# namespace created is a mount it may remount read-write -- a third red team did exactly
+# that through a ctypes mount() call and wrote into the host's /usr. So the strategy runs
+# inside one more user namespace, unmapped: no capabilities over anything that exists, and
+# every mount inherited from outside is locked. The remount is refused. The interpreter
+# does not care what uid it is.
 _NS_SCRIPT = r'''
 set -e
 py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; shift 7
@@ -228,24 +250,35 @@ mount -o remount,bind,ro,nodev,nosuid work/strategy
 pivot_root . oldroot
 umount -l /oldroot
 cd /work
-exec "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd"
+exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd"
 '''
 
 
-def _drain(fd: int, sink: list[bytes]) -> threading.Thread:
+def _drain(fd: int, sink: list[bytes], cap: int) -> threading.Thread:
+    """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
+    say whether more arrived. A result or a record larger than the cap is not evidence of
+    anything but a strategy trying to exhaust the auditor."""
     def go() -> None:
-        chunks = []
+        chunks: list[bytes] = []
+        kept = 0
+        overflow = False
         try:
             while True:
                 b = os.read(fd, 65536)
                 if not b:
                     break
-                chunks.append(b)
+                if kept < cap:
+                    chunks.append(b[:cap - kept])
+                    kept += len(chunks[-1])
+                if kept >= cap and len(b) > 0 and (kept >= cap):
+                    overflow = overflow or (kept >= cap and (len(b"".join(chunks)) < kept + len(b) - (cap - kept)))
         except OSError:
             pass
         finally:
             os.close(fd)
-        sink.append(b"".join(chunks))
+        data = b"".join(chunks)
+        sink.append(data)
+        sink.append(b"1" if overflow or len(data) >= cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -312,7 +345,10 @@ class Sandbox:
         try:
             return self._run(run, tape)
         finally:
-            shutil.rmtree(run, ignore_errors=True)
+            try:
+                self._remove_tree(run)
+            except Exception:  # noqa: BLE001 -- teardown must never take the verdict with it
+                pass
 
     def _run(self, run: Path, tape: Sequence[Any]) -> list[int]:
         shutil.copytree(self.strategy_dir, run / "strategy",
@@ -348,7 +384,9 @@ class Sandbox:
         outs: list[bytes] = []
         viols: list[bytes] = []
         errs: list[bytes] = []
-        drains = [_drain(out_r, outs), _drain(viol_r, viols), _drain(err_r, errs)]
+        drains = [_drain(out_r, outs, self.limits.result_bytes),
+                  _drain(viol_r, viols, self.limits.violation_bytes),
+                  _drain(err_r, errs, 64 * 1024)]
 
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
         # pipe open long after the strategy returned. Then kill the whole group regardless,
@@ -364,9 +402,15 @@ class Sandbox:
         cpu1 = resource.getrusage(resource.RUSAGE_CHILDREN)
         cpu_used = (cpu1.ru_utime - cpu0.ru_utime) + (cpu1.ru_stime - cpu0.ru_stime)
         rec = self._record(run, t0, cpu_used, proc.returncode if proc.returncode is not None else -9,
-                           visible, before, viols[0] if viols else b"")
+                           visible, before, viols[0] if viols else b"",
+                           truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
             raise Timeout(f"strategy exceeded {self.limits.wall_s:.0f}s wall clock")
+        if any(f.startswith("<run directory exceeded") for f in rec.files_written):
+            raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
+                                   f"or depth {self.limits.run_dir_depth}")
+        if len(outs) > 1 and outs[1] == b"1":
+            raise BadOutput(f"result larger than {self.limits.result_bytes} bytes")
 
         network = [v for v in rec.violations if v.startswith("network:")]
         spawns = [v for v in rec.violations if v.startswith("spawn:")]
@@ -416,20 +460,100 @@ class Sandbox:
 
     # -- helpers ------------------------------------------------------------------------------
 
+    def _snapshot(self, run: Path) -> set[str]:
+        """Every regular file under the run directory, walked with an explicit stack and a
+        ceiling on depth and count. Path.rglob and shutil.rmtree both recurse once per level
+        on this interpreter; a tree deeper than the recursion limit killed the auditor."""
+        out: set[str] = set()
+        stack = [(run, 0)]
+        seen = 0
+        while stack:
+            d, depth = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        seen += 1
+                        if seen > self.limits.run_dir_entries or depth > self.limits.run_dir_depth:
+                            out.add("<run directory exceeded the entry or depth limit>")
+                            return out
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append((Path(e.path), depth + 1))
+                            elif e.is_file(follow_symlinks=False):
+                                out.add(str(Path(e.path).relative_to(run)))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return out
+
     @staticmethod
-    def _snapshot(run: Path) -> set[str]:
-        return {str(p.relative_to(run)) for p in run.rglob("*") if p.is_file()}
+    def _remove_tree(root: Path) -> None:
+        """Remove the run directory however deep it is, with two descriptors and no path.
+
+        A tree built one component at a time with chdir+mkdir is deeper than PATH_MAX long
+        before it is deeper than the recursion limit, so a path-based walk gets
+        ENAMETOOLONG and leaves it standing; and a descriptor-per-level walk runs out of
+        descriptors at a thousand. So the tree is flattened instead: every directory one
+        level down has its files unlinked and its subdirectories RENAMED up to the root,
+        then is removed. Repeat until the root is empty. Each directory is lifted at most
+        once per level it started below, visited once, and needs one descriptor.
+        """
+        try:
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return
+        lifted = 0
+        try:
+            while True:
+                try:
+                    with os.scandir(root_fd) as it:
+                        entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+                except OSError:
+                    break
+                if not entries:
+                    break
+                for name, is_dir in entries:
+                    try:
+                        if not is_dir:
+                            os.unlink(name, dir_fd=root_fd)
+                            continue
+                        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                        try:
+                            with os.scandir(fd) as it:
+                                for c in it:
+                                    try:
+                                        if c.is_dir(follow_symlinks=False):
+                                            lifted += 1
+                                            os.rename(c.name, f".lift-{lifted}", src_dir_fd=fd, dst_dir_fd=root_fd)
+                                        else:
+                                            os.unlink(c.name, dir_fd=fd)
+                                    except OSError:
+                                        continue
+                        finally:
+                            os.close(fd)
+                        os.rmdir(name, dir_fd=root_fd)
+                    except OSError:
+                        continue
+        finally:
+            os.close(root_fd)
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
 
     def _record(self, run: Path, t0: float, cpu_used: float, rc: int, visible: tuple[str, ...],
-                before: set[str], viol_bytes: bytes) -> RunRecord:
+                before: set[str], viol_bytes: bytes, truncated: bool = False) -> RunRecord:
         written = sorted(self._snapshot(run) - before - {"_child.py"})
         violations: list[str] = []
-        for line in viol_bytes.decode("utf-8", "replace").splitlines():
+        for line in viol_bytes.decode("utf-8", "replace").splitlines()[:1000]:
             try:
                 d = json.loads(line)
                 violations.append(f"{d['kind']}: {d['detail']}")
             except (ValueError, KeyError, TypeError):
                 violations.append("unparsed: " + line[:200])
+        if truncated or viol_bytes.count(b"\n") > 1000:
+            violations.append("... and more; the record was capped")
         rec = RunRecord(time.monotonic() - t0, cpu_used, rc, self.isolation, visible,
                         tuple(written), tuple(violations))
         self.records.append(rec)

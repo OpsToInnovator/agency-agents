@@ -328,3 +328,52 @@ def test_a_strategy_that_reproduces_only_on_the_real_tape_is_named_for_it(tape):
     assert report.recognises_input and not report.nondeterministic
     assert report.proven == ()
     assert "telling the two apart" in report.describe()
+
+
+@pytest.mark.parametrize("name,kw", [("leak_same_bar_wick", {}),
+                                     ("leak_next_bar_gap", {"gap_prob": 0.15}),
+                                     ("leak_next_bar_ts", {"late_prob": 0.12})])
+def test_a_read_of_a_shape_property_is_a_leak(name, kw):
+    """Wick ratios, gaps and time steps used to be copied per bar onto the rebuilt tape,
+    so a strategy reading exactly those never moved under any probe. They are now drawn
+    from donor bars: same distribution, different values."""
+    tape = bars(200, **kw)
+    report = check_causality(strat(name).signals, tape, probes="every_bar", seed=1)
+    assert report.leaks, f"{name} ({strat(name).LEAKS}) walked out clean"
+    assert any(p.evidence.probe == "perturbation" for p in report.proven)
+
+
+def test_a_rebuilt_tape_keeps_the_shape_of_the_tape_not_of_each_bar():
+    """Distributional invariants: as gappy, as late, as wicky as the pristine tape -- and
+    on a continuous, regular tape, exactly continuous and regular."""
+    import statistics as st
+    tape = bars(300, gap_prob=0.2, late_prob=0.1)
+    p = _perturbed(tape, 100, seed=5, sigma=None)
+    gaps_t = [abs(tape[i].open / tape[i - 1].close - 1) for i in range(101, 300)]
+    gaps_p = [abs(p[i].open / p[i - 1].close - 1) for i in range(101, 300)]
+    assert abs(st.fmean(gaps_p) - st.fmean(gaps_t)) < 0.5 * st.fmean(gaps_t) + 1e-9
+    steps_t = sorted({round(tape[i].ts - tape[i - 1].ts) for i in range(101, 300)})
+    steps_p = sorted({round(p[i].ts - p[i - 1].ts) for i in range(101, 300)})
+    assert set(steps_p) <= set(steps_t)
+    assert [b.ts for b in p[:101]] == [b.ts for b in tape[:101]]
+    assert all(b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high for b in p)
+    # per-bar copying is what let the leaks through: the wick ratio must NOT be preserved per bar
+    same = sum(1 for i in range(100, 300)
+               if abs(p[i].high / max(p[i].open, p[i].close) - tape[i].high / max(tape[i].open, tape[i].close)) < 1e-12)
+    assert same < 20
+
+    regular = bars(200)
+    q = _perturbed(regular, 50, seed=3, sigma=None)
+    assert all(abs(q[i].open - q[i - 1].close) <= 1e-9 * q[i - 1].close for i in range(1, 200))
+    assert all(abs((q[i].ts - q[i - 1].ts) - 60.0) < 1e-6 for i in range(1, 200))
+
+
+def test_a_count_dependent_strategy_is_convicted_without_a_fabricated_reach(tape):
+    """Truncation cannot tell 'reads bar k+172' from 'looked at len(bars)'. Convict, but
+    do not print a reach the evidence cannot support."""
+    report = check_causality(strat("count_dependent").signals, tape, probes="every_bar", seed=1)
+    assert report.leaks
+    assert report.worst_horizon is None
+    text = report.describe()
+    assert "into the future" not in text
+    assert "how much data there is" in text

@@ -149,7 +149,12 @@ class Report:
 
     @property
     def worst_horizon(self) -> int | None:
-        return max((p.horizon for p in self.proven), default=None)
+        """How far into future VALUES the output demonstrably reached. Only the perturbation
+        probe can bound that: truncation also shortens the tape, and a strategy that sizes
+        something from len(bars) diverges under it without reading any future value. A
+        third red team's count-dependent strategy was reported as reading 172 bars ahead;
+        it read none. Truncation-only findings carry no reach."""
+        return max((p.horizon for p in self.proven if p.evidence.probe == "perturbation"), default=None)
 
     def coverage_note(self) -> str:
         if self.coverage >= 1.0:
@@ -176,8 +181,16 @@ class Report:
                     f"  {s.summary}\n    {s.reason}" for s in self.suspected)
             return base
         h = self.worst_horizon
-        reach = "its own bar (decided at the open, read the close)" if h == 0 else f"at least {h} bar(s) into the future"
-        lines = [f"PROVEN: this strategy reads {reach}.", f"  ({self.coverage_note()})", ""]
+        if h is None:
+            first = min(p.evidence.boundary for p in self.proven)
+            lines = [f"PROVEN: this strategy's output changed when the tape was shortened past bar {first - 1} -- "
+                     f"a dependence on data after that bar, or on how much data there is. The perturbation "
+                     f"probe did not corroborate it, so no reach into future values is claimed.",
+                     f"  ({self.coverage_note()})", ""]
+        else:
+            reach = ("its own bar (decided at the open, read the close)" if h == 0
+                     else f"at least {h} bar(s) into the future")
+            lines = [f"PROVEN: this strategy reads {reach}.", f"  ({self.coverage_note()})", ""]
         for p in self.proven:
             e = p.evidence
             lines.append(f"  signals[{e.index}] = {e.baseline} normally, {e.variant} once bar {e.boundary} "
@@ -225,35 +238,73 @@ def realized_sigma(tape: Sequence[Any]) -> float:
     return max(SIGMA_FLOOR, math.sqrt(mu * mu + var))
 
 
-def _rethread(tape: Sequence[Any], boundary: int, move_of, volume_of) -> list[Any]:
-    """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has.
+def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, volume_of) -> list[Any]:
+    """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has --
+    IN DISTRIBUTION, never per bar.
 
-    Each new bar keeps the pristine bar's gap to its predecessor and its wick ratios; the
-    open-to-close move and the volume are supplied by the callers. So where the pristine
-    tape has open == previous close, the rebuilt one does too; where it has gaps, the gaps
-    are preserved; high still covers open and close, low still sits under them. A strategy
-    looking for the seam between real data and probe data has nothing to find, which is the
-    point: a red team's first successful evasion keyed on exactly that seam.
+    An earlier version copied each pristine bar's own wick ratios and opening gap onto the
+    rebuilt bar, and left every timestamp alone, so that nothing about the tape's shape
+    would give a probe away. That preserved those properties for each bar exactly, and a
+    third red team read exactly those properties: a bar's own wick ratio, the next bar's
+    opening gap, the next bar's timestamp. None of them ever moved under any probe, so a
+    strategy deciding on them was clean on every run. Everything unknowable at bar i's open
+    must vary at bar i. Everything unknowable about later bars must vary there too.
 
-    Volume is varied as well. A bar's traded volume is not known at that bar's open any
-    more than its close is, and a second red team read it: a same-bar volume leak fronted by
-    a harmless price term passed every probe because no probe ever moved a volume.
+    So the rebuilt bar takes its wick ratios, its gap to the previous close and its time
+    step from RANDOM DONOR bars of the pristine tape. On a tape with no gaps and a regular
+    clock that is exactly a no-op for those two, and the shape of the tape -- how often it
+    gaps, how late its bars run, how long its wicks are -- is unchanged, so there is still
+    no seam to find. Bar ``boundary`` keeps its own open and timestamp, which the strategy
+    was entitled to see; its high, low, close and volume are not, and all four vary.
     """
+    n = len(tape)
+    donors = list(range(1, n)) or [0]
     out = list(tape)
     prev_close = tape[boundary - 1].close
-    for i in range(boundary, len(tape)):
+    prev_ts = tape[boundary - 1].ts
+    for i in range(boundary, n):
         b = tape[i]
-        top, bot = max(b.open, b.close), min(b.open, b.close)
-        wick_up = b.high / top if top > 0 else 1.0
-        wick_dn = b.low / bot if bot > 0 else 1.0
-        gap = (b.open / tape[i - 1].close) if i > 0 and tape[i - 1].close > 0 else 1.0
-        opened = b.open if i == boundary else prev_close * gap
+        d = tape[rng.choice(donors)]
+        d_top, d_bot = max(d.open, d.close), min(d.open, d.close)
+        wick_up = d.high / d_top if d_top > 0 else 1.0
+        wick_dn = d.low / d_bot if d_bot > 0 else 1.0
+        if i == boundary:
+            opened, ts = b.open, b.ts
+        else:
+            g = tape[rng.choice(donors)]
+            gap = (g.open / tape[tape.index(g) - 1].close) if False else _gap_of(tape, g)
+            opened = prev_close * gap
+            ts = prev_ts + _step_of(tape, tape[rng.choice(donors)])
         closed = opened * move_of(i, b)
         hi, lo = max(opened, closed), min(opened, closed)
-        out[i] = _replace(b, open=opened, close=closed, volume=volume_of(i, b),
+        out[i] = _replace(b, ts=ts, open=opened, close=closed, volume=volume_of(i, b),
                           high=max(hi * wick_up, hi), low=min(lo * wick_dn, lo))
-        prev_close = closed
+        prev_close, prev_ts = closed, ts
     return out
+
+
+def _gap_of(tape: Sequence[Any], bar: Any) -> float:
+    """A donor's opening gap: its open over the close before it. 1.0 where the tape is continuous."""
+    i = _index_of(tape, bar)
+    if i <= 0 or tape[i - 1].close <= 0:
+        return 1.0
+    return bar.open / tape[i - 1].close
+
+
+def _step_of(tape: Sequence[Any], bar: Any) -> float:
+    """A donor's time step from the bar before it; the tape's own spacing where regular."""
+    i = _index_of(tape, bar)
+    if i <= 0:
+        return (tape[1].ts - tape[0].ts) if len(tape) > 1 else 0.0
+    return bar.ts - tape[i - 1].ts
+
+
+def _index_of(tape: Sequence[Any], bar: Any) -> int:
+    # bars are frozen dataclasses; identity lookup avoids the equality scan
+    for i, b in enumerate(tape):
+        if b is bar:
+            return i
+    return 0
 
 
 def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | None,
@@ -283,7 +334,7 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
             m = math.copysign(abs(m) or sg, boundary_sign)
         return math.exp(m)
 
-    return _rethread(tape, boundary, move,
+    return _rethread(tape, boundary, rng, move,
                      lambda i, b: b.volume * math.exp(rng.gauss(0.0, 0.25)))
 
 
@@ -296,7 +347,7 @@ def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
     """
     rng = random.Random(seed)
     sg = realized_sigma(tape)
-    return _rethread(tape, boundary,
+    return _rethread(tape, boundary, rng,
                      lambda i, b: math.exp(rng.gauss(0.0, sg)),
                      lambda i, b: b.volume * math.exp(rng.gauss(0.0, 0.25)))
 

@@ -489,3 +489,61 @@ def test_the_interpreter_and_its_packages_are_there_but_read_only(tape, tmp_path
     """)
     sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
     assert sb(tape) == [1] * len(tape)
+
+
+def test_a_run_directory_deeper_than_the_recursion_limit_cannot_crash_the_auditor(tape, tmp_path):
+    """Two thousand levels of os.mkdir + os.chdir killed the parent with a RecursionError in
+    its own Path.rglob and shutil.rmtree, on a strategy that was PROVEN on its own."""
+    p = strategy_file(tmp_path, "deep", """
+        import os
+        def signals(bars):
+            for _ in range(2500):
+                os.mkdir("d"); os.chdir("d")
+            return [1 if b.close > b.open else -1 for b in bars]
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(run_dir_depth=64))
+    with pytest.raises(ResourceExceeded, match="depth"):
+        sb(tape)
+    # and the parent is still standing, and the tree is gone
+    assert not list((tmp_path / "runs").glob("run-*"))
+
+
+def test_a_flat_flood_of_files_is_capped_not_walked(tape, tmp_path):
+    p = strategy_file(tmp_path, "flood", """
+        import os
+        def signals(bars):
+            for i in range(3000):
+                open(f"f{i}", "w").close()
+            return [0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(run_dir_entries=500))
+    with pytest.raises(ResourceExceeded, match="entries"):
+        sb(tape)
+
+
+def test_an_oversized_result_is_refused_without_being_buffered_whole(tape, tmp_path):
+    p = strategy_file(tmp_path, "huge", """
+        def signals(bars):
+            return [0] * 3_000_000
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(result_bytes=1_000_000))
+    with pytest.raises(BadOutput, match="larger than"):
+        sb(tape)
+
+
+def test_a_violation_flood_is_capped_and_says_so(tape, tmp_path):
+    p = strategy_file(tmp_path, "vflood", """
+        import socket
+        def signals(bars):
+            for _ in range(20000):
+                try:
+                    socket.getaddrinfo("example.com", 80)
+                except OSError:
+                    pass
+            return [0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(violation_bytes=20_000))
+    with pytest.raises(NetworkAttempt):
+        sb(tape)
+    assert sb.records[-1].violations[-1].startswith("... and more")
+    assert len(sb.records[-1].violations) <= 1001

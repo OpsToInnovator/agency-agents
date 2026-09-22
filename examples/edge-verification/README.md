@@ -66,7 +66,13 @@ the type, not by a flag someone remembers to set.
 The absence of a divergence proves nothing. A leak on a branch this tape never took will not
 show up, and the report says so in those words rather than issuing a clean bill of health.
 
-Reported *horizon* is a lower bound — "at least this far" — never an exact depth.
+Reported *horizon* is a lower bound — "at least this far" — never an exact depth, and it is
+claimed only when the **perturbation** probe demonstrated it. Truncation also shortens the
+tape, and a strategy that sizes something from `len(bars)` diverges under it without reading
+any future value; a third red team's count-dependent strategy was reported as reading 172
+bars ahead when it read none. A truncation-only conviction now says exactly what it can:
+the output changed when the tape was shortened, a dependence on data after that bar or on
+how much data there is, reach not bounded.
 
 ## The probe compares against the pristine run, and the tape carries no tell
 
@@ -75,9 +81,15 @@ they recognise a probe — one keyed on a seam (opens redrawn independently, so 
 equalled the previous close), one on a fixed one-percent nudge that pushed intrabar moves past
 anything the tape ever showed. Both got `PROVABLE` and a clean report.
 
-Two changes. The perturbed walk is now **re-threaded** — each bar keeps its gap, wick ratios
-and volume; only the move is nudged, on the tape's own realized scale — so it preserves every
-invariant the pristine tape has and there is no seam to find. And every perturbed run is
+Two changes. The perturbed walk is now **re-threaded** so it preserves every invariant the
+pristine tape has — **in distribution, never per bar**. The first re-threading copied each
+pristine bar's own wick ratios and opening gap onto the rebuilt bar and left every timestamp
+alone, so there would be no seam; a third red team read exactly those properties — a bar's
+own wick, the next bar's gap, the next bar's timestamp — and none of them ever moved under a
+probe. Now the rebuilt bar takes its wick ratios, its gap and its time step from random donor
+bars of the pristine tape, and its volume is nudged. On a continuous, regular tape that is
+exactly continuous and regular; on a gappy, irregular one it is as gappy and irregular; and
+everything unknowable at a bar's open varies at that bar. And every perturbed run is
 compared against the **pristine** run: for `i <= k` a causal strategy must reproduce it exactly,
 because nothing it may legitimately read has changed. A strategy that leaked on real data used
 the boundary bar's close there, and no causal fallback can reproduce that value once the close
@@ -240,6 +252,8 @@ Two tiers, and the report says which ran:
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
 | plus a fresh `/proc`, four device nodes, a tmpfs `/tmp` that dies with the process, the run dir | yes | no |
 | the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
+| the strategy runs in one more, unmapped user namespace: no capabilities, every mount locked | yes | no |
+| the parent bounds what it takes: result and record sizes, run-dir entries and depth; walks and teardown never recurse | yes | yes |
 | the strategy's copy of itself read-only; the run directory deleted after the run | yes | no |
 
 `plain` stops accidents and runaway loops. It is a correctness boundary, not a security one:
@@ -250,11 +264,27 @@ hid a list; a second red team cached through `/opt` and injected a module into t
 own `dist-packages`, because a list can never name every writable directory on a host. Now
 everything the strategy can see is read-only except the run directory and a `/tmp` that does
 not outlive the process, and a test writes to eight places outside the run directory and
-asserts that every write fails and nothing persists. Neither tier is
+asserts that every write fails and nothing persists. Setting that up needs the mapped-root
+capabilities, and a child that kept them could undo it — it would be root in that namespace,
+and a mount the namespace created is a mount it may remount read-write; a third red team did
+exactly that through a `ctypes` `mount()` call. So the strategy runs inside one more user
+namespace, unmapped: no capabilities over anything that exists, every inherited mount locked,
+the remount refused with `EPERM`. The interpreter does not care what uid it is.
+
+**Nothing the child does may crash the parent.** A strategy built a run directory two
+thousand levels deep with nothing but `os.mkdir` and `os.chdir` — single components, so no
+`PATH_MAX` — and the auditor died of a `RecursionError` in its own `Path.rglob` and
+`shutil.rmtree`, producing no verdict on a strategy that was `PROVEN` on its own. The walk
+is now iterative with a ceiling on entries and depth (over it is `ResourceExceeded`, named),
+teardown flattens the tree by renaming subdirectories up to the root with two descriptors
+and no path, and the result and violation pipes are capped: a result larger than the cap is
+`BadOutput`, a flood of violations is recorded up to the cap and then says "and more".
+
+Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What two red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What three red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -268,7 +298,12 @@ death without consuming CPU; the claim is checked against the kernel's accountin
 second round: a cache in `/opt` (the whitelist root), a leak on every bar but the four fixed
 boundaries (nonce-drawn boundaries, every-bar mode, coverage stated), a same-bar volume read
 (volume varied), and a strategy deterministic only on the real tape (named as such, at the
-gate and in the report).
+gate and in the report). In the third: leaks on a bar's own wick ratio, the next bar's
+gap and the next bar's timestamp (the rebuilt tape now draws those from donor bars), a
+count-dependent strategy convicted with a fabricated reach (reach is claimed from the
+perturbation probe only), a run directory deep enough to crash the auditor (bounded,
+iterative walks; flatten-by-rename teardown), and a `ctypes` remount of the read-only
+system trees (the nested unmapped namespace).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
