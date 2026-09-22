@@ -177,7 +177,7 @@ def detect_isolation() -> Isolation:
         try:
             (run / "strategy").mkdir()
             (run / "_child.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
-            cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "--",
+            cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--uts", "--ipc", "--pid", "--fork", "--",
                    "sh", "-c", _NS_SCRIPT, "sh", sys.executable, str(run), "x", "x", "1", "2",
                    Sandbox._shelf(), "8", "100", "8", *Sandbox._bound_roots()]
             r = subprocess.run(cmd, cwd=run, env=_scrubbed_env(), capture_output=True, timeout=20)
@@ -374,7 +374,7 @@ class Sandbox:
         if self.isolation == "namespace":
             visible = self._bound_roots()
             cmd = [shutil.which("unshare") or "unshare", "--user", "--map-root-user", "--mount",
-                   "--net", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
+                   "--net", "--uts", "--ipc", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
                    sys.executable, str(run), self.entry, self.func,
                    str(out_w), str(viol_w), self._shelf(),
                    str(max(1, self.limits.run_dir_bytes // (1024 ** 2))),
@@ -441,8 +441,8 @@ class Sandbox:
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("not an object")
-        except ValueError as e:
-            raise StrategyError(f"malformed result from the strategy process: {e}") from None
+        except (ValueError, RecursionError) as e:     # a deeply nested array recurses in the decoder
+            raise StrategyError(f"malformed result from the strategy process: {type(e).__name__}") from None
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
@@ -568,7 +568,7 @@ class Sandbox:
             try:
                 d = json.loads(line)
                 violations.append(f"{d['kind']}: {d['detail']}")
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, RecursionError):
                 violations.append("unparsed: " + line[:200])
         if truncated or viol_bytes.count(b"\n") > 1000:
             violations.append("... and more; the record was capped")

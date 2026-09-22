@@ -158,7 +158,8 @@ class Report:
 
     def coverage_note(self) -> str:
         if self.coverage >= 1.0:
-            return "every bar was probed"
+            return ("every bar was probed, its move, wick and volume each pushed both ways; a read of "
+                    "something finer than a direction can still go unseen")
         return (f"probed at {len(self.boundaries)} of {self.bars_tested - MIN_BOUNDARY} possible boundaries "
                 f"({self.coverage:.0%}); a leak confined to bars that were not probed would not show up here")
 
@@ -238,7 +239,8 @@ def realized_sigma(tape: Sequence[Any]) -> float:
     return max(SIGMA_FLOOR, math.sqrt(mu * mu + var))
 
 
-def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, volume_of) -> list[Any]:
+def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, volume_of,
+              boundary_sign: int = 0) -> list[Any]:
     """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has --
     IN DISTRIBUTION, never per bar.
 
@@ -268,6 +270,15 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
         d_top, d_bot = max(d.open, d.close), min(d.open, d.close)
         wick_up = d.high / d_top if d_top > 0 else 1.0
         wick_dn = d.low / d_bot if d_bot > 0 else 1.0
+        if i == boundary and boundary_sign:
+            # The boundary bar's WICK is pushed the same way its move is: a top-heavy bar in
+            # one draw, a bottom-heavy one in the other, at the tape's own wick scale. With a
+            # random donor the wick's asymmetry was a coin toss, and a fourth red team's
+            # same-bar wick read went unseen in one audit out of eight while the report said
+            # every bar was probed. A direction that is forced cannot be missed.
+            scale = _wick_scale(tape)
+            wick_up, wick_dn = ((1.0 + 2.0 * scale, 1.0 - 0.25 * scale) if boundary_sign > 0
+                                else (1.0 + 0.25 * scale, 1.0 - 2.0 * scale))
         if i == boundary:
             opened, ts = b.open, b.ts
         else:
@@ -281,6 +292,17 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
                           high=max(hi * wick_up, hi), low=min(lo * wick_dn, lo))
         prev_close, prev_ts = closed, ts
     return out
+
+
+def _wick_scale(tape: Sequence[Any]) -> float:
+    """The tape's typical wick, as a fraction of price: the mean of |high/top - 1| and
+    |1 - low/bot| over the tape, floored so a wickless tape still gets a visible one."""
+    tot, n = 0.0, 0
+    for b in tape:
+        top, bot = max(b.open, b.close), min(b.open, b.close)
+        if top > 0 and bot > 0:
+            tot += (b.high / top - 1.0) + (1.0 - b.low / bot); n += 2
+    return max(SIGMA_FLOOR / 2, tot / n if n else SIGMA_FLOOR)
 
 
 def _gap_of(tape: Sequence[Any], bar: Any) -> float:
@@ -334,8 +356,13 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
             m = math.copysign(abs(m) or sg, boundary_sign)
         return math.exp(m)
 
-    return _rethread(tape, boundary, rng, move,
-                     lambda i, b: b.volume * math.exp(rng.gauss(0.0, 0.25)))
+    def volume(i, b):
+        v = rng.gauss(0.0, 0.25)
+        if i == boundary and boundary_sign:
+            v = math.copysign(max(abs(v), 0.3), boundary_sign)     # and the volume, likewise
+        return b.volume * math.exp(v)
+
+    return _rethread(tape, boundary, rng, move, volume, boundary_sign)
 
 
 def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
@@ -394,11 +421,17 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     if boundaries is not None:
         trunc_bounds = pert_bounds = sorted({b for b in boundaries if MIN_BOUNDARY <= b < n})
     elif probes == "every_bar":
-        trunc_bounds = default_boundaries(n)
+        # Truncation at every bar as well: a dependence on how much data there is shows up
+        # only under a cut between the index it moves and the length it keys on, and the
+        # four fixed fractions stop at 0.9n. A fourth red team keyed a flip at index 185 on
+        # len >= 190 and got a clean report. Complete now costs 2n runs, and says so.
+        trunc_bounds = list(range(MIN_BOUNDARY, n))
         pert_bounds = list(range(MIN_BOUNDARY, n))
     elif probes == "sparse":
-        trunc_bounds = default_boundaries(n)
-        pert_bounds = sorted(set(sparse_boundaries(n, nonce)) | set(trunc_bounds))
+        tail = [k for k in (n - 1, n - 2, n - 5, n - 10) if MIN_BOUNDARY <= k < n]
+        trunc_bounds = sorted(set(default_boundaries(n)) | set(tail)
+                              | set(sparse_boundaries(n, nonce ^ 0x5eed, count=max(4, n // 25))))
+        pert_bounds = sorted(set(sparse_boundaries(n, nonce)) | set(default_boundaries(n)))
     else:
         raise ValueError(f"probes must be 'sparse' or 'every_bar', not {probes!r}")
 

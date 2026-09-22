@@ -572,3 +572,37 @@ def test_many_files_cannot_fill_the_host_disk(tape, tmp_path):
     host_bytes = sum(f.stat().st_size for f in (tmp_path / "runs").rglob("*") if f.is_file())
     assert host_bytes < 8 * 1024 ** 2
     assert any(f.startswith("blob") for f in sb.records[-1].files_written)
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_the_hostname_is_not_the_hosts(tape, tmp_path):
+    """Without --uts the child shared the host's UTS namespace, and an ordinary write to
+    /proc/sys/kernel/hostname from the unmapped user changed the host's name for good."""
+    import socket
+    before = socket.gethostname()
+    p = strategy_file(tmp_path, "hostname", """
+        import os
+        def signals(bars):
+            try:
+                with open("/proc/sys/kernel/hostname", "w") as fh:
+                    fh.write("edgecheck-pwned")
+                wrote = 1
+            except OSError:
+                wrote = 0
+            return [wrote] * len(bars)
+    """)
+    Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+    assert socket.gethostname() == before
+
+
+def test_a_deeply_nested_result_on_the_pipe_is_a_strategy_error_not_a_crash(tape, tmp_path):
+    """Out of the stated model (the child must find the result descriptor), but the fix is
+    one line and the invariant is that nothing the child does crashes the parent."""
+    p = strategy_file(tmp_path, "nested", """
+        import os, sys
+        def signals(bars):
+            os.write(int(sys.argv[4]), b"[" * 4000)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="malformed"):
+        Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)

@@ -113,12 +113,18 @@ Two modes now, and the report states which and what it covered:
 - `probes="sparse"` (default) draws the boundary set from a nonce the strategy never sees. A
   same-bar leak confined to one bar is caught with probability *B / (n − 4)* per audit — 14% on
   a 300-bar tape — and the report prints that number as coverage rather than implying more.
-- `probes="every_bar"` probes every bar, one run each. Complete for a leak of any horizon at
-  any index; ~n runs. This is what a paid report should use.
+- `probes="every_bar"` probes every bar, and truncates at every bar too, one run each — a
+  dependence on *how much data there is* shows up only under a cut between the index it
+  moves and the length it keys on, and the four fixed cuts stopped at 0.9n. ~2n runs. This
+  is what a paid report should use.
 
-At a probed bar the boundary bar's move is forced up in one draw and down in the next, so a
-decision on the sign of close − open flips in one of them for certain rather than on a coin
-toss. Volume is varied too: a bar's traded volume is no more known at its open than its close
+At a probed bar the boundary bar's move, its wick and its volume are each pushed one way in
+the first draw and the other way in the second, so a decision on the *direction* of any of
+them flips in one draw for certain rather than on a coin toss. The report says exactly that,
+and adds the honest residual: a read of something finer than a direction can still go
+unseen. A fourth red team's one-bar wick read was being missed in one audit out of eight
+while the report said "every bar was probed"; the wick was a random donor's, and only the
+move had been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than its close
 is, and a red team read one behind a harmless price term because no probe had ever moved it.
 
 ## Nothing is proven until it reproduces
@@ -254,6 +260,7 @@ Two tiers, and the report says which ran:
 | the run directory is a **size-capped tmpfs** too: many files cannot fill the host disk | yes | no |
 | the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
 | the strategy runs in one more, unmapped user namespace: no capabilities, every mount locked | yes | no |
+| its own UTS and IPC namespaces: the host's hostname is not the child's to change | yes | no |
 | the parent bounds what it takes: result and record sizes, run-dir entries and depth; walks and teardown never recurse | yes | yes |
 | the strategy's copy of itself read-only; the run directory deleted after the run | yes | no |
 
@@ -290,7 +297,7 @@ Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What three red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What four red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -309,7 +316,12 @@ gap and the next bar's timestamp (the rebuilt tape now draws those from donor ba
 count-dependent strategy convicted with a fabricated reach (reach is claimed from the
 perturbation probe only), a run directory deep enough to crash the auditor (bounded,
 iterative walks; flatten-by-rename teardown), and a `ctypes` remount of the read-only
-system trees (the nested unmapped namespace).
+system trees (the nested unmapped namespace). In the fourth — the first with nothing of
+verdict-poisoning severity — a one-bar wick read missed in one every-bar audit in eight
+(the boundary bar's wick and volume are now mirrored across the draws like its move), a
+count dependence above 0.9n (every-bar mode truncates at every bar), a `RecursionError` from
+a deeply nested result escaping the parent (caught, reported as malformed), and a child
+that could change the host's hostname through the shared UTS namespace (`--uts --ipc`).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

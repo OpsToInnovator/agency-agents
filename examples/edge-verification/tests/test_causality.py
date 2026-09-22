@@ -377,3 +377,43 @@ def test_a_count_dependent_strategy_is_convicted_without_a_fabricated_reach(tape
     text = report.describe()
     assert "into the future" not in text
     assert "how much data there is" in text
+
+
+def test_a_single_same_bar_wick_read_is_caught_at_a_probed_bar_every_time(tape):
+    """A fourth red team's one-bar wick read was missed in one every_bar audit out of eight,
+    because the boundary bar's wick came from a random donor and only the move was pushed
+    both ways. The wick and the volume are now pushed both ways too."""
+    AT = 137
+
+    def one_wick(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) > AT:
+            b = bs[AT]
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            out[AT] = -1 if (b.high / top - 1.0) > (1.0 - b.low / bot) else 1
+        return out
+
+    irregular = bars(200, gap_prob=0.1, late_prob=0.1)
+    for seed in range(5011, 5031):
+        r = check_causality(one_wick, irregular, probes="every_bar", seed=seed)
+        assert r.leaks and r.worst_horizon == 0, f"missed at seed {seed}"
+        assert any(p.evidence.index == AT for p in r.proven)
+
+
+def test_a_count_dependence_near_the_tail_is_convicted_in_every_bar(tape):
+    """Truncation's fixed cuts stopped at 0.9n; a flip at index 185 keyed on len >= 190 was
+    never compared. every_bar now truncates at every bar."""
+    def tail_count(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) > 185 and len(bs) >= 190:
+            out[185] = -out[185]
+        return out
+
+    r = check_causality(tail_count, bars(200), probes="every_bar", seed=7)
+    assert r.leaks
+    assert r.worst_horizon is None                      # truncation-only: no reach claimed
+    assert "how much data there is" in r.describe()
