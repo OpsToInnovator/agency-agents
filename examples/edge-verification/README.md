@@ -7,7 +7,8 @@ change data it could not have seen. That distinction is the entire point. A patt
 is a conversation; a changed output is a fact.
 
 ```
-PROVEN: this strategy reads its own bar (decided at the open, read the close).
+PROVEN: this strategy reads its own bar: something of the bar that had not happened at its
+open -- its close, high, low or volume; the evidence does not say which.
 
   signals[45] = 1 normally, -1 once bar 45 onward was varied within a percent of its
   true value (perturbation probe, horizon 0)
@@ -117,25 +118,43 @@ Two modes now, and the report states which and what it covered:
 - `probes="sparse"` (default) draws the boundary set from a nonce the strategy never sees. A
   same-bar leak confined to one bar is caught with probability *B / (n − 4)* per audit — 14% on
   a 300-bar tape — and the report prints that number as coverage rather than implying more.
-- `probes="every_bar"` probes every bar from bar 4 on (bars 0–3 cannot be: nothing before them
-  can be varied) and truncates at every bar too — a dependence on *how much data there is*
+- `probes="every_bar"` probes every bar from bar 4 on (bars 0–3 never are, and the report says
+  a leak confined to them would not show up) and truncates at every bar too — a dependence on *how much data there is*
   shows up only under a cut between the index it moves and the length it keys on, and the
   four fixed cuts stopped at 0.9n. ~5n runs with the default four draws. This is what a paid
   report should use.
 
-At a probed bar the boundary bar's move, its wick skew and its volume are each pushed one way
-in the first draw and the other way in the second, so a decision on the *direction* of any of
-them flips in one draw for certain. The draws after those two take a **random sign triple**
-from the audit nonce — a fifth red team read whether the move and the wick *agreed*, which two
-lockstep draws never changed, and a fixed design is a design a leak can be written against.
-The wick's magnitudes are a donor bar's, with only the skew forced — the previous fix had made
-the size a constant, so a wick-size threshold just below it was never crossed. Every-bar mode
-uses four draws by default. The report says how many of the eight sign combinations were tried
-and states the residual: a read of a magnitude rather than a direction, or one constant across
-the combinations tried, can still go unseen. A fourth red team's one-bar wick read was being missed in one audit out of eight
-while the report said "every bar was probed"; the wick was a random donor's, and only the
-move had been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than its close
-is, and a red team read one behind a harmless price term because no probe had ever moved it.
+At a probed bar the boundary bar's move, its wick skew and its volume are each forced up or
+down, and the sign triples an audit tries come from a **covering design under a mask drawn
+from the audit nonce**: every field flips, every pair is pushed apart, the parity of all
+three flips, and eight draws cover every combination. A fifth red team read whether the move
+and the wick *agreed*, which two lockstep draws never changed, and a fixed design is a design
+a leak can be written against. The wick's magnitudes are a donor bar's, with only the skew
+forced — the previous fix had made the size a constant, so a wick-size threshold just below it
+was never crossed.
+
+Forced *against what* matters as much as forced. A sixth red team read `close > previous
+close` at one bar and walked at every bar whose opening gap outweighed a typical move: the
+move was forced against the bar's own open, so the close never crossed the previous close.
+`volume > previous volume` walked at a fifth of bars for the same reason, and a breakout read
+(`high > previous high`, `low < previous low`) at a fifth for the coin toss of whether a
+donor's wick reached the previous extreme. Everything a strategy can compare an unknown
+field against is the bar's own open and the previous bar's fields, so the close is now pushed
+past all of them at once — above the open, the previous close and the previous high, or
+below the open, the previous close and the previous low — by a fresh move of the tape's own
+size measured from that level; the volume to the far side of the previous bar's by a ratio
+drawn from the tape's own bar-to-bar volume ratios; and the range to a higher low on the up
+draws and a lower high on the down draws. Where the open already sits beyond the previous
+extreme, that side is decided by a value the strategy may read, and nothing is claimed.
+Every-bar mode uses four draws by default. The report says how many of the eight sign
+combinations were tried at the bars that did not diverge, that probing of a bar stopped at
+its first divergence, and states the residual: a read of a magnitude rather than a
+direction, or against a level further back than the previous bar, can still go unseen. A
+fourth red team's one-bar wick read was being missed in one audit out of eight while the
+report said "every bar was probed"; the wick was a random donor's, and only the move had
+been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than
+its close is, and a red team read one behind a harmless price term because no probe had
+ever moved it.
 
 ## Nothing is proven until it reproduces
 
@@ -310,7 +329,7 @@ Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What five red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What six red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -341,7 +360,13 @@ host sysctls written through the fresh `/proc` (`/proc/sys` read-only), a rare f
 of telling real from varied data (three pristine replays, and the report names both
 possibilities), truncation evidence lines printing a horizon under a headline that claimed
 none, "every bar was probed" while bars 0–3 cannot be, and staged source lingering in `/tmp`
-(`close()`).
+(`close()`). In the sixth — none of it created by the fifth's fixes; the fourth's code misses
+them identically — one-bar reads of the close, the volume, the high and the low *against the
+previous bar* surviving at gap bars and at a fifth of bars respectively (every unknown field
+is now pushed to both sides of the previous bar's level), a horizon-0 proof described as
+"read the close" whatever was read (the report names the four fields it might have been and
+says the evidence does not distinguish them), and a coverage note claiming four sign
+combinations at every bar while probing of a bar stops at its first divergence (it says so).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

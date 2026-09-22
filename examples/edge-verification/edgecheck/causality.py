@@ -161,23 +161,32 @@ class Report:
     draws: int = DEFAULT_DRAWS
 
     def coverage_note(self) -> str:
+        against = ("the close pushed to both sides of its open and of the previous bar's close, high "
+                   "and low, the volume to both sides of the previous bar's, the range to a higher low "
+                   "and to a lower high")
         if self.draws >= 8:
-            combos = "every sign combination of move, wick and volume tried at each"
-            residual = "a read of a magnitude rather than a direction can still go unseen"
+            combos = f"{against}, every sign combination of move, wick and volume tried, at each bar"
+            residual = ("a read of a magnitude rather than a direction, or against a level further "
+                        "back than the previous bar, can still go unseen")
         elif self.draws >= 4:
-            combos = ("move, wick and volume each pushed both ways and every pair pushed apart at each "
-                      f"({min(self.draws, 8)} of 8 sign combinations)")
-            residual = ("a read of a magnitude rather than a direction, or of a pattern across all three "
-                        "directions at once, can still go unseen")
-        else:
-            combos = "move, wick and volume each pushed both ways at each"
-            residual = ("a read of a magnitude rather than a direction, or of how two directions relate, "
+            combos = (f"{against} and every pair of move, wick and volume pushed apart "
+                      f"({min(self.draws, 8)} of 8 sign combinations), at each bar")
+            residual = ("a read of a magnitude rather than a direction, against a level further back "
+                        "than the previous bar, or of a pattern across all three directions at once, "
                         "can still go unseen")
+        else:
+            combos = f"{against}, at each bar"
+            residual = ("a read of a magnitude rather than a direction, against a level further back "
+                        "than the previous bar, or of how two directions relate, can still go unseen")
+        stopped = ("; at a bar that diverged, probing stopped at the first divergence"
+                   if any(p.evidence.probe == "perturbation" for p in self.proven) else "")
         if self.coverage >= 1.0:
-            return (f"every bar from {MIN_BOUNDARY} on was probed (bars 0-{MIN_BOUNDARY - 1} cannot be: "
-                    f"nothing before them can be varied), {combos}; {residual}")
+            return (f"every bar from {MIN_BOUNDARY} on was probed (bars 0-{MIN_BOUNDARY - 1} never are, so a "
+                    f"leak confined to them would not show up here), {combos} that did not diverge"
+                    f"{stopped}; {residual}")
         return (f"probed at {len(self.boundaries)} of {self.bars_tested - MIN_BOUNDARY} possible boundaries "
-                f"({self.coverage:.0%}); a leak confined to bars that were not probed would not show up here")
+                f"({self.coverage:.0%}), {combos} that did not diverge{stopped}; a leak confined to bars "
+                f"that were not probed would not show up here")
 
     def describe(self) -> str:
         if self.nondeterministic:
@@ -205,7 +214,8 @@ class Report:
                     f"a dependence on data after that bar, or on how much data there is. The perturbation "
                     f"probe did not corroborate it, so no reach into future values is claimed.")
         else:
-            reach = ("its own bar (decided at the open, read the close)" if h == 0
+            reach = ("its own bar: something of the bar that had not happened at its open -- its "
+                     "close, high, low or volume; the evidence does not say which" if h == 0
                      else f"at least {h} bar(s) into the future")
             head = f"PROVEN: this strategy reads {reach}."
             if trunc:
@@ -261,7 +271,7 @@ def realized_sigma(tape: Sequence[Any]) -> float:
 
 
 def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, volume_of,
-              wick_sign: int = 0) -> list[Any]:
+              wick_sign: int = 0, range_sign: int = 0) -> list[Any]:
     """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has --
     IN DISTRIBUTION, never per bar.
 
@@ -279,14 +289,32 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
     gaps, how late its bars run, how long its wicks are -- is unchanged, so there is still
     no seam to find. Bar ``boundary`` keeps its own open and timestamp, which the strategy
     was entitled to see; its high, low, close and volume are not, and all four vary.
+
+    ``range_sign`` pins the boundary bar's RANGE against the previous bar's: +1 keeps its low
+    at or above the previous low (the close is already forced past the previous high, so the
+    bar makes a higher high and a higher low); -1 keeps its high at or below the previous
+    high (a lower high and a lower low). A sixth red team read ``high > previous high`` and
+    ``low < previous low`` at one bar and was missed one audit in five, because whether a
+    donor's wick reached the previous bar's extreme was a coin toss. Where the open already
+    sits outside the previous range that side is decided by the open, which the strategy may
+    read, and nothing here changes it.
     """
     n = len(tape)
     donors = list(range(1, n)) or [0]
     out = list(tape)
-    prev_close = tape[boundary - 1].close
-    prev_ts = tape[boundary - 1].ts
+    prev = tape[boundary - 1]
+    prev_close = prev.close
+    prev_ts = prev.ts
     for i in range(boundary, n):
         b = tape[i]
+        if i == boundary:
+            opened, ts = b.open, b.ts
+        else:
+            g = tape[rng.choice(donors)]
+            opened = prev_close * _gap_of(tape, g)
+            ts = prev_ts + _step_of(tape, tape[rng.choice(donors)])
+        closed = opened * move_of(i, b)
+        hi, lo = max(opened, closed), min(opened, closed)
         d = tape[rng.choice(donors)]
         d_top, d_bot = max(d.open, d.close), min(d.open, d.close)
         wick_up = d.high / d_top if d_top > 0 else 1.0
@@ -302,15 +330,20 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
             if big - small < 0.25 * _wick_scale(tape):
                 big = small + 0.25 * _wick_scale(tape)
             wick_up, wick_dn = ((1.0 + big, 1.0 - small) if wick_sign > 0 else (1.0 + small, 1.0 - big))
-        if i == boundary:
-            opened, ts = b.open, b.ts
-        else:
-            g = tape[rng.choice(donors)]
-            gap = (g.open / tape[tape.index(g) - 1].close) if False else _gap_of(tape, g)
-            opened = prev_close * gap
-            ts = prev_ts + _step_of(tape, tape[rng.choice(donors)])
-        closed = opened * move_of(i, b)
-        hi, lo = max(opened, closed), min(opened, closed)
+        if i == boundary and range_sign > 0 and 0 < prev.low < lo:
+            # Higher low: the down wick may not reach the previous low. If that shortens the
+            # wick a bottom-heavy skew was leaning on, the up wick shrinks under it, so the
+            # skew survives and the bar is merely narrow -- a bar this tape has plenty of.
+            # With no headroom at all (the open sits exactly on the previous extreme) the
+            # wick is left a donor's: a zero wick would tie the skew, and that side of the
+            # range is decided by the open anyway.
+            wick_dn = max(wick_dn, prev.low / lo)
+            if wick_sign < 0:
+                wick_up = min(wick_up, 1.0 + (1.0 - wick_dn) / 2)
+        elif i == boundary and range_sign < 0 and 0 < hi < prev.high:
+            wick_up = min(wick_up, prev.high / hi)
+            if wick_sign > 0:
+                wick_dn = max(wick_dn, 1.0 - (wick_up - 1.0) / 2)
         out[i] = _replace(b, ts=ts, open=opened, close=closed, volume=volume_of(i, b),
                           high=max(hi * wick_up, hi), low=min(lo * wick_dn, lo))
         prev_close, prev_ts = closed, ts
@@ -389,27 +422,47 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
     # measured the difference. Fresh moves have the pristine distribution.
     #
     # The boundary bar's move, wick skew and volume can each be forced up or down, and the
-    # three are forced INDEPENDENTLY: ``signs`` is a triple. The first two draws of an audit
-    # push all three one way and then all three the other, so each direction is certainly
-    # flipped; later draws take a random triple from the audit nonce. A fifth red team read
-    # the AGREEMENT of move and wick, which two lockstep draws never changed -- a fixed
-    # design is a design a leak can be written against, so the combinations beyond the
-    # first two are not fixed.
+    # three are forced INDEPENDENTLY: ``signs`` is a triple, and the triples an audit tries
+    # at a bar come from ``sign_design`` -- a covering design under a mask drawn from the
+    # audit nonce, so that every field flips, every pair is pushed apart, and no strategy
+    # can be written against a fixed order.
+    #
+    # Forced AGAINST WHAT is the part a sixth red team found wanting. The move used to be
+    # forced against the bar's own open and the volume against the bar's own pristine
+    # volume, so ``close > previous close`` was never flipped at a bar whose opening gap
+    # outweighed a typical move, and ``volume > previous volume`` was flipped at a bar only
+    # when a clamped +-30% nudge happened to cross it. Everything the strategy may compare
+    # an unknown field against is the bar's own open and the previous bar's fields, so the
+    # close is now pushed past ALL of them at once -- above the open, the previous close and
+    # the previous high, or below the open, the previous close and the previous low -- by a
+    # fresh move of the tape's own size measured from that level, and the volume is pushed
+    # to the far side of the previous bar's volume by a ratio drawn from the tape's own
+    # bar-to-bar volume ratios. Neither is clamped. The residual is a read of a magnitude
+    # or of a level further back, and the report says so.
     m_sign, w_sign, v_sign = signs
+    prev = tape[boundary - 1]
+    donors = list(range(1, len(tape))) or [0]
 
     def move(i, b):
         m = rng.gauss(0.0, sg)
-        if i == boundary and m_sign:
-            m = math.copysign(abs(m) or sg, m_sign)
+        if i == boundary and m_sign and b.open > 0:
+            level = (max(b.open, prev.close, prev.high) if m_sign > 0
+                     else min(b.open, prev.close, prev.low))
+            return level * math.exp(math.copysign(abs(m) or sg, m_sign)) / b.open
         return math.exp(m)
 
     def volume(i, b):
         v = rng.gauss(0.0, 0.25)
         if i == boundary and v_sign:
-            v = math.copysign(max(abs(v), 0.3), v_sign)
+            j = rng.choice(donors)
+            d, before = tape[j], tape[j - 1]
+            ratio = (abs(math.log(d.volume / before.volume))
+                     if d.volume > 0 and before.volume > 0 else 0.0)
+            base = prev.volume if prev.volume > 0 else b.volume
+            return base * math.exp(math.copysign(ratio or abs(v) or 0.25, v_sign))
         return b.volume * math.exp(v)
 
-    return _rethread(tape, boundary, rng, move, volume, w_sign)
+    return _rethread(tape, boundary, rng, move, volume, w_sign, range_sign=m_sign)
 
 
 def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
@@ -473,7 +526,8 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
         # Truncation at every bar as well: a dependence on how much data there is shows up
         # only under a cut between the index it moves and the length it keys on, and the
         # four fixed fractions stop at 0.9n. A fourth red team keyed a flip at index 185 on
-        # len >= 190 and got a clean report. Complete now costs 2n runs, and says so.
+        # len >= 190 and got a clean report. Complete now costs about 5n runs -- n
+        # truncations and up to four perturbation draws a bar -- and says so.
         trunc_bounds = list(range(MIN_BOUNDARY, n))
         pert_bounds = list(range(MIN_BOUNDARY, n))
     elif probes == "sparse":

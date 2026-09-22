@@ -512,8 +512,107 @@ def test_mixed_mechanisms_are_both_named_and_truncation_lines_claim_no_reach(tap
 def test_the_coverage_note_does_not_claim_bars_it_cannot_probe(tape):
     r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
     note = r.coverage_note()
-    assert "from 4 on" in note and "bars 0-3 cannot be" in note
-    assert "every pair pushed apart" in note and "4 of 8" in note
+    assert "from 4 on" in note and "bars 0-3 never are" in note
+    assert "every pair of move, wick and volume pushed apart" in note and "4 of 8" in note
+    assert "stopped at the first divergence" not in note, "nothing diverged, so nothing stopped"
+
+
+def test_the_coverage_note_says_where_probing_stopped(tape):
+    """A sixth red team: the note claimed four combinations at every bar, while the draw loop
+    at a bar stops at its first divergence. It now says so, and only when that happened."""
+    r = check_causality(strat("leak_same_bar_close").signals, tape, probes="every_bar", seed=1)
+    assert r.leaks
+    note = r.coverage_note()
+    assert "that did not diverge" in note and "stopped at the first divergence" in note
+
+
+def test_a_same_bar_proof_does_not_name_a_field_the_evidence_does_not_name(tape):
+    """The same red team: a horizon-0 proof was described as "read the close" whatever was
+    read. A volume-only reader is not accused of reading the close."""
+    r = check_causality(strat("leak_same_bar_volume").signals, tape, probes="every_bar", seed=1)
+    assert r.leaks and r.worst_horizon == 0
+    text = r.describe()
+    assert "read the close" not in text
+    assert "close, high, low or volume" in text and "does not say which" in text
+
+
+def _prev_bar_reader(field: str, at: int):
+    """Decides bar ``at`` on one of its own unknown fields compared with the previous bar's:
+    the close-to-close return, the volume change, a breakout above the previous high or
+    below the previous low. The four most common one-bar reads in real code."""
+    def signals(bs):
+        out = _momentum(bs)
+        if len(bs) > at:
+            b, p = bs[at], bs[at - 1]
+            if field == "close":
+                out[at] = -1 if b.close > p.close else 1
+            elif field == "volume":
+                out[at] = -1 if b.volume > p.volume else 1
+            elif field == "high":
+                out[at] = -1 if b.high > p.high else 1
+            else:
+                out[at] = -1 if b.low < p.low else 1
+        return out
+    return signals
+
+
+@pytest.mark.parametrize("field", ["close", "volume", "high", "low"])
+def test_a_one_bar_read_against_the_previous_bar_is_caught_at_gap_bars(field):
+    """A sixth red team read ``close > previous close`` at one bar and walked at any bar
+    whose opening gap outweighed a typical move: the forced move was applied to the bar's
+    own open, so the close never crossed the previous close. ``volume > previous volume``
+    walked at a fifth of bars for the same reason (the push was relative to the bar's own
+    pristine volume, and clamped), and the breakout reads at a fifth for the coin toss of
+    whether a donor's wick reached the previous extreme. Every unknown field is now pushed
+    to both sides of the previous bar's level. The only bars a breakout read survives are
+    those whose OPEN already sits beyond the previous extreme -- where the read is decided
+    by a value the strategy may see, and there is nothing to catch."""
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    missed = []
+    for at in range(4, 200, 7):
+        b, p = gappy[at], gappy[at - 1]
+        if field == "high" and b.open > p.high:
+            continue
+        if field == "low" and b.open < p.low:
+            continue
+        r = check_causality(_prev_bar_reader(field, at), gappy, probes="every_bar", seed=9001 + at)
+        if not (r.leaks and any(q.evidence.index == at for q in r.proven)):
+            missed.append(at)
+    assert not missed, f"{field} read against the previous bar survived at bars {missed}"
+
+
+def test_a_breakout_read_is_never_charged_where_the_open_decides_it():
+    """The other side of the same fix: where the open is already past the previous high,
+    ``high > previous high`` is a function of the open. No probe can move it, and the
+    detector must not claim it did."""
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    decided = [at for at in range(4, 200) if gappy[at].open > gappy[at - 1].high]
+    assert decided, "the fixture should contain bars that gap above the previous high"
+    at = decided[len(decided) // 2]
+    r = check_causality(_prev_bar_reader("high", at), gappy, probes="every_bar", seed=77)
+    assert not any(p.evidence.index == at for p in r.proven)
+
+
+def test_the_boundary_bar_is_pushed_past_every_level_of_the_previous_bar():
+    """Direct measurement of the design, not of a strategy: over the first four draws of
+    the covering design, the boundary bar's close lands above the previous high and below
+    the previous low, its volume above and below the previous volume, and -- where its open
+    is inside the previous range -- its range makes both a higher low and a lower high."""
+    from edgecheck.causality import sign_design
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    inside = [k for k in range(4, 200) if gappy[k - 1].low <= gappy[k].open <= gappy[k - 1].high]
+    for k in inside[::9]:
+        p = gappy[k - 1]
+        for nonce in (1, 2, 3):
+            got = [_perturbed(gappy, k, seed=nonce ^ (k * 1_000_003 + i), sigma=None, signs=s)[k]
+                   for i, s in enumerate(sign_design(nonce, k)[:4])]
+            assert any(b.close > p.high for b in got) and any(b.close < p.low for b in got), k
+            assert any(b.volume > p.volume for b in got) and any(b.volume < p.volume for b in got), k
+            assert any(b.high > p.high and b.low >= p.low for b in got), (k, "higher high, higher low")
+            assert any(b.low < p.low and b.high <= p.high for b in got), (k, "lower high, lower low")
+            for b in got:
+                assert b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high
+                assert b.open == gappy[k].open and b.ts == gappy[k].ts
 
 
 def test_the_sign_design_covers_what_it_claims():
