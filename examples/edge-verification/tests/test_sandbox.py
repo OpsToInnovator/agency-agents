@@ -547,3 +547,28 @@ def test_a_violation_flood_is_capped_and_says_so(tape, tmp_path):
         sb(tape)
     assert sb.records[-1].violations[-1].startswith("... and more")
     assert len(sb.records[-1].violations) <= 1001
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_many_files_cannot_fill_the_host_disk(tape, tmp_path):
+    """RLIMIT_FSIZE caps one file. Inside the namespace the run directory is a tmpfs of a
+    fixed size, so the strategy runs out of space and the host does not."""
+    p = strategy_file(tmp_path, "filler", """
+        def signals(bars):
+            written = 0
+            try:
+                for i in range(200):
+                    with open(f"blob{i}", "wb") as fh:
+                        fh.write(b"x" * (4 * 1024 * 1024))
+                    written += 1
+            except OSError:
+                pass
+            return [1 if written < 200 else -1] * len(bars)     # 1 = ran out of space
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs",
+                           limits=Limits(fsize_bytes=8 * 1024 ** 2, run_dir_bytes=32 * 1024 ** 2))
+    assert sb(tape) == [1] * len(tape)
+    assert not any(f.startswith("blob") for f in os.listdir(tmp_path / "runs")) 
+    host_bytes = sum(f.stat().st_size for f in (tmp_path / "runs").rglob("*") if f.is_file())
+    assert host_bytes < 8 * 1024 ** 2
+    assert any(f.startswith("blob") for f in sb.records[-1].files_written)

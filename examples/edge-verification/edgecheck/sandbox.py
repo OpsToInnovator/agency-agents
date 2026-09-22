@@ -68,6 +68,7 @@ no CPU consumed is reported as exactly that).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import resource
@@ -111,6 +112,10 @@ class Limits:
     violation_bytes: int = 1024 ** 2
     run_dir_entries: int = 20_000
     run_dir_depth: int = 64
+    # RLIMIT_FSIZE caps one file. Many files at that size would fill the host disk through a
+    # run directory bound from the host, so inside the namespace the run directory is a
+    # tmpfs of this size: the strategy gets ENOSPC, the host gets nothing.
+    run_dir_bytes: int = 256 * 1024 ** 2
 
 
 class SandboxError(Exception):
@@ -174,7 +179,7 @@ def detect_isolation() -> Isolation:
             (run / "_child.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
             cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "--",
                    "sh", "-c", _NS_SCRIPT, "sh", sys.executable, str(run), "x", "x", "1", "2",
-                   Sandbox._shelf(), *Sandbox._bound_roots()]
+                   Sandbox._shelf(), "8", "100", "8", *Sandbox._bound_roots()]
             r = subprocess.run(cmd, cwd=run, env=_scrubbed_env(), capture_output=True, timeout=20)
             ok = r.returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -229,10 +234,10 @@ def _rlimit_installer(limits: Limits):
 # does not care what uid it is.
 _NS_SCRIPT = r'''
 set -e
-py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; shift 7
+py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; workmb="$8"; ents="$9"; shift 9; depth="$1"; shift 1
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$new"
 cd "$new"
-mkdir -p proc dev tmp work oldroot
+mkdir -p proc dev tmp work src oldroot
 for p in "$@"; do
   if [ -L "$p" ]; then
     mkdir -p "$(dirname "$new$p")"; ln -s "$(readlink "$p")" "$new$p"
@@ -244,13 +249,15 @@ for m in /etc/arbbot; do [ -d "$new$m" ] && mount -t tmpfs -o size=1m,nodev,nosu
 for f in null zero urandom random; do touch "dev/$f"; mount --bind "/dev/$f" "dev/$f"; done
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs tmp
 mount -t proc proc proc
-mount --bind "$run" work
-mount --bind work/strategy work/strategy
-mount -o remount,bind,ro,nodev,nosuid work/strategy
+mount --bind "$run" src
+mount -o remount,bind,ro,nodev,nosuid src
+mount -t tmpfs -o nodev,nosuid,size="$workmb"m tmpfs work
+cp -a src/. work/
+chmod -R a-w work/strategy
 pivot_root . oldroot
 umount -l /oldroot
 cd /work
-exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd"
+exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd" "$ents" "$depth"
 '''
 
 
@@ -369,10 +376,12 @@ class Sandbox:
             cmd = [shutil.which("unshare") or "unshare", "--user", "--map-root-user", "--mount",
                    "--net", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
                    sys.executable, str(run), self.entry, self.func,
-                   str(out_w), str(viol_w), self._shelf(), *visible]
+                   str(out_w), str(viol_w), self._shelf(),
+                   str(max(1, self.limits.run_dir_bytes // (1024 ** 2))),
+                   str(self.limits.run_dir_entries), str(self.limits.run_dir_depth), *visible]
         else:
             cmd = [sys.executable, "-s", "-B", str(run / "_child.py"), str(run), self.entry, self.func,
-                   str(out_w), str(viol_w)]
+                   str(out_w), str(viol_w), str(self.limits.run_dir_entries), str(self.limits.run_dir_depth)]
 
         t0 = time.monotonic()
         cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -450,6 +459,15 @@ class Sandbox:
                 raise ResourceExceeded(f"{etype}: {emsg}")
             raise StrategyError(f"{etype}: {emsg}")
 
+        if self.isolation == "namespace":
+            hint = payload.get("files_written")
+            over = bool(payload.get("run_dir_over_limit"))
+            if isinstance(hint, list):
+                self.records[-1] = dataclasses.replace(
+                    rec, files_written=tuple(str(f)[:200] for f in hint[:2000] if isinstance(f, str)))
+            if over:
+                raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
+                                       f"or depth {self.limits.run_dir_depth}")
         sig = payload.get("signals")
         if not isinstance(sig, list) or len(sig) != len(tape) or \
                 any(type(s) is not int or s not in (-1, 0, 1) for s in sig):

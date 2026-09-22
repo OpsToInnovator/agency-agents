@@ -250,7 +250,8 @@ Two tiers, and the report says which ran:
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
-| plus a fresh `/proc`, four device nodes, a tmpfs `/tmp` that dies with the process, the run dir | yes | no |
+| plus a fresh `/proc`, four device nodes, and a tmpfs `/tmp` that dies with the process | yes | no |
+| the run directory is a **size-capped tmpfs** too: many files cannot fill the host disk | yes | no |
 | the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
 | the strategy runs in one more, unmapped user namespace: no capabilities, every mount locked | yes | no |
 | the parent bounds what it takes: result and record sizes, run-dir entries and depth; walks and teardown never recurse | yes | yes |
@@ -279,6 +280,11 @@ is now iterative with a ceiling on entries and depth (over it is `ResourceExceed
 teardown flattens the tree by renaming subdirectories up to the root with two descriptors
 and no path, and the result and violation pipes are capped: a result larger than the cap is
 `BadOutput`, a flood of violations is recorded up to the cap and then says "and more".
+`RLIMIT_FSIZE` caps one file, and many files at that size through a run directory bound from
+the host would have filled the host disk, so inside the namespace the run directory is a
+tmpfs of a fixed size: the strategy gets `ENOSPC`, the host gets nothing. One consequence,
+stated plainly: in that tier the files-written listing comes from the child, because the
+directory dies with it. That listing was always a hint about caches, never evidence.
 
 Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
