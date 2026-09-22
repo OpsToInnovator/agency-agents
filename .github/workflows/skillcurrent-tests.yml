@@ -1,0 +1,117 @@
+name: SkillCurrent tests
+
+# Runs only when the SkillCurrent example (or this file) changes.
+on:
+  pull_request:
+    paths:
+      - "examples/skillcurrent/**"
+      - ".github/workflows/skillcurrent-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "examples/skillcurrent/**"
+      - ".github/workflows/skillcurrent-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Beta teams run it on their own laptops: Linux and macOS, oldest and newest supported Python.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: examples/skillcurrent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pytest (the app itself has no dependencies)
+        run: python -m pip install "pytest>=8"
+      - name: Run the suite
+        run: python -m pytest -q
+
+  browser:
+    name: landing page form in Chromium
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/skillcurrent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --global playwright
+          npx --yes playwright install --with-deps chromium
+      - name: Run the browser test
+        run: |
+          export NODE_PATH="$(npm root -g)"
+          PYTHON=python node tests/browser/landing_form.mjs
+
+  package:
+    name: clean install, static build and public-mode smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install into a fresh virtual environment (not editable)
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install ./examples/skillcurrent
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: The installed package carries the page, its assets and the font licence
+        working-directory: ${{ runner.temp }}
+        run: |
+          skillcurrent --version
+          skillcurrent build-landing site --site-url https://beta.example.com --endpoint netlify
+          for f in index.html og.png _headers fonts/OFL.txt fonts/fraunces.woff2 fonts/ibm-plex-sans.woff2 fonts/ibm-plex-mono-400.woff2 fonts/ibm-plex-mono-500.woff2; do
+            test -s "site/$f" || { echo "missing site/$f"; exit 1; }
+          done
+          grep -q 'data-netlify="true"' site/index.html
+          if grep -Eq '__(FORM_ATTRS|FORM_EXTRA|ENDPOINT|SITE_URL|CONTACT|PRIVACY_NOTE)__' site/index.html; then
+            echo "unfilled placeholder in site/index.html"; exit 1
+          fi
+      - name: serve --public answers the page, its assets and a sign-up
+        working-directory: ${{ runner.temp }}
+        env:
+          SKILLCURRENT_DB: ${{ runner.temp }}/waitlist.sqlite
+        run: |
+          skillcurrent init --team ops --owner me
+          skillcurrent serve --public --port 8799 --waitlist-team ops --contact beta@example.com --site-url https://beta.example.com > serve.log 2>&1 &
+          server=$!
+          for i in $(seq 1 50); do curl -fsS http://127.0.0.1:8799/api/health && break; sleep 0.2; done
+          # Responses go to files first: with pipefail, `curl | grep -q` can fail when grep exits early.
+          curl -fsS -o page.html http://127.0.0.1:8799/
+          grep -q "Better methods" page.html
+          grep -q "never written to disk" page.html
+          curl -fsS -o /dev/null http://127.0.0.1:8799/og.png
+          curl -fsS -o /dev/null http://127.0.0.1:8799/fonts/fraunces.woff2
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/app)" = 404
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","team_size":"1-4","tools":["codex"],"source":"ci?c=smoke"}' \
+            http://127.0.0.1:8799/api/beta
+          skillcurrent --team ops --as me --json beta > signups.json
+          grep -q '"ci@example.com"' signups.json
+          skillcurrent --team ops --as me beta --sources > sources.txt
+          cat sources.txt
+          grep -q smoke sources.txt
+          kill "$server"
+          cat serve.log
+          grep -q 'beta sign-up new' serve.log
+          # Public mode keeps no request log: no line may carry the client's address.
+          if grep -q 'POST /api/beta' serve.log; then echo "public mode wrote a request log"; exit 1; fi

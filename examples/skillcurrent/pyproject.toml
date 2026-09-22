@@ -1,6 +1,6 @@
 [project]
 name = "skillcurrent"
-version = "0.1.0"
+version = "0.2.0"
 description = "SkillCurrent: shared skill management for teams. One reviewed catalog of SKILL.md files, taken from draft through checks, approval of exact bytes and channel releases to per-environment adoption receipts"
 requires-python = ">=3.11"
 dependencies = []
@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 include = ["skillcurrent*"]
 
 [tool.setuptools.package-data]
-skillcurrent = ["web/*.html"]
+skillcurrent = ["web/*.html", "web/assets/*.png", "web/assets/fonts/*.woff2", "web/assets/fonts/OFL.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -70,7 +70,7 @@ def test_target_directories(tmp_path):
 
 def test_env_home_override(monkeypatch, tmp_path):
     monkeypatch.setenv("SKILLCURRENT_HOME", str(tmp_path))
-    assert TARGETS["codex"].directory() == (tmp_path / ".codex/skills").resolve()
+    assert TARGETS["codex"].directory() == (tmp_path / ".agents/skills").resolve()
 
 
 def test_report_receipts_and_adoption(service, sessions, published, tmp_path):

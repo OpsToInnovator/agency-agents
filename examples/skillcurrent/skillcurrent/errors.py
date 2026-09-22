@@ -37,7 +37,12 @@ class Unauthorized(SkillCurrentError):
     http_status = 401
 
 
-BY_CODE = {cls.code: cls for cls in (NotFound, Forbidden, Invalid, Conflict, Unauthorized)}
+class RateLimited(SkillCurrentError):
+    code = "rate_limited"
+    http_status = 429
+
+
+BY_CODE = {cls.code: cls for cls in (NotFound, Forbidden, Invalid, Conflict, Unauthorized, RateLimited)}
 
 
 def from_code(code: str, message: str) -> SkillCurrentError:

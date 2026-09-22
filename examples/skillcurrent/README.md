@@ -2,7 +2,7 @@
 
 Every AI coding tool now reads *skills*: a `SKILL.md` with `name` and
 `description` front matter and Markdown instructions, one per directory, in
-`~/.claude/skills/`, `~/.gemini/config/skills/`, `~/.codex/skills/`,
+`~/.claude/skills/`, `~/.agents/skills/`, `~/.gemini/config/skills/`,
 `~/.osaurus/skills/` and so on. It is exactly the format this repository's
 `scripts/convert.sh` renders agents into. It works for one person. For a team
 it falls apart: everyone keeps a private copy, nobody knows which version a
@@ -23,11 +23,28 @@ Three interfaces share one engine: a CLI (against a local SQLite file or a
 server), a JSON-RPC style HTTP API, and a browser UI built around the four
 steps. Python 3.11+, standard library only.
 
+## Install
+
+Python 3.11 or newer, no other dependencies. Linux and macOS are tested in
+CI; Windows is not tested yet.
+
+```bash
+# from GitHub, into its own environment (pipx keeps it off your system Python)
+pipx install "git+https://github.com/OpsToInnovator/agency-agents@main#subdirectory=examples/skillcurrent"
+# or with pip, inside a virtual environment
+pip install "git+https://github.com/OpsToInnovator/agency-agents@main#subdirectory=examples/skillcurrent"
+# or from a checkout
+cd examples/skillcurrent && pip install -e .
+```
+
+Every example below also works as `python -m skillcurrent` from
+`examples/skillcurrent` with `PYTHONPATH=$PWD`.
+
 ## Quick start (one machine)
 
 ```bash
 cd examples/skillcurrent
-export PYTHONPATH=$PWD            # or: pip install -e .
+export PYTHONPATH=$PWD            # or install it as above
 export SKILLCURRENT_DB=./northstar.sqlite
 
 python -m skillcurrent init --team northstar --name "Northstar Studio" --owner maya
@@ -82,8 +99,25 @@ python -m skillcurrent install refund-handoff && python -m skillcurrent sync
 
 The server speaks plain HTTP. Put it behind TLS (a reverse proxy, Tailscale,
 an SSH tunnel) before exposing it beyond a trusted network; tokens are bearer
-credentials. For a demo on a trusted network, `serve --no-auth` accepts
-`X-SkillCurrent-Team` and `X-SkillCurrent-User` headers instead of tokens.
+credentials. For a demo on your own machine, `serve --no-auth` accepts
+`X-SkillCurrent-Team` and `X-SkillCurrent-User` headers instead of tokens; it
+refuses to start on anything but a loopback address.
+
+`serve` options worth knowing:
+
+| Flag | What it does |
+|---|---|
+| `--public` | internet-facing waitlist host: serves only the beta page, its assets, `POST /api/beta` and the waitlist operations; the web UI is not served |
+| `--trust-proxy` | read the client address from `X-Forwarded-For` (only behind your own reverse proxy) for the sign-up rate limit |
+| `--allow-origin URL` | allow the beta form on another origin (a static copy of the page) to post here; repeatable |
+| `--contact EMAIL` | the reply address shown on the beta page [`SKILLCURRENT_CONTACT`] |
+| `--site-url URL` | the page's public address, for link previews [`SKILLCURRENT_SITE_URL`] |
+| `--waitlist-team SLUG` | the team whose owners may read the waitlist [`SKILLCURRENT_WAITLIST_TEAM`] |
+| `--access-log` / `--quiet` | request log with client addresses: on by default for a team server, off with `--public` unless `--access-log`; `--quiet` turns it off |
+
+`skillcurrent backup DEST` writes a consistent copy of the database while
+the server runs. `deploy/` has a Caddyfile (automatic HTTPS), a Docker
+Compose file, a systemd unit and a daily backup script.
 
 ## The rules the engine enforces
 
@@ -165,9 +199,18 @@ license: MIT                         # any other keys are kept as-is
 | `claude-code-project` | `<project>/.claude/skills/<name>/SKILL.md` |
 | `antigravity` | `~/.gemini/config/skills/<name>/SKILL.md` |
 | `antigravity-project` | `<project>/.agents/skills/<name>/SKILL.md` |
-| `codex` | `~/.codex/skills/<name>/SKILL.md` |
+| `codex` | `~/.agents/skills/<name>/SKILL.md` |
 | `osaurus` | `~/.osaurus/skills/<name>/SKILL.md` |
 | `custom` | `--dir <directory>/<name>/SKILL.md` |
+
+The folders were checked against each vendor's documentation on 22
+September 2026. Codex documents `~/.agents/skills` for user skills; its
+older `~/.codex/skills` is deprecated. Gemini CLI and Cursor say they read
+`~/.agents/skills` too, and Cursor also reads `~/.claude/skills`.
+Antigravity documents `~/.gemini/config/skills` and a workspace's
+`.agents/skills`. The Osaurus folder has not been checked. Vendors move
+these folders; if a tool doesn't pick a skill up, install it with
+`--target custom --dir <folder>`.
 
 `SKILLCURRENT_HOME` overrides the home directory for global targets;
 `SKILLCURRENT_HOST` (or `--host`) names the machine in receipts (default:
@@ -215,15 +258,43 @@ method minus `team` and `actor`, which come from the token. Notable ones:
 hash of the whole index, so two runtimes can prove they retrieved the same
 generation.
 
-## Beta landing page and waitlist
+## Beta page, waitlist and beta report
 
-`landing/index.html` is a single-file beta landing page (inline CSS, light
-and dark mode, no build step). `skillcurrent serve` serves it at `/beta`,
-and its form posts to `POST /api/beta` on the same server, which stores
-sign-ups (email, team size, tools in use, note) in the catalog database.
-Owners read them with `skillcurrent beta` or the `list_beta_signups`
-operation. The page also works from any static host; when no endpoint
-answers, the form shows the visitor their entry to send by hand.
+`skillcurrent/web/beta.html` is the beta page (inline CSS, light and dark
+mode, self-hosted fonts, no third-party requests). It ships inside the
+package, so every install can serve or build it:
+
+- `skillcurrent serve` serves it at `/beta`; with `--public` it is also the
+  front page. Its form posts to `POST /api/beta` on the same server, which
+  stores sign-ups (email, team size, tools, note, and the link's `c` and
+  `utm_` tags) in the database. A repeat sign-up for the same email never
+  overwrites: it fills gaps, unions tools, appends the note and counts.
+  Sign-ups are rate limited per client address, held in memory only.
+- `skillcurrent build-landing OUT --site-url URL [--endpoint ...]` writes
+  the page, its assets, the font licence and a `_headers` file for a static
+  host. `--endpoint` is `/api/beta` (the default), the https URL of a
+  `serve --public` host (also pass `--allow-origin` there), `netlify`
+  (Netlify Forms) or `mailto` (no server: the visitor's email app sends the
+  entry to `--contact`).
+
+The privacy line under the form is generated to match how the form
+submits and whether the server keeps a request log.
+
+Owners of the waitlist team manage sign-ups:
+
+```bash
+skillcurrent beta                      # list
+skillcurrent beta --sources            # sign-ups per link tag (?c=drift, utm_source=...)
+skillcurrent beta remove person@x.co   # a deletion request
+skillcurrent beta import export.csv    # merge a static host's form export
+```
+
+Beta teams answer two questions with `skillcurrent beta-report [--days 7]`:
+did the team keep review switched on, and did sync ever catch a bad copy
+(a hand-modified or missing copy). It holds counts only, no skill content,
+names or emails, and it says "never checked" when no status or sync run was
+reported, so a silent hook is not mistaken for a clean one. `BETA.md` is the
+guide for pilot teams; `LAUNCH.md` is the plan for running the beta.
 
 ## Layout
 
@@ -238,11 +309,18 @@ skillcurrent/
   session.py       LocalSession (in-process) and RemoteSession (HTTP), same call() surface
   installer.py     targets, install/uninstall/status/sync/report with drift detection
   importer.py      import SKILL.md folders and Agency agent files
-  server.py        ThreadingHTTPServer: POST /api/rpc, GET /api/health, GET /
+  server.py        ThreadingHTTPServer: /api/rpc, /api/beta, /api/health, the UI and the beta page; --public mode
   cli.py           argparse CLI
   web/index.html   single-file browser UI (vanilla JS): library, change room, adoption, rules
-landing/index.html beta landing page, served at /beta; form posts to /api/beta
-tests/             pytest: parser, checks, service rules, releases, installer, importer, server, CLI
+  web/beta.html    the beta page, served at /beta (and / with --public), or built with build-landing
+  web/assets/      og.png and self-hosted fonts (SIL OFL, licence in fonts/OFL.txt)
+deploy/            Caddyfile, docker-compose.yml, systemd unit, backup script
+docs/beta/         beta terms, call scripts, email templates
+marketing/ads/     ad creatives (rendered from HTML) and channel copy
+tests/             pytest: parser, checks, service rules, releases, installer, importer, server, CLI,
+                   public mode, beta measurement; tests/browser/ drives the beta form in Chromium
+BETA.md            guide for pilot teams          LAUNCH.md   plan for running the beta
+SECURITY.md        reporting a vulnerability       CONTRIBUTING.md
 ```
 
 ## Tests
@@ -255,7 +333,11 @@ pytest
 One test drives the landing page's waitlist form in a real browser
 (`tests/browser/landing_form.mjs`, Node + Playwright). It runs when `node`
 and a `playwright` package are available and is skipped otherwise, so the
-suite still passes on a machine with only Python.
+suite still passes on a machine with only Python. Another runs the page's
+terminal walkthrough command by command, so the page cannot drift from the
+CLI. CI (`.github/workflows/skillcurrent-tests.yml`) runs the suite on
+Linux and macOS, the browser test, and a clean install with a `--public`
+smoke test.
 
 ## Limits, honestly
 
@@ -269,3 +351,7 @@ suite still passes on a machine with only Python.
 - `sync` only touches installs it recorded. Skills copied into a tool
   directory by hand are invisible to it.
 - The web UI uses browser prompts for review notes and reasons.
+- The sign-up rate limit lives in one process's memory; it resets on
+  restart and is not shared between processes.
+- Schema upgrades are additive only (new columns and tables), so an upgrade
+  keeps the evidence a team has collected. Take a `backup` first anyway.

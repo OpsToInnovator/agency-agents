@@ -1,0 +1,30 @@
+# systemd unit for `skillcurrent serve` without Docker.
+#   sudo useradd --system --home /var/lib/skillcurrent --create-home skillcurrent
+#   sudo -u skillcurrent python3 -m venv /var/lib/skillcurrent/venv      # Python 3.11 or newer
+#   sudo -u skillcurrent /var/lib/skillcurrent/venv/bin/pip install \
+#     "git+https://github.com/OpsToInnovator/agency-agents@main#subdirectory=examples/skillcurrent"
+#   sudo cp deploy/skillcurrent.service /etc/systemd/system/ && sudo systemctl enable --now skillcurrent
+# Logs: journalctl -u skillcurrent -f
+[Unit]
+Description=SkillCurrent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=skillcurrent
+Environment=SKILLCURRENT_DB=/var/lib/skillcurrent/skillcurrent.sqlite
+Environment=SKILLCURRENT_CONTACT=beta@example.com
+Environment=SKILLCURRENT_SITE_URL=https://beta.example.com
+Environment=SKILLCURRENT_WAITLIST_TEAM=beta
+# Loopback only; Caddy (deploy/Caddyfile) terminates TLS in front of it.
+ExecStart=/var/lib/skillcurrent/venv/bin/skillcurrent serve --host 127.0.0.1 --port 8765 --public --trust-proxy
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/skillcurrent
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

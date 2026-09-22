@@ -7,4 +7,4 @@ coding tools (Claude Code, Antigravity, Osaurus, Codex, ...) and keeps them
 in sync.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

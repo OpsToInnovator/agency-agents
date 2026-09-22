@@ -6,13 +6,29 @@
 <title>SkillCurrent Beta</title>
 <meta name="description" content="One reviewed catalog of your team's AI skills. Approve exact bytes, know where every version landed, and see when a copy drifted. Join the beta.">
 <meta name="theme-color" content="#286445">
+<link rel="canonical" href="__SITE_URL__/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SkillCurrent">
+<meta property="og:title" content="SkillCurrent: better methods, not more files">
+<meta property="og:description" content="One reviewed catalog of your team's AI skills. Approve exact bytes, know where every version landed, and see when a copy drifted. Free beta pilot.">
+<meta property="og:url" content="__SITE_URL__/">
+<meta property="og:image" content="__SITE_URL__/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="628">
+<meta property="og:image:alt" content="SkillCurrent: Better methods. Not more files. Join the beta.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="SkillCurrent: better methods, not more files">
+<meta name="twitter:description" content="One reviewed catalog of your team's AI skills. Free beta pilot for teams on two or more AI coding tools.">
+<meta name="twitter:image" content="__SITE_URL__/og.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23286445'/%3E%3Cpath d='M6 8h12l-4 7h12L14 28l4-9H5l5-7H6V8Z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
+  /* Fonts ship with the page (SIL Open Font License); the page makes no third-party requests. */
+  @font-face { font-family: "Fraunces"; font-style: normal; font-weight: 400 700; font-display: swap; src: url(fonts/fraunces.woff2) format("woff2"); }
+  @font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400 700; font-display: swap; src: url(fonts/ibm-plex-sans.woff2) format("woff2"); }
+  @font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/ibm-plex-mono-400.woff2) format("woff2"); }
+  @font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url(fonts/ibm-plex-mono-500.woff2) format("woff2"); }
   :root {
-    --bg: #fcfcfa; --paper: #ffffff; --side: #f2f3ee; --ink: #232d29; --muted: #66716a; --line: #dfe4dc;
+    --bg: #fcfcfa; --paper: #ffffff; --ink: #232d29; --muted: #66716a; --line: #dfe4dc;
     --accent: #286445; --accent-hover: #1d5137; --accent-soft: #eaf2e8; --accent-text: #295d3b; --accent-ink: #ffffff;
     --amber: #885b20; --amber-soft: #faf2e4; --red: #a34b3d; --red-soft: #fcf0eb;
     --term-bg: #1b251f; --term-ink: #e4e9e2; --term-muted: #a4b0a6; --term-accent: #a6cbaa;
@@ -23,7 +39,7 @@
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #18201c; --paper: #1b251f; --side: #171f1b; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
+      --bg: #18201c; --paper: #1b251f; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
       --accent: #a6cbaa; --accent-hover: #bbdbba; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712;
       --amber: #ebc48c; --amber-soft: #413624; --red: #efb2a2; --red-soft: #402c27;
       --term-bg: #101713; --term-ink: #e4e9e2; --term-muted: #a4b0a6; --term-accent: #a6cbaa;
@@ -31,7 +47,7 @@
     }
   }
   :root[data-theme="dark"] {
-    --bg: #18201c; --paper: #1b251f; --side: #171f1b; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
+    --bg: #18201c; --paper: #1b251f; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b;
     --accent: #a6cbaa; --accent-hover: #bbdbba; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712;
     --amber: #ebc48c; --amber-soft: #413624; --red: #efb2a2; --red-soft: #402c27;
     --term-bg: #101713; --term-ink: #e4e9e2; --term-muted: #a4b0a6; --term-accent: #a6cbaa;
@@ -57,7 +73,8 @@
   .hero .sub { font-size: clamp(18px, 2.2vw, 22px); line-height: 1.45; max-width: 34em; margin: 22px 0 30px; color: var(--ink); }
   .cta { display: inline-flex; align-items: center; gap: 10px; background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 10px; padding: 14px 22px; font: 600 16px var(--sans); text-decoration: none; cursor: pointer; }
   .cta:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .cta:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .cta:disabled { opacity: .6; cursor: default; }
+  .cta:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible, .status:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   .fine { color: var(--muted); font-size: 14px; margin-top: 14px; }
   .problem p { font-family: var(--display); font-size: clamp(22px, 3vw, 30px); line-height: 1.3; margin: 0; padding: 18px 0; border-bottom: 1px solid var(--line); max-width: 24em; }
   .problem p:last-child { border-bottom: none; }
@@ -67,7 +84,7 @@
   .step:last-child { border-right: none; }
   .step .n { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; font: 500 13px var(--mono); }
   .step p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.5; }
-  .step code { font-family: var(--mono); font-size: 13px; background: var(--accent-soft); color: var(--accent-text); padding: 1px 5px; border-radius: 4px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--accent-soft); color: var(--accent-text); padding: 1px 5px; border-radius: 4px; }
   .lede { color: var(--muted); font-size: 17px; max-width: 40em; margin: 12px 0 0; }
   .proof { display: grid; grid-template-columns: 1.3fr 1fr; gap: 28px; align-items: start; margin-top: 28px; }
   .term { background: var(--term-bg); color: var(--term-ink); border-radius: 14px; padding: 18px 20px; overflow-x: auto; font: 13.5px/1.7 var(--mono); }
@@ -76,8 +93,8 @@
   .term .o { color: var(--term-muted); }
   .term pre { margin: 0; font: inherit; white-space: pre; }
   .proof aside { display: flex; flex-direction: column; gap: 14px; }
-  .proof aside .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 15px; }
-  .proof aside .kv dt { color: var(--muted); margin: 0; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 13px; padding-top: 2px; }
+  .proof aside .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 15px; margin: 0; }
+  .proof aside .kv dt { color: var(--muted); margin: 0; font-family: var(--mono); font-size: 13px; padding-top: 2px; }
   .proof aside .kv dd { margin: 0; }
   .note { background: var(--accent-soft); color: var(--accent-text); border-radius: 10px; padding: 12px 14px; font-size: 15px; }
   .beta { background: var(--paper); border: 1px solid var(--line); border-radius: 16px; padding: 32px; display: grid; grid-template-columns: 1fr 1fr; gap: 32px; margin-top: 28px; }
@@ -86,37 +103,45 @@
   form { display: grid; gap: 14px; }
   label { display: grid; gap: 6px; font-size: 14px; font-weight: 600; }
   input, select, textarea { font: 16px var(--sans); padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; }
+  input[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--red); }
   textarea { min-height: 72px; resize: vertical; }
   fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 12px; margin: 0; }
   legend { font-size: 14px; font-weight: 600; padding: 0 4px; }
   .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
   .checks label { display: flex; align-items: center; gap: 8px; font-weight: 400; font-size: 15px; }
   .checks input { width: auto; margin: 0; }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
   .status { font-size: 15px; border-radius: 8px; padding: 10px 12px; }
+  .status:empty { display: none; }
   .status.ok { background: var(--accent-soft); color: var(--accent-text); }
   .status.warn { background: var(--amber-soft); color: var(--amber); }
   .status.bad { background: var(--red-soft); color: var(--red); }
   .status pre { white-space: pre-wrap; font: 13px var(--mono); margin: 8px 0 0; }
+  .privacy { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0; }
   footer { padding-block: 28px 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  [data-contact-only] { display: none; }
+  body.has-contact [data-contact-only] { display: revert; }
+  body.has-contact [data-no-contact] { display: none; }
   @media (max-width: 900px) { .steps { grid-template-columns: 1fr 1fr; } .step:nth-child(2) { border-right: none; } .step:nth-child(-n+2) { border-bottom: 1px solid var(--line); } .proof, .beta { grid-template-columns: 1fr; } }
   @media (max-width: 560px) { .steps { grid-template-columns: 1fr; } .step { border-right: none; border-bottom: 1px solid var(--line); } .step:last-child { border-bottom: none; } .checks { grid-template-columns: 1fr; } .beta { padding: 22px; } section { padding-block: 44px; } }
 </style>
 </head>
-<body>
+<body data-contact="__CONTACT__">
 <div class="wrap">
   <header class="top">
     <a class="brand" href="#top" id="top">
       <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#286445"/><path d="M6 8h12l-4 7h12L14 28l4-9H5l5-7H6V8Z" fill="#fff"/></svg>
       skillcurrent.
     </a>
-    <span class="pill">Private beta</span>
+    <span class="pill">Beta pilot</span>
   </header>
 
+  <main>
   <section class="hero">
     <h1>Better methods.<br>Not more files.</h1>
     <p class="sub">One reviewed catalog of your team's AI skills. Approve exact bytes, know where every version landed, and see when a copy drifted.</p>
     <a class="cta" href="#beta">Join the beta <span aria-hidden="true">→</span></a>
-    <p class="fine">Free during the beta. Self-hosted, standard library only, one SQLite file.</p>
+    <p class="fine">Free during the beta. Self-hosted, standard library only, one SQLite file. <a href="https://github.com/OpsToInnovator/agency-agents/tree/main/examples/skillcurrent">Read the source</a>.</p>
   </section>
 
   <section class="problem">
@@ -134,7 +159,7 @@
       <div class="step"><span class="n">01</span><h3>Edit</h3><p>Draft in a safe place. Production stays on the last approved version until you say otherwise.</p></div>
       <div class="step"><span class="n">02</span><h3>Test</h3><p>Checks run against the exact draft: package shape, required sections, no secrets, no machine paths, plus your team's own rules.</p></div>
       <div class="step"><span class="n">03</span><h3>Release</h3><p>A different maintainer approves an immutable, digest-stamped version. Release to canary, then the team. Roll back by pointing the channel at the previous version.</p></div>
-      <div class="step"><span class="n">04</span><h3>Adoption</h3><p><code>status</code> and <code>sync</code> show every copy as current, outdated, modified, missing or deprecated. Installed is not the same as loaded, and the log says which.</p></div>
+      <div class="step"><span class="n">04</span><h3>Adoption</h3><p><code>status</code> and <code>sync</code> show every copy as current, outdated, modified, missing or deprecated, and record what they found. Installed is not the same as loaded; a loaded receipt comes from your tool's hook.</p></div>
     </div>
   </section>
 
@@ -142,9 +167,11 @@
     <div class="eyebrow">Sixty seconds</div>
     <h2>The whole loop, from a terminal.</h2>
     <div class="proof">
-      <div class="term" aria-label="Terminal walkthrough"><pre><span class="c"># one machine to start; add --server later</span>
+      <div class="term" aria-label="Terminal walkthrough"><pre id="walkthrough"><span class="c"># one machine to start; add --server later</span>
 <span class="p">$</span> skillcurrent init --team northstar --owner maya
+<span class="p">$</span> export SKILLCURRENT_TEAM=northstar SKILLCURRENT_USER=maya
 <span class="p">$</span> skillcurrent members add noah --role maintainer
+<span class="p">$</span> skillcurrent members add sam --role contributor
 
 <span class="c"># 01 edit · 02 test</span>
 <span class="p">$</span> skillcurrent --as sam skills new ./refund-handoff/SKILL.md
@@ -154,16 +181,16 @@
 
 <span class="c"># 03 release · a different maintainer approves the bytes</span>
 <span class="p">$</span> skillcurrent --as noah skills approve refund-handoff --release production
-<span class="o">Approved refund-handoff 1.0.0; sha256 536a76c3…</span>
+<span class="o">Approved refund-handoff 1.0.0 (authored by sam); sha256 2fffa7f67a44…</span>
 
 <span class="c"># 04 adoption</span>
 <span class="p">$</span> skillcurrent install refund-handoff
-<span class="p">$</span> skillcurrent sync
-<span class="o">refund-handoff  claude-code  production  1.0.0  current</span></pre></div>
+<span class="p">$</span> skillcurrent status
+<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  current</span></pre></div>
       <aside>
         <dl class="kv">
           <dt>works with</dt><dd>Claude Code, Antigravity, Codex and Osaurus skill directories today, plus any custom folder.</dd>
-          <dt>format</dt><dd>Plain <code>SKILL.md</code> with front matter. Nothing to convert, nothing to lock in.</dd>
+          <dt>format</dt><dd>Plain <code>SKILL.md</code> with front matter. Approval adds one version line; nothing else is converted.</dd>
           <dt>runs on</dt><dd>Python 3.11+, no dependencies. A CLI, an HTTP API and a browser UI over one SQLite file.</dd>
         </dl>
         <div class="note">A passing check is specific evidence about those bytes, not a guarantee of how an agent will behave. The adoption log reports events, never promises.</div>
@@ -181,9 +208,9 @@
           <li>whether you keep review switched on, and</li>
           <li>whether <code>sync</code> ever catches a bad copy.</li>
         </ul>
-        <p class="fine">No logos, no case studies, no numbers we haven't seen. If the beta shows the workflow doesn't earn its keep, we'll say so.</p>
+        <p class="fine">You run it on your own machines. Once a week you send us the counts from <code>skillcurrent beta-report</code>: numbers only, no skill content, no names. No logos, no case studies, no numbers we haven't seen. If the beta shows the workflow doesn't earn its keep, we'll say so.</p>
       </div>
-      <form id="beta-form" data-endpoint="/api/beta" novalidate>
+      <form id="beta-form" data-endpoint="__ENDPOINT__" novalidate __FORM_ATTRS__>__FORM_EXTRA__
         <label for="email">Work email<input id="email" name="email" type="email" required autocomplete="email" placeholder="you@company.com"></label>
         <label for="team_size">Team size<select id="team_size" name="team_size" required>
           <option value="" selected disabled>Choose one</option>
@@ -198,14 +225,19 @@
           <label><input type="checkbox" name="tools" value="other" id="t6"> Other</label>
         </div></fieldset>
         <label for="note">Anything we should know? <span style="font-weight:400;color:var(--muted)">(optional)</span><textarea id="note" name="note" placeholder="How you share skills today, what has gone wrong"></textarea></label>
+        <div class="hp" aria-hidden="true"><label for="website">Leave this empty<input id="website" name="website" type="text" tabindex="-1" autocomplete="off"></label></div>
+        <input type="hidden" id="source" name="source" value="">
         <button class="cta" type="submit" id="submit">Join the beta <span aria-hidden="true">→</span></button>
-        <div id="status" class="status" hidden role="status" aria-live="polite"></div>
+        <div id="status" class="status" role="status" aria-live="polite" tabindex="-1"></div>
+        <p class="privacy">__PRIVACY_NOTE__ <span data-contact-only>To see or delete your entry, write to <a class="contact-link" href="#"></a>.</span><span data-no-contact>To see or delete your entry, reply to our email.</span></p>
+        <noscript><p class="privacy">Without JavaScript the form still posts. <span data-contact-only>You can also write to the address above.</span></p></noscript>
       </form>
     </div>
   </section>
+  </main>
 
   <footer>
-    <span>SkillCurrent · private beta</span>
+    <span>SkillCurrent · beta pilot · <a href="https://github.com/OpsToInnovator/agency-agents/tree/main/examples/skillcurrent">source</a><span data-contact-only> · <a class="contact-link" href="#"></a></span></span>
     <span>Self-hosted. Your catalog stays on your machines.</span>
   </footer>
 </div>
@@ -214,39 +246,83 @@
   const form = document.getElementById('beta-form');
   const status = document.getElementById('status');
   const button = document.getElementById('submit');
-  const show = (cls, text, detail) => { status.className = 'status ' + cls; status.textContent = text; if (detail) { const pre = document.createElement('pre'); pre.textContent = detail; status.append(pre); } status.hidden = false; };
+  const endpoint = form.dataset.endpoint;
+  const contact = (document.body.dataset.contact || '').trim();
+  const TAGS = ['c', 'utm_source', 'utm_medium', 'utm_campaign', 'ref'];
+
+  if (contact && !contact.startsWith('__')) {
+    document.body.classList.add('has-contact');
+    document.querySelectorAll('.contact-link').forEach((a) => { a.textContent = contact; a.href = 'mailto:' + contact; });
+  }
+
+  // Which link brought the visitor: an allowlist of query parameters, read from this page's address only.
+  // Nothing is stored on the visitor's device.
+  const query = new URLSearchParams(location.search);
+  const tags = TAGS.filter((k) => query.get(k)).map((k) => k + '=' + query.get(k).slice(0, 40)).join('&');
+  document.getElementById('source').value = ((location.host || 'file') + (tags ? '?' + tags : '')).slice(0, 200);
+
+  const say = (cls, text, detail, link) => {
+    status.textContent = '';
+    status.className = 'status ' + cls;
+    status.append(document.createTextNode(text));
+    if (link) { status.append(' '); const a = document.createElement('a'); a.href = link.href; a.textContent = link.text; status.append(a); }
+    if (detail) { const pre = document.createElement('pre'); pre.textContent = detail; status.append(pre); }
+  };
+  const mark = (field, on) => { if (on) { field.setAttribute('aria-invalid', 'true'); field.setAttribute('aria-describedby', 'status'); } else { field.removeAttribute('aria-invalid'); field.removeAttribute('aria-describedby'); } };
   const entry = () => ({
     email: form.email.value.trim(),
     team_size: form.team_size.value,
     tools: Array.from(form.querySelectorAll('input[name="tools"]:checked')).map((i) => i.value),
     note: form.note.value.trim(),
-    source: location.host || 'preview',
+    source: document.getElementById('source').value,
+    website: form.website.value,
   });
-  async function postToServer(data) {
-    const res = await fetch(form.dataset.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const asText = (d) => `email: ${d.email}\nteam size: ${d.team_size}\ntools: ${d.tools.join(', ')}\nnote: ${d.note}\nsource: ${d.source}`;
+  const mailto = (d) => 'mailto:' + contact + '?subject=' + encodeURIComponent('SkillCurrent beta') + '&body=' + encodeURIComponent(asText(d));
+  const thanks = contact && !contact.startsWith('__')
+    ? `You're on the list. We'll reply by email within two working days. If you don't hear back, write to ${contact}.`
+    : "You're on the list. We'll reply by email within two working days.";
+
+  if (new URLSearchParams(location.search).get('joined') === '1') {
+    say('ok', thanks);
+    location.hash = 'beta';
+  }
+
+  async function send(d) {
+    if (endpoint === 'netlify') {
+      const body = new URLSearchParams({ 'form-name': 'beta', email: d.email, team_size: d.team_size, tools: d.tools.join(', '), note: d.note, source: d.source, website: d.website });
+      const res = await fetch(location.pathname || '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return;
+    }
+    const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
     const payload = await res.json().catch(() => ({}));
+    if (res.status === 429 || res.status === 400) { const err = new Error((payload.error && payload.error.message) || 'rejected'); err.userFacing = true; throw err; }
     if (!res.ok || !payload.ok) throw new Error((payload.error && payload.error.message) || ('HTTP ' + res.status));
-    return 'server';
   }
-  async function saveToArtifact(data) {
-    const db = window.claude && window.claude.use ? await window.claude.use('db') : null;
-    if (!db) throw new Error('no store');
-    await db.collection('signups').add({ ...data, created_at: new Date().toISOString() });
-    return 'artifact';
-  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const data = entry();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) { show('warn', 'Enter a work email address so we can reply.'); form.email.focus(); return; }
-    if (!data.team_size) { show('warn', 'Pick a team size.'); form.team_size.focus(); return; }
+    const d = entry();
+    mark(form.email, false); mark(form.team_size, false);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { mark(form.email, true); say('warn', 'Enter a work email address so we can reply.'); form.email.focus(); return; }
+    if (!d.team_size) { mark(form.team_size, true); say('warn', 'Pick a team size.'); form.team_size.focus(); return; }
+    if (endpoint === 'mailto') {
+      if (contact && !contact.startsWith('__')) { location.href = mailto(d); say('ok', `Your email app should open with your entry, addressed to ${contact}. Send it and you're on the list.`); }
+      else { say('bad', 'This page has no sign-up address configured. Copy your entry and send it to whoever shared the link.', asText(d)); }
+      return;
+    }
     button.disabled = true;
     try {
-      let via;
-      try { via = await postToServer(data); } catch (serverError) { via = await saveToArtifact(data); }
-      show('ok', via === 'server' ? "You're on the list. We'll reply from a person, not a sequence." : "Saved to this preview's sign-up list. We'll reply from a person, not a sequence.");
+      await send(d);
+      say('ok', thanks);
       form.reset();
+      document.getElementById('source').value = ((location.host || 'file') + (tags ? '?' + tags : '')).slice(0, 200);
+      status.focus();
     } catch (err) {
-      show('bad', "This preview can't reach a waitlist yet. Copy your entry and send it to the person who shared this page.", JSON.stringify(data, null, 2));
+      if (err.userFacing) { say('warn', err.message); }
+      else if (contact && !contact.startsWith('__')) { say('bad', "The sign-up service didn't answer. Email your entry instead:", asText(d), { href: mailto(d), text: 'open an email to ' + contact }); }
+      else { say('bad', "The sign-up service didn't answer. Copy your entry and try again later.", asText(d)); }
     } finally { button.disabled = false; }
   });
 })();

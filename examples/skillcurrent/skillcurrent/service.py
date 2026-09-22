@@ -12,6 +12,8 @@ import hashlib
 import json
 import re
 import secrets
+import statistics
+from datetime import datetime, timedelta, timezone
 
 from . import checks, semver, skillfile
 from .errors import Conflict, Forbidden, Invalid, NotFound
@@ -28,6 +30,13 @@ HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SLUG_RE = skillfile.NAME_RE
 TOKEN_PREFIX = "ts_"
+# Values the beta form offers; anything else posted to the open endpoint is dropped.
+BETA_TEAM_SIZES = ("1-4", "5-15", "16-50", "50+")
+BETA_TOOLS = ("claude-code", "antigravity", "codex", "osaurus", "cursor", "other")
+# What `status`/`sync` can find on disk, and what they did about it.
+DRIFT_STATES = ("modified", "missing", "outdated")
+BAD_COPY_STATES = ("modified", "missing")
+DRIFT_RESPONSES = ("observed", "repaired", "forced", "kept_local")
 
 
 def rpc(fn):
@@ -44,8 +53,13 @@ def _new_token() -> str:
 
 
 class Service:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, waitlist_team: str | None = None, auth_mode: str = "local"):
         self.store = store
+        # The landing-page waitlist is instance-wide data, readable only by
+        # owners of this one team (or of the only team, when there is one).
+        self.waitlist_team = (waitlist_team or "").strip() or None
+        # How callers are identified: "token" or "none" when served, "local" for the CLI on a DB file.
+        self.auth_mode = auth_mode
 
     # ------------------------------------------------------------------ helpers
     def _team(self, slug: str) -> dict:
@@ -225,28 +239,85 @@ class Service:
         return (m["team_slug"], m["handle"]) if m else None
 
     # ----------------------------------------------------------- beta waitlist
-    def record_beta_signup(self, email: str, team_size: str = "", tools=None, note: str = "", source: str = "") -> dict:
-        """Store a landing-page sign-up. Unauthenticated by design; validated and size-capped."""
-        email = (email or "").strip().lower()
+    @staticmethod
+    def _clean_signup(email, team_size="", tools=None, note="", source="") -> tuple[str, str, list[str], str, str]:
+        email = str(email or "").strip().lower()
         if not EMAIL_RE.match(email) or len(email) > 254:
             raise Invalid("enter a valid email address")
-        team_size = str(team_size or "").strip()[:32]
+        team_size = str(team_size or "").strip()
+        team_size = team_size if team_size in BETA_TEAM_SIZES else ""
         if isinstance(tools, str):
-            tools = [t for t in tools.split(",") if t.strip()]
-        tools = [str(t).strip().lower()[:32] for t in (tools or []) if str(t).strip()][:20]
+            tools = [t for t in re.split(r"[,;\s]+", tools) if t]
+        wanted = [str(t).strip().lower() for t in (tools or []) if str(t).strip()]
+        tools = [t for t in BETA_TOOLS if t in wanted]
         note = str(note or "").strip()[:2000]
         source = str(source or "").strip()[:200]
-        self.store.upsert_beta_signup(email, team_size, tools, note, source)
-        return {"email": email, "team_size": team_size, "tools": tools}
+        return email, team_size, tools, note, source
+
+    def record_beta_signup(self, email: str, team_size: str = "", tools=None, note: str = "", source: str = "") -> dict:
+        """Store a landing-page sign-up. Unauthenticated by design: validated,
+        size-capped, restricted to the form's own choices, and merged without
+        overwriting when the same email posts again."""
+        email, team_size, tools, note, source = self._clean_signup(email, team_size, tools, note, source)
+        new = self.store.upsert_beta_signup(email, team_size, tools, note, source)
+        return {"email": email, "team_size": team_size, "tools": tools, "new": new}
+
+    def _waitlist_admin(self, team: str, actor: str) -> None:
+        t, m = self._ctx(team, actor)
+        self._require(m, "owner", "reading or changing the beta waitlist")
+        admin = self.waitlist_team
+        if admin is None:
+            teams = self.store.teams()
+            if len(teams) != 1:
+                raise Forbidden(
+                    "this database holds several teams, so the waitlist has no default owner; "
+                    "set SKILLCURRENT_WAITLIST_TEAM (or serve --waitlist-team) to the team whose owners may read it"
+                )
+            admin = teams[0]["slug"]
+        if t["slug"] != admin:
+            raise Forbidden(f"the waitlist belongs to team {admin!r}; owners of {t['slug']!r} cannot read it")
 
     @rpc
     def list_beta_signups(self, team: str, actor: str) -> list[dict]:
-        _, m = self._ctx(team, actor)
-        self._require(m, "owner", "reading beta sign-ups")
+        self._waitlist_admin(team, actor)
         return [
-            {k: r[k] for k in ("email", "team_size", "tools", "note", "source", "created_at", "updated_at")}
+            {k: r[k] for k in ("email", "team_size", "tools", "note", "source", "submissions", "created_at", "updated_at")}
             for r in self.store.beta_signups()
         ]
+
+    @rpc
+    def remove_beta_signup(self, team: str, actor: str, email: str) -> dict:
+        """Delete one sign-up, for deletion requests. Returns whether a row existed."""
+        self._waitlist_admin(team, actor)
+        email = str(email or "").strip().lower()
+        return {"email": email, "removed": self.store.delete_beta_signup(email)}
+
+    @rpc
+    def import_beta_signups(self, team: str, actor: str, rows: list) -> dict:
+        """Merge sign-ups exported from elsewhere (for example a static host's
+        form service) into the waitlist. Rows that fail validation are
+        counted, never half-stored."""
+        self._waitlist_admin(team, actor)
+        if not isinstance(rows, list) or len(rows) > 5000:
+            raise Invalid("rows must be a list of at most 5000 objects")
+        added = merged = skipped = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                skipped += 1
+                continue
+            try:
+                email, team_size, tools, note, source = self._clean_signup(
+                    row.get("email"), row.get("team_size"), row.get("tools"), row.get("note"), row.get("source")
+                )
+            except Invalid:
+                skipped += 1
+                continue
+            created = str(row.get("created_at") or "").strip() or None
+            if self.store.upsert_beta_signup(email, team_size, tools, note, source, created_at=created):
+                added += 1
+            else:
+                merged += 1
+        return {"added": added, "merged": merged, "skipped": skipped}
 
     # ------------------------------------------------------------------ members
     @rpc
@@ -800,7 +871,7 @@ class Service:
 
     # ----------------------------------------------------------------- installs
     @rpc
-    def record_install(self, team: str, actor: str, slug: str, version: str, target: str, path: str, content_hash: str, host: str = "", channel: str = DEFAULT_CHANNEL) -> dict:
+    def record_install(self, team: str, actor: str, slug: str, version: str, target: str, path: str, content_hash: str, host: str = "", channel: str = DEFAULT_CHANNEL, reason: str = "") -> dict:
         """Record that an environment (member + host + target) holds these bytes, and write an ``installed`` receipt."""
         t, _ = self._ctx(team, actor)
         skill = self._skill(t, slug)
@@ -812,7 +883,7 @@ class Service:
         with self.store.tx():
             self.store.upsert_install(t["id"], actor, host, skill["id"], version, channel, target, path, content_hash)
             self.store.insert_receipt(t["id"], actor, host, target, skill["id"], version, "installed", content_hash, path)
-            self._log(t, actor, "skill.installed", slug, version=version, target=target, host=host, channel=channel)
+            self._log(t, actor, "skill.installed", slug, version=version, target=target, host=host, channel=channel, reason=str(reason or "")[:60])
         return {"slug": slug, "version": version, "target": target, "path": path, "host": host, "channel": channel}
 
     @rpc
@@ -845,8 +916,42 @@ class Service:
             content_hash = content_hash or install["content_hash"]
         with self.store.tx():
             self.store.insert_receipt(t["id"], actor, host, target, skill["id"], version, event, content_hash or "", detail or "")
-            self._log(t, actor, f"receipt.{event}", slug, version=version, target=target, host=host, detail=detail or "")
+            # `verified` fires on every status/sync run; it lives in receipts only so
+            # it cannot bury review and drift events in the activity log.
+            if event != "verified":
+                self._log(t, actor, f"receipt.{event}", slug, version=version, target=target, host=host, detail=detail or "")
         return {"slug": slug, "event": event, "version": version, "target": target, "host": host}
+
+    @rpc
+    def report_drift(self, team: str, actor: str, slug: str, target: str, state: str, host: str = "", installed_version: str = "",
+                     channel_version: str = "", response: str = "observed") -> dict:
+        """Record that an environment's copy did not match what its channel serves.
+
+        ``state`` is what ``status`` found (modified, missing, outdated);
+        ``response`` is what happened next (observed by status, repaired or
+        forced by sync, or kept_local because the member has local edits).
+        Written to the activity log only, and de-duplicated within an episode
+        so a hook that runs every session does not repeat the same finding.
+        This is the evidence for the beta question "did sync ever catch a bad copy"."""
+        t, _ = self._ctx(team, actor)
+        self._skill(t, slug)
+        if state not in DRIFT_STATES:
+            raise Invalid(f"state must be one of {', '.join(DRIFT_STATES)}")
+        if response not in DRIFT_RESPONSES:
+            raise Invalid(f"response must be one of {', '.join(DRIFT_RESPONSES)}")
+        host = host or ""
+        details = {"target": target, "host": host, "installed": installed_version or "", "channel_version": channel_version or "", "response": response}
+        for prev in self.store.activity(t["id"], 200, slug, action_prefix="drift."):
+            d = prev["details"]
+            if prev["actor"] != actor or d.get("host") != host or d.get("target") != target:
+                continue
+            if d.get("response") in ("repaired", "forced"):
+                break  # the previous episode ended; this is a new one
+            if prev["action"] == f"drift.{state}" and d.get("installed") == details["installed"] and d.get("response") == response:
+                return {"slug": slug, "state": state, "response": response, "recorded": False}
+        with self.store.tx():
+            self._log(t, actor, f"drift.{state}", slug, **details)
+        return {"slug": slug, "state": state, "response": response, "recorded": True}
 
     def _install_rows(self, team: dict, rows: list[dict]) -> list[dict]:
         skills = {s["id"]: s for s in self.store.skills(team["id"])}
@@ -971,13 +1076,154 @@ class Service:
 
     # ---------------------------------------------------------- activity, stats
     @rpc
-    def activity(self, team: str, actor: str, limit: int = 50, slug: str | None = None) -> list[dict]:
+    def activity(self, team: str, actor: str, limit: int = 50, slug: str | None = None, action: str | None = None) -> list[dict]:
         t, _ = self._ctx(team, actor)
         limit = max(1, min(int(limit), 500))
         return [
             {"actor": a["actor"], "action": a["action"], "skill": a["skill_slug"], "details": a["details"], "at": a["created_at"]}
-            for a in self.store.activity(t["id"], limit, slug)
+            for a in self.store.activity(t["id"], limit, slug, action_prefix=action or None)
         ]
+
+    @rpc
+    def beta_report(self, team: str, actor: str, days: int | None = None) -> dict:
+        """Counts that answer the two beta questions, for a team to send back.
+
+        Contains numbers only: no skill content, no member names, no emails.
+        Reads the tables directly, so it is not limited by the activity cap.
+
+        Review is mandatory in SkillCurrent (a submission needs a passing
+        check run on its exact bytes and a different approver), so "kept
+        review switched on" means the team kept using it instead of routing
+        around it: approvals keep happening, drafts are not installed
+        directly, reviews sometimes say no, and the server runs with tokens.
+        """
+        t, m = self._ctx(team, actor)
+        self._require(m, "maintainer", "producing the beta report")
+        since = None
+        if days is not None:
+            days = int(days)
+            if days < 1 or days > 3650:
+                raise Invalid("days must be between 1 and 3650")
+            since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        def ts(value: str | None) -> datetime | None:
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+            except ValueError:
+                return None
+
+        reviews = self.store.reviews_since(t["id"], since)
+        decided = {d: [r for r in reviews if r["decision"] == d] for d in ("approved", "rejected", "withdrawn")}
+        latencies = []
+        for r in decided["approved"]:
+            a, b = ts(r["created_at"]), ts(r["decided_at"])
+            if a and b:
+                latencies.append(max(0.0, (b - a).total_seconds()))
+        acts = self.store.activity(t["id"], None, since=since)
+        count = lambda prefix: sum(1 for a in acts if a["action"] == prefix)
+        draft_installs = sum(1 for a in acts if a["action"] == "skill.installed" and a["details"].get("version") == "draft")
+        drift = [a for a in acts if a["action"].startswith("drift.")]
+        # Each finding is logged once when status sees it ("observed"), then once more for what sync did about it.
+        findings = [a for a in drift if a["details"].get("response") == "observed"]
+        by_state = {s: sum(1 for a in findings if a["action"] == f"drift.{s}") for s in DRIFT_STATES}
+        by_response = {r: sum(1 for a in drift if a["details"].get("response") == r) for r in DRIFT_RESPONSES}
+        drift_envs = {(a["actor"], a["details"].get("host"), a["details"].get("target"), a["skill_slug"]) for a in drift}
+        # Did status/sync run at all? An intact copy leaves a `verified` receipt on every run; a bad one leaves a drift record.
+        # Without this, "no drift" and "the hook never ran" look the same.
+        verified = self.store.receipts_since(t["id"], "verified", since)
+        check_marks = [(r["handle"], r["host"], r["target"], r["created_at"]) for r in verified]
+        check_marks += [(a["actor"], a["details"].get("host", ""), a["details"].get("target", ""), a["created_at"]) for a in drift]
+        checks = {
+            "verified_receipts": len(verified),
+            "environments_checked": len({m[:3] for m in check_marks}),
+            "days_with_checks": len({m[3][:10] for m in check_marks}),
+            "last_check_at": max((m[3] for m in check_marks), default=None),
+        }
+        adoption = self.adoption(team, actor)["summary"]
+
+        review = {
+            "submitted": len(reviews),
+            "approved": len(decided["approved"]),
+            "rejected": len(decided["rejected"]),
+            "withdrawn": len(decided["withdrawn"]),
+            "pending": sum(1 for r in reviews if r["decision"] is None),
+            "distinct_approvers": len({r["decided_by"] for r in decided["approved"]}),
+            "distinct_submitters": len({r["submitted_by"] for r in reviews}),
+            "median_seconds_submit_to_approve": round(statistics.median(latencies)) if latencies else None,
+            "approvals_under_60_seconds": sum(1 for x in latencies if x < 60),
+            "releases": count("skill.release"),
+            "rollbacks": count("skill.rollback"),
+            "draft_installs": draft_installs,
+        }
+        bad = {s: by_state[s] for s in BAD_COPY_STATES}
+        sync = {
+            "checks": checks,
+            "findings": len(findings),
+            "bad_copies": sum(bad.values()),
+            "by_state": by_state,
+            "by_response": by_response,
+            "environments_with_drift": len(drift_envs),
+        }
+
+        reasons = []
+        if review["submitted"] == 0:
+            review_verdict = "no activity"
+            reasons.append("no submissions in the window")
+        else:
+            reasons.append(f"{review['approved']} approved, {review['rejected']} rejected, {review['withdrawn']} withdrawn of {review['submitted']} submitted")
+            reasons.append(f"{review['distinct_approvers']} distinct approver(s)")
+            if draft_installs:
+                reasons.append(f"{draft_installs} install(s) of an unreviewed draft")
+            if self.auth_mode == "none":
+                reasons.append("server runs with --no-auth, so one person can act as author and approver")
+            # A review that is always instant and never says no looks like a rubber stamp.
+            rubber_stamp = bool(review["approved"]) and review["approvals_under_60_seconds"] * 2 > review["approved"] and not (review["rejected"] or review["withdrawn"])
+            if rubber_stamp:
+                reasons.append("most approvals came within a minute of submission and no review has said no yet")
+            if review["approved"] == 0:
+                review_verdict = "unclear"
+            elif draft_installs or self.auth_mode == "none" or rubber_stamp:
+                review_verdict = "partly"
+            else:
+                review_verdict = "yes"
+        # A bad copy is one whose bytes are not what was approved: hand-modified or gone. An outdated copy is
+        # the channel moving on, which sync is meant to follow; it is counted, but it is not the question.
+        sync_reasons = []
+        if not check_marks:
+            sync_verdict = "never checked"
+            sync_reasons.append("no status or sync run reported in the window; install the session-start hook (BETA.md)")
+        else:
+            sync_reasons.append(
+                f"checks reported from {checks['environments_checked']} environment(s) on {checks['days_with_checks']} day(s), last at {checks['last_check_at']}"
+            )
+            if sync["bad_copies"]:
+                sync_verdict = "yes"
+                sync_reasons.append(f"{sync['bad_copies']} bad cop{'y' if sync['bad_copies'] == 1 else 'ies'}: " + ", ".join(f"{k} {v}" for k, v in bad.items() if v))
+                acted = ", ".join(f"{r} {by_response[r]}" for r in ("repaired", "forced", "kept_local") if by_response[r])
+                sync_reasons.append("what happened next: " + (acted or "not synced yet"))
+            else:
+                sync_verdict = "no bad copy seen"
+                sync_reasons.append("every check found the approved bytes (no modified or missing copy)")
+        if by_state["outdated"]:
+            sync_reasons.append(f"separately, {by_state['outdated']} outdated cop{'y' if by_state['outdated'] == 1 else 'ies'} found after a new release")
+
+        return {
+            "team": t["slug"],
+            "generated_at": now(),
+            "window_days": days,
+            "since": since,
+            "auth_mode": self.auth_mode,
+            "schema_version": self.store.schema_version,
+            "members": len(self.store.members(t["id"])),
+            "skills": len(self.store.skills(t["id"])),
+            "review": review,
+            "sync": sync,
+            "adoption": adoption,
+            "answers": {
+                "kept_review_on": {"verdict": review_verdict, "because": reasons},
+                "sync_caught_bad_copy": {"verdict": sync_verdict, "because": sync_reasons},
+            },
+        }
 
     @rpc
     def dashboard(self, team: str, actor: str) -> dict:

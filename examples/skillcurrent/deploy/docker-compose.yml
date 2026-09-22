@@ -1,0 +1,25 @@
+# The internet-facing waitlist host: the beta page and its sign-up endpoint,
+# nothing else (--public). TLS is terminated by Caddy on the same machine
+# (deploy/Caddyfile), so the container only listens on loopback.
+#
+#   cp deploy/docker-compose.yml . && docker compose up -d --build
+#   docker compose exec skillcurrent skillcurrent init --team beta --owner <you>
+#   docker compose exec skillcurrent skillcurrent --team beta --as <you> beta
+#
+# For a beta team's own server, drop --public and --contact/--site-url.
+services:
+  skillcurrent:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - skillcurrent-data:/data
+    environment:
+      SKILLCURRENT_CONTACT: "beta@example.com"          # the address sign-ups may write to
+      SKILLCURRENT_SITE_URL: "https://beta.example.com"  # used for link previews
+      SKILLCURRENT_WAITLIST_TEAM: "beta"
+    command: ["serve", "--host", "0.0.0.0", "--port", "8765", "--public", "--trust-proxy"]
+
+volumes:
+  skillcurrent-data:

@@ -1,0 +1,11 @@
+# Caddy in front of `skillcurrent serve`: automatic HTTPS (Let's Encrypt) once
+# the DNS A/AAAA record for the name below points at this machine.
+#
+# Replace beta.example.com with your hostname, then:  caddy run --config Caddyfile
+# (or install as the system Caddyfile: /etc/caddy/Caddyfile, `systemctl reload caddy`).
+
+beta.example.com {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:8765
+}

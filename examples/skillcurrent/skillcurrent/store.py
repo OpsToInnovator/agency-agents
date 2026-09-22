@@ -156,10 +156,16 @@ CREATE TABLE IF NOT EXISTS beta_signups (
     tools TEXT NOT NULL DEFAULT '[]',
     note TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
+    submissions INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 """
+
+# Bump when the schema changes. Migrations after version 1 are additive only
+# (ADD COLUMN / new tables): the beta promises that an upgrade never deletes
+# the evidence a team has collected.
+SCHEMA_VERSION = 2
 
 
 def now() -> str:
@@ -189,19 +195,47 @@ class Store:
         self.conn.execute("PRAGMA journal_mode = WAL") if self.path != ":memory:" else None
         self._lock = threading.RLock()
         self._depth = 0
-        self._migrate()
+        self._migrate_before_schema()
         self.conn.executescript(SCHEMA)
+        self._migrate_after_schema()
 
-    def _migrate(self) -> None:
-        """Bring a database created by an earlier layout up to date.
+    def _columns(self, table: str) -> list[str]:
+        return [r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
-        Only the ``installs`` table has changed shape (it gained ``host`` and
-        ``channel``); install records from the old layout are dropped and
-        members simply run ``install`` again.
-        """
-        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(installs)").fetchall()]
-        if cols and "host" not in cols:
-            self.conn.execute("DROP TABLE installs")
+    @property
+    def schema_version(self) -> int:
+        return self.conn.execute("PRAGMA user_version").fetchone()[0]
+
+    def _migrate_before_schema(self) -> None:
+        """Version 0 -> 1: the pre-release ``installs`` layout had no ``host``
+        or ``channel``. Those rows predate the beta and are dropped; members
+        run ``install`` again. This is the only destructive step there will
+        ever be, and it only runs on databases that never had a version."""
+        if self.schema_version == 0:
+            cols = self._columns("installs")
+            if cols and "host" not in cols:
+                self.conn.execute("DROP TABLE installs")
+
+    def _migrate_after_schema(self) -> None:
+        """Additive migrations, each idempotent, then stamp the version."""
+        if "submissions" not in self._columns("beta_signups"):  # v2
+            self.conn.execute("ALTER TABLE beta_signups ADD COLUMN submissions INTEGER NOT NULL DEFAULT 1")
+        if self.schema_version < SCHEMA_VERSION:
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def backup(self, dest: str | Path) -> Path:
+        """Write a consistent copy of the whole database to ``dest``, safe while a server is running."""
+        dest = Path(dest).expanduser()
+        if self.path != ":memory:" and dest.resolve() == Path(self.path).expanduser().resolve():
+            raise ValueError("backup destination must differ from the live database")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        target = sqlite3.connect(str(dest))
+        try:
+            with self._lock:
+                self.conn.backup(target)
+        finally:
+            target.close()
+        return dest
 
     def close(self) -> None:
         self.conn.close()
@@ -461,14 +495,38 @@ class Store:
         return self.all(sql + " ORDER BY r.id DESC LIMIT ?", params + (limit,))
 
     # -- beta sign-ups (landing page waitlist) ----------------------------
-    def upsert_beta_signup(self, email: str, team_size: str, tools: list[str], note: str, source: str) -> None:
+    def upsert_beta_signup(self, email: str, team_size: str, tools: list[str], note: str, source: str, created_at: str | None = None) -> bool:
+        """Insert a sign-up, or merge a repeat one without destroying what is there.
+
+        Anyone can post any email to the open form, so a repeat never
+        overwrites: empty fields are filled, tools are unioned, a new note is
+        appended, and ``submissions`` counts the posts. Returns True when the
+        row is new."""
         ts = now()
-        self.run(
-            "INSERT INTO beta_signups (email, team_size, tools, note, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(email) DO UPDATE SET team_size = excluded.team_size, tools = excluded.tools, note = excluded.note,"
-            " source = excluded.source, updated_at = excluded.updated_at",
-            (email, team_size, json.dumps(tools), note, source, ts, ts),
-        )
+        with self.tx():
+            row = self.one("SELECT * FROM beta_signups WHERE email = ?", (email,))
+            if row is None:
+                self.run(
+                    "INSERT INTO beta_signups (email, team_size, tools, note, source, submissions, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    (email, team_size, json.dumps(tools), note, source, created_at or ts, ts),
+                )
+                return True
+            merged_tools = json.loads(row["tools"])
+            for t in tools:
+                if t not in merged_tools:
+                    merged_tools.append(t)
+            merged_note = row["note"]
+            if note and note not in merged_note:
+                merged_note = (merged_note + "\n---\n" + note).strip()[-4000:] if merged_note else note
+            self.run(
+                "UPDATE beta_signups SET team_size = ?, tools = ?, note = ?, source = ?, submissions = submissions + 1, updated_at = ? WHERE id = ?",
+                (row["team_size"] or team_size, json.dumps(merged_tools[:20]), merged_note, row["source"] or source, ts, row["id"]),
+            )
+            return False
+
+    def delete_beta_signup(self, email: str) -> bool:
+        with self.tx() as c:
+            return c.execute("DELETE FROM beta_signups WHERE email = ?", (email,)).rowcount > 0
 
     def beta_signups(self) -> list[dict]:
         rows = self.all("SELECT * FROM beta_signups ORDER BY id DESC")
@@ -483,13 +541,40 @@ class Store:
             (team_id, actor, action, skill_slug, json.dumps(details), now()),
         )
 
-    def activity(self, team_id: int, limit: int = 50, skill_slug: str | None = None) -> list[dict]:
+    def activity(self, team_id: int, limit: int | None = 50, skill_slug: str | None = None, action_prefix: str | None = None, since: str | None = None) -> list[dict]:
         sql = "SELECT * FROM activity WHERE team_id = ?"
         params: tuple = (team_id,)
         if skill_slug:
             sql += " AND skill_slug = ?"
             params += (skill_slug,)
-        rows = self.all(sql + " ORDER BY id DESC LIMIT ?", params + (limit,))
+        if action_prefix:
+            sql += " AND action LIKE ? ESCAPE '\\'"
+            params += (action_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",)
+        if since:
+            sql += " AND created_at >= ?"
+            params += (since,)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = self.all(sql, params)
         for r in rows:
             r["details"] = json.loads(r["details"])
         return rows
+
+    def receipts_since(self, team_id: int, event: str, since: str | None = None) -> list[dict]:
+        """Where and when receipts of one kind arrived: (handle, host, target, created_at) only."""
+        sql = "SELECT handle, host, target, created_at FROM receipts WHERE team_id = ? AND event = ?"
+        params: tuple = (team_id, event)
+        if since:
+            sql += " AND created_at >= ?"
+            params += (since,)
+        return self.all(sql + " ORDER BY id", params)
+
+    def reviews_since(self, team_id: int, since: str | None = None) -> list[dict]:
+        sql = "SELECT r.*, s.slug AS skill_slug FROM reviews r JOIN skills s ON s.id = r.skill_id WHERE s.team_id = ?"
+        params: tuple = (team_id,)
+        if since:
+            sql += " AND r.created_at >= ?"
+            params += (since,)
+        return self.all(sql + " ORDER BY r.id", params)
