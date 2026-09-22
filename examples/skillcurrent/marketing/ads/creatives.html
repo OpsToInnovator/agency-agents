@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SkillCurrent ad creatives</title>
+<!--
+  Static ad creatives for the SkillCurrent beta, drawn from the brand tokens
+  used by the app and the landing page. Each .board is one finished creative at
+  its exact pixel size; render.mjs screenshots every board to out/<id>.png.
+
+  Three concepts x three sizes:
+    method  "Better methods. Not more files."            (brand line)
+    drift   "Which version is your teammate running?"    (the problem)
+    bytes   "Approve exact bytes."                       (the governance angle)
+  Sizes: 1200x628 (link card / OG), 1080x1080 (feed), 1080x1920 (story)
+-->
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+  :root {
+    --paper: #fcfcfa; --card: #ffffff; --ink: #232d29; --muted: #66716a; --line: #dfe4dc;
+    --green: #286445; --green-deep: #1d5137; --green-soft: #eaf2e8; --green-text: #295d3b;
+    --dark: #18201c; --dark-card: #1b251f; --dark-ink: #e4e9e2; --dark-muted: #a4b0a6; --dark-line: #39463b; --dark-green: #a6cbaa;
+    --amber: #885b20; --amber-soft: #faf2e4; --red: #a34b3d; --red-soft: #fcf0eb;
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --sans: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  body { margin: 0; background: #888; font-family: var(--sans); color: var(--ink); display: flex; flex-wrap: wrap; gap: 40px; padding: 40px; }
+  .board { position: relative; overflow: hidden; background: var(--paper); color: var(--ink); flex: none; box-sizing: border-box; display: flex; flex-direction: column; }
+  .board.dark { background: var(--dark); color: var(--dark-ink); }
+  .s-card { width: 1200px; height: 628px; padding: 64px 72px; }
+  .s-square { width: 1080px; height: 1080px; padding: 84px; }
+  .s-story { width: 1080px; height: 1920px; padding: 110px 96px; }
+  .brand { display: flex; align-items: center; gap: 14px; font-weight: 600; letter-spacing: -.01em; }
+  .brand svg { flex: none; }
+  .s-card .brand { font-size: 28px; } .s-square .brand { font-size: 32px; } .s-story .brand { font-size: 36px; }
+  .pill { font-family: var(--sans); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; border-radius: 999px; padding: 6px 16px; background: var(--green-soft); color: var(--green-text); white-space: nowrap; }
+  .dark .pill { background: #2a3f30; color: #b7d5b8; }
+  .s-card .pill { font-size: 15px; } .s-square .pill { font-size: 17px; } .s-story .pill { font-size: 20px; }
+  .top { display: flex; justify-content: space-between; align-items: center; }
+  .hl { font-family: var(--display); font-weight: 500; letter-spacing: -.02em; line-height: 1.0; margin: 0; text-wrap: balance; }
+  .hl em { font-style: normal; color: var(--green); }
+  .dark .hl em { color: var(--dark-green); }
+  .sub { font-family: var(--sans); font-weight: 400; line-height: 1.35; margin: 0; max-width: 20em; }
+  .dark .sub { color: var(--dark-muted); }
+  .light .sub { color: var(--muted); }
+  .cta { display: inline-flex; align-items: center; gap: 12px; background: var(--green); color: #fff; border-radius: 12px; font-weight: 600; white-space: nowrap; }
+  .dark .cta { background: var(--dark-green); color: #0f1712; }
+  .s-card .cta { font-size: 22px; padding: 16px 26px; } .s-square .cta { font-size: 26px; padding: 20px 32px; } .s-story .cta { font-size: 30px; padding: 24px 38px; }
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+  .fine { font-family: var(--sans); color: var(--muted); }
+  .dark .fine { color: var(--dark-muted); }
+  .s-card .fine { font-size: 17px; } .s-square .fine { font-size: 19px; } .s-story .fine { font-size: 22px; }
+  .grow { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 28px; }
+  /* concept: drift — a stack of file rows with version badges */
+  .files { display: flex; flex-direction: column; gap: 12px; font-family: var(--mono); }
+  .file { display: flex; align-items: center; gap: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 20px; }
+  .dark .file { background: var(--dark-card); border-color: var(--dark-line); }
+  .file .who { flex: 1; }
+  .file .v { font-weight: 500; }
+  .badge { font-family: var(--sans); font-weight: 600; font-size: .75em; padding: 3px 10px; border-radius: 8px; letter-spacing: .04em; }
+  .b-ok { background: var(--green-soft); color: var(--green-text); }
+  .b-stale { background: var(--amber-soft); color: var(--amber); }
+  .b-mod { background: var(--red-soft); color: var(--red); }
+  .s-card .files { font-size: 19px; } .s-square .files { font-size: 22px; } .s-story .files { font-size: 26px; }
+  /* concept: bytes — a hash block */
+  .hash { font-family: var(--mono); background: var(--dark-card); color: var(--dark-ink); border-radius: 14px; padding: 22px 26px; line-height: 1.5; border: 1px solid var(--dark-line); }
+  .light .hash { background: var(--dark); }
+  .hash .k { color: var(--dark-muted); }
+  .hash .g { color: var(--dark-green); }
+  .s-card .hash { font-size: 18px; } .s-square .hash { font-size: 21px; } .s-story .hash { font-size: 24px; }
+  /* concept: method — four step marks */
+  .steps { display: flex; gap: 14px; font-family: var(--sans); }
+  .step { flex: 1; border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 16px 18px; }
+  .dark .step { background: var(--dark-card); border-color: var(--dark-line); }
+  .step b { display: block; font-weight: 600; }
+  .step span { color: var(--muted); }
+  .dark .step span { color: var(--dark-muted); }
+  .step .n { font-family: var(--mono); color: var(--green); font-weight: 500; display: block; margin-bottom: 6px; }
+  .dark .step .n { color: var(--dark-green); }
+  .s-card .step { font-size: 17px; } .s-square .step { font-size: 20px; } .s-story .step { font-size: 24px; }
+  .s-story .steps { flex-direction: column; }
+</style>
+</head>
+<body>
+
+<!-- ===================== concept: method ===================== -->
+<div class="board light s-card" id="method-1200x628">
+  <div class="top"><div class="brand">%%LOGO40%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow">
+    <h1 class="hl" style="font-size:86px">Better methods.<br>Not more files.</h1>
+    <p class="sub" style="font-size:28px">One reviewed catalog of your team's AI skills, kept in sync across every tool your people use.</p>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Free during the beta · self-hosted · one SQLite file</span></div>
+</div>
+
+<div class="board light s-square" id="method-1080x1080">
+  <div class="top"><div class="brand">%%LOGO44%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow">
+    <h1 class="hl" style="font-size:108px">Better methods.<br>Not more files.</h1>
+    <p class="sub" style="font-size:32px">One reviewed catalog of your team's AI skills, kept in sync across every tool your people use.</p>
+    <div class="steps">
+      <div class="step"><span class="n">01</span><b>Edit</b><span>Draft safely</span></div>
+      <div class="step"><span class="n">02</span><b>Test</b><span>Check the bytes</span></div>
+      <div class="step"><span class="n">03</span><b>Release</b><span>Approve, then ship</span></div>
+      <div class="step"><span class="n">04</span><b>Adoption</b><span>See where it landed</span></div>
+    </div>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Free during the beta · self-hosted</span></div>
+</div>
+
+<div class="board dark s-story" id="method-1080x1920">
+  <div class="top"><div class="brand">%%LOGO48%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow" style="gap:44px">
+    <h1 class="hl" style="font-size:132px">Better methods.<br>Not more files.</h1>
+    <p class="sub" style="font-size:38px">One reviewed catalog of your team's AI skills, kept in sync across every tool your people use.</p>
+    <div class="steps">
+      <div class="step"><span class="n">01</span><b>Edit</b><span>Draft in a safe place. Production stays on the last approved version.</span></div>
+      <div class="step"><span class="n">02</span><b>Test</b><span>Checks run against the exact draft.</span></div>
+      <div class="step"><span class="n">03</span><b>Release</b><span>A different maintainer approves a digest-stamped version.</span></div>
+      <div class="step"><span class="n">04</span><b>Adoption</b><span>See which copies are current, outdated, modified or missing.</span></div>
+    </div>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Free during the beta</span></div>
+</div>
+
+<!-- ===================== concept: drift ===================== -->
+<div class="board light s-card" id="drift-1200x628">
+  <div class="top"><div class="brand">%%LOGO40%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow" style="flex-direction:row;align-items:center;gap:56px">
+    <div style="flex:1.1">
+      <h1 class="hl" style="font-size:72px">Which version is your <em>teammate</em> running?</h1>
+      <p class="sub" style="font-size:24px;margin-top:22px">Everyone keeps a private copy. An edit that helps one person silently regresses another.</p>
+    </div>
+    <div class="files" style="flex:1">
+      <div class="file"><span class="who">maya · claude-code</span><span class="v">1.1.0</span><span class="badge b-ok">current</span></div>
+      <div class="file"><span class="who">noah · codex</span><span class="v">1.0.0</span><span class="badge b-stale">outdated</span></div>
+      <div class="file"><span class="who">sam · antigravity</span><span class="v">1.1.0</span><span class="badge b-mod">modified</span></div>
+      <div class="file"><span class="who">studio runner · claude-code</span><span class="v">—</span><span class="badge b-stale">missing</span></div>
+    </div>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">status and sync, across Claude Code, Codex, Antigravity and Osaurus</span></div>
+</div>
+
+<div class="board light s-square" id="drift-1080x1080">
+  <div class="top"><div class="brand">%%LOGO44%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow">
+    <h1 class="hl" style="font-size:92px">Which version is your <em>teammate</em> running?</h1>
+    <div class="files">
+      <div class="file"><span class="who">maya · claude-code</span><span class="v">1.1.0</span><span class="badge b-ok">current</span></div>
+      <div class="file"><span class="who">noah · codex</span><span class="v">1.0.0</span><span class="badge b-stale">outdated</span></div>
+      <div class="file"><span class="who">sam · antigravity</span><span class="v">1.1.0</span><span class="badge b-mod">modified</span></div>
+      <div class="file"><span class="who">studio runner · claude-code</span><span class="v">—</span><span class="badge b-stale">missing</span></div>
+    </div>
+    <p class="sub" style="font-size:30px">Everyone keeps a private copy. An edit that helps one person silently regresses another. SkillCurrent shows every copy's state and brings it back in line.</p>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Free during the beta · self-hosted</span></div>
+</div>
+
+<div class="board light s-story" id="drift-1080x1920">
+  <div class="top"><div class="brand">%%LOGO48%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow" style="gap:48px">
+    <h1 class="hl" style="font-size:118px">Which version is your <em>teammate</em> running?</h1>
+    <div class="files">
+      <div class="file"><span class="who">maya · claude-code</span><span class="v">1.1.0</span><span class="badge b-ok">current</span></div>
+      <div class="file"><span class="who">noah · codex</span><span class="v">1.0.0</span><span class="badge b-stale">outdated</span></div>
+      <div class="file"><span class="who">sam · antigravity</span><span class="v">1.1.0</span><span class="badge b-mod">modified</span></div>
+      <div class="file"><span class="who">studio runner · claude-code</span><span class="v">—</span><span class="badge b-stale">missing</span></div>
+      <div class="file"><span class="who">kai · osaurus</span><span class="v">0.9.0</span><span class="badge b-stale">deprecated</span></div>
+    </div>
+    <p class="sub" style="font-size:36px">Everyone keeps a private copy. An edit that helps one person silently regresses another. SkillCurrent shows every copy's state and brings it back in line with one command.</p>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Free during the beta</span></div>
+</div>
+
+<!-- ===================== concept: bytes ===================== -->
+<div class="board dark s-card" id="bytes-1200x628">
+  <div class="top"><div class="brand">%%LOGO40%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow" style="flex-direction:row;align-items:center;gap:56px">
+    <div style="flex:1">
+      <h1 class="hl" style="font-size:80px">Approve <em>exact bytes.</em></h1>
+      <p class="sub" style="font-size:24px;margin-top:22px">A different maintainer approves an immutable, digest-stamped version. Roll back by pointing the channel at the previous one.</p>
+    </div>
+    <div class="hash" style="flex:1"><span class="k">skill</span>      refund-handoff<br><span class="k">version</span>    1.1.0<br><span class="k">approved by</span> noah · not the author<br><span class="k">sha256</span>     <span class="g">e11e5f735292b065e9bf3f<br>def384137975d2edb21e26<br>bcc431115f8423a1000a</span><br><span class="k">production</span> 1.1.0 · <span class="k">canary</span> 1.1.0</div>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Evidence, not a blanket guarantee</span></div>
+</div>
+
+<div class="board dark s-square" id="bytes-1080x1080">
+  <div class="top"><div class="brand">%%LOGO44%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow">
+    <h1 class="hl" style="font-size:104px">Approve <em>exact bytes.</em></h1>
+    <div class="hash"><span class="k">skill</span>      refund-handoff<br><span class="k">version</span>    1.1.0<br><span class="k">approved by</span> noah · not the author<br><span class="k">sha256</span>     <span class="g">e11e5f735292b065e9bf3fdef384137975d2<br>edb21e26bcc431115f8423a1000a</span><br><span class="k">production</span> 1.1.0 · <span class="k">canary</span> 1.1.0 · <span class="k">rollback</span> 1.0.0</div>
+    <p class="sub" style="font-size:30px">A different maintainer approves an immutable, digest-stamped version. Every environment reports which bytes it holds.</p>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Evidence, not a blanket guarantee</span></div>
+</div>
+
+<div class="board dark s-story" id="bytes-1080x1920">
+  <div class="top"><div class="brand">%%LOGO48%% skillcurrent.</div><span class="pill">Private beta</span></div>
+  <div class="grow" style="gap:48px">
+    <h1 class="hl" style="font-size:128px">Approve <em>exact bytes.</em></h1>
+    <div class="hash"><span class="k">skill</span>      refund-handoff<br><span class="k">version</span>    1.1.0<br><span class="k">author</span>     maya<br><span class="k">approved by</span> noah · not the author<br><span class="k">sha256</span>     <span class="g">e11e5f735292b065e9bf3fdef384<br>137975d2edb21e26bcc431115f84<br>23a1000a</span><br><span class="k">production</span> 1.1.0<br><span class="k">canary</span>     1.1.0<br><span class="k">rollback</span>   1.0.0</div>
+    <p class="sub" style="font-size:36px">A different maintainer approves an immutable, digest-stamped version. Release to canary, then the team. Every environment reports which bytes it holds, so "installed" and "loaded" are never confused.</p>
+  </div>
+  <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Evidence, not a blanket guarantee</span></div>
+</div>
+
+<script>
+  // Inline the bolt mark at the requested size (keeps the boards self-contained).
+  const logo = (s) => `<svg width="${s}" height="${s}" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#286445"/><path d="M6 8h12l-4 7h12L14 28l4-9H5l5-7H6V8Z" fill="#fff"/></svg>`;
+  document.body.innerHTML = document.body.innerHTML.replace(/%%LOGO(\d+)%%/g, (_, s) => logo(s));
+</script>
+</body>
+</html>

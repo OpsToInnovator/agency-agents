@@ -1,0 +1,190 @@
+<title>SkillCurrent Beta Ads</title>
+<style>
+  :root {
+    --bg: #fcfcfa; --paper: #ffffff; --ink: #232d29; --muted: #66716a; --line: #dfe4dc;
+    --accent: #286445; --accent-soft: #eaf2e8; --accent-text: #295d3b; --accent-ink: #ffffff;
+    --amber: #885b20; --amber-soft: #faf2e4;
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif; --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #18201c; --paper: #1b251f; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b; --accent: #a6cbaa; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712; --amber: #ebc48c; --amber-soft: #413624; } }
+  :root[data-theme="dark"] { --bg: #18201c; --paper: #1b251f; --ink: #e4e9e2; --muted: #a4b0a6; --line: #39463b; --accent: #a6cbaa; --accent-soft: #2a3f30; --accent-text: #b7d5b8; --accent-ink: #0f1712; --amber: #ebc48c; --amber-soft: #413624; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); padding-inline: 20px; padding-block: 0; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding-block: 28px 60px; }
+  h1, h2, h3 { font-family: var(--display); font-weight: 500; letter-spacing: -.015em; margin: 0; text-wrap: balance; }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.05; } h2 { font-size: 26px; margin: 44px 0 6px; } h3 { font-size: 19px; margin: 18px 0 8px; }
+  .eyebrow { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-text); font-weight: 600; margin-bottom: 10px; }
+  .lede { color: var(--muted); max-width: 44em; margin: 10px 0 0; }
+  .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 20px; }
+  .rule { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px; background: var(--paper); }
+  .rule b { display: block; color: var(--accent-text); }
+  .concept { border: 1px solid var(--line); border-radius: 14px; background: var(--paper); padding: 18px 20px; margin-top: 16px; }
+  .concept header { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+  .concept header p { margin: 0; color: var(--muted); }
+  .sizes { display: grid; grid-template-columns: 1.5fr 1fr 0.7fr; gap: 14px; margin-top: 14px; align-items: start; }
+  .size { display: flex; flex-direction: column; gap: 6px; }
+  .size img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  .size span { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .copyblock { border: 1px solid var(--line); border-radius: 10px; background: var(--paper); padding: 14px 16px; margin-top: 10px; }
+  .copyblock .k { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .copyblock pre { white-space: pre-wrap; font: 14px/1.55 var(--sans); margin: 8px 0 0; }
+  .copyblock pre.mono { font-family: var(--mono); font-size: 13px; }
+  button { font: 600 12px var(--sans); padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .note { background: var(--amber-soft); color: var(--amber); border-radius: 10px; padding: 10px 12px; font-size: 14px; margin-top: 14px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--accent-soft); color: var(--accent-text); padding: 1px 5px; border-radius: 4px; }
+  @media (max-width: 760px) { .sizes { grid-template-columns: 1fr; } }
+</style>
+<div class="wrap">
+  <div class="eyebrow">Beta launch kit</div>
+  <h1>SkillCurrent ads: three concepts, nine creatives, channel copy.</h1>
+  <p class="lede">Everything here follows the same rules as the landing page: one conversion goal (join the beta), and nothing we can't back with the shipped tool. Creatives are rendered from the brand tokens the app uses; the source lives in the repo under <code>marketing/ads/</code> and re-renders with one command.</p>
+  <div class="rules">
+    <div class="rule"><b>One ask</b>Every creative and every line ends at "Join the beta".</div>
+    <div class="rule"><b>No invented proof</b>No logos, testimonials, adoption numbers or ratings.</div>
+    <div class="rule"><b>No behaviour claims</b>Checks are evidence about bytes, never a promise about an agent.</div>
+    <div class="rule"><b>Beta framing</b>Free, self-hosted, 5 to 10 teams on two or more AI coding tools.</div>
+  </div>
+
+  <h2>When to run which concept</h2>
+  <table>
+    <thead><tr><th>Concept</th><th>Headline</th><th>Audience and placement</th><th>Theme</th></tr></thead>
+    <tbody>
+      <tr><td><b>method</b></td><td>Better methods. Not more files.</td><td>Cold audiences, newsletter sponsorships, link previews (OG image). The brand line; safe everywhere.</td><td>light (story in dark)</td></tr>
+      <tr><td><b>drift</b></td><td>Which version is your teammate running?</td><td>Communities that already feel the pain (r/ClaudeAI, r/ChatGPTCoding), retargeting, X. The problem, shown.</td><td>light</td></tr>
+      <tr><td><b>bytes</b></td><td>Approve exact bytes.</td><td>Platform, DX and security leads; LinkedIn; Show HN. The governance angle.</td><td>dark</td></tr>
+    </tbody>
+  </table>
+
+  <div class="concept" id="method">
+    <header><h3 style="margin:0">method</h3><p>Brand line. Light theme at card and feed size, dark for the story format so the set has range.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/method-1200x628.png" alt="Better methods. Not more files. 1200 by 628 link card"><span>method-1200x628.png · link card / OG</span></div>
+      <div class="size"><img src="out/method-1080x1080.png" alt="Better methods. Not more files. square feed creative with the four steps"><span>method-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/method-1080x1920.png" alt="Better methods. Not more files. dark story creative"><span>method-1080x1920.png · story</span></div>
+    </div>
+  </div>
+
+  <div class="concept" id="drift">
+    <header><h3 style="margin:0">drift</h3><p>The problem, shown as the adoption table the tool actually produces: current, outdated, modified, missing.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/drift-1200x628.png" alt="Which version is your teammate running? 1200 by 628 link card with a table of copies and their states"><span>drift-1200x628.png · link card / OG</span></div>
+      <div class="size"><img src="out/drift-1080x1080.png" alt="Which version is your teammate running? square feed creative"><span>drift-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/drift-1080x1920.png" alt="Which version is your teammate running? story creative"><span>drift-1080x1920.png · story</span></div>
+    </div>
+  </div>
+
+  <div class="concept" id="bytes">
+    <header><h3 style="margin:0">bytes</h3><p>The governance angle: a real-shaped release record with the digest and the "not the author" approver.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/bytes-1200x628.png" alt="Approve exact bytes. 1200 by 628 dark link card with a release record"><span>bytes-1200x628.png · link card / OG</span></div>
+      <div class="size"><img src="out/bytes-1080x1080.png" alt="Approve exact bytes. square feed creative"><span>bytes-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/bytes-1080x1920.png" alt="Approve exact bytes. story creative"><span>bytes-1080x1920.png · story</span></div>
+    </div>
+  </div>
+
+  <h2>Copy by channel</h2>
+  <p class="lede">Each block has a copy button. Replace <code>[link]</code> with your landing page URL (<code>/beta</code> on your SkillCurrent host).</p>
+
+  <h3>LinkedIn</h3>
+  <div class="copyblock"><div class="k">method<button data-copy>Copy</button></div><pre>Better methods. Not more files.
+
+Your team's AI skills live in ~/.claude/skills, ~/.codex/skills, .agents/skills… one private copy per person. Nobody knows which version a teammate runs, and an edit that helps one person silently regresses another.
+
+SkillCurrent is one reviewed catalog for those skills. Draft in a safe place. Run checks against the exact draft. A different maintainer approves an immutable, digest-stamped version. Then status and sync show every copy as current, outdated, modified or missing.
+
+We're onboarding 5 to 10 teams that use two or more AI coding tools. Free during the beta, self-hosted, standard library only, one SQLite file.
+
+Join the beta → [link]</pre></div>
+  <div class="copyblock"><div class="k">drift<button data-copy>Copy</button></div><pre>Which version of that skill is your teammate running?
+
+If the answer is "whichever one they copied last," you already know how this ends: the fix that helped one person quietly breaks another, and nobody can say when.
+
+SkillCurrent keeps one reviewed catalog and tells every environment whether its copy is current, outdated, modified or missing. One command brings it back in line.
+
+Beta, free, self-hosted. We want 5 to 10 teams on two or more AI coding tools → [link]</pre></div>
+  <div class="copyblock"><div class="k">bytes<button data-copy>Copy</button></div><pre>Approve exact bytes.
+
+Approval that attaches to a moving document isn't approval. In SkillCurrent a different maintainer approves an immutable version with its SHA-256, a channel points at it, and rollback means pointing the channel back. Every environment reports which bytes it holds.
+
+Evidence, not a blanket guarantee: a passing check says something about those bytes, never about how an agent will behave.
+
+Private beta for platform and AI-enablement teams → [link]</pre></div>
+
+  <h3>X / Threads</h3>
+  <div class="copyblock"><div class="k">four posts, each under 280 characters<button data-copy>Copy</button></div><pre>Better methods. Not more files. One reviewed catalog of your team's AI skills, synced across Claude Code, Codex, Antigravity and Osaurus. Private beta, free, self-hosted → [link]
+
+Which version of that skill is your teammate running? If you don't know, that's the product. SkillCurrent: status, sync, and an approval that attaches to exact bytes. Beta → [link]
+
+Approve exact bytes. A different maintainer signs off on a digest-stamped version; rollback points the channel back. Skills for AI coding tools, done like software. Beta → [link]
+
+"Installed" is not the same as "loaded." SkillCurrent's adoption view shows which is which for every environment. Private beta for teams on 2+ AI coding tools → [link]</pre></div>
+
+  <h3>Reddit (text post, no hype)</h3>
+  <div class="copyblock"><div class="k">r/ClaudeAI · r/ChatGPTCoding · r/ExperiencedDevs<button data-copy>Copy</button></div><pre>Title: We built a reviewed catalog for team AI skills (SKILL.md) — looking for 5–10 beta teams
+
+Our team shares skills for Claude Code and Codex by copying SKILL.md folders around. It works until it doesn't: someone improves a skill, someone else is still on the old copy, a third person edited theirs by hand, and nobody can say which version caused the bad run.
+
+SkillCurrent is a small self-hosted tool that fixes exactly that and nothing more:
+
+- one catalog; drafts go through checks (structure, no secrets, no machine paths, your own rules)
+- a different maintainer approves; the version is immutable and carries its SHA-256
+- canary and production channels, rollback by pointing the channel back
+- status / sync show every copy as current, outdated, modified, missing or deprecated
+
+Python 3.11, no dependencies, one SQLite file, CLI + web UI. Free during the beta. We're not claiming it makes agents behave; a passing check is evidence about the bytes, not a guarantee.
+
+If your team uses two or more AI coding tools and wants to try it, the beta form is here: [link]. Happy to answer questions in the thread.</pre></div>
+
+  <h3>Hacker News</h3>
+  <div class="copyblock"><div class="k">Show HN title + first comment<button data-copy>Copy</button></div><pre>Show HN: SkillCurrent – a reviewed catalog for team AI skills, with digests and rollback
+
+Skills (a SKILL.md with front matter) are now the unit every AI coding tool loads, and teams share them by copying files. We wanted the boring software-engineering properties back: review by someone other than the author, immutable versions with a digest, channels with rollback, and a way to see which machines hold which bytes.
+
+It's deliberately small: Python standard library, one SQLite file, a CLI, an HTTP API and a single-file web UI. The checks are transparent text rules, not a model; we say so on every result.
+
+Private beta, free. If you run two or more AI coding tools and want to try it: [link]. Source and tests are in the repo.</pre></div>
+
+  <h3>Google Search (responsive search ad)</h3>
+  <div class="copyblock"><div class="k">headlines ≤ 30 chars · descriptions ≤ 90 chars<button data-copy>Copy</button></div><pre class="mono">H: Team AI Skills, Reviewed
+H: One Catalog for SKILL.md
+H: Approve Exact Bytes
+H: Skills Drift? Sync Them
+H: Claude Code + Codex Skills
+H: Private Beta, Free
+H: Self-Hosted, No Deps
+
+D: One reviewed catalog of your team's AI skills. Checks, approval, channels, rollback, sync.
+D: See which copies are current, outdated, modified or missing. Beta for teams on 2+ AI tools.
+D: Immutable versions with SHA-256 digests. Approved by someone other than the author.
+
+Keywords to start: "claude code skills", "codex skills", "SKILL.md", "share skills team claude code", "agent skills catalog"</pre></div>
+
+  <h3>Newsletter sponsorship (~60 words)</h3>
+  <div class="copyblock"><div class="k">blurb<button data-copy>Copy</button></div><pre>SkillCurrent — one reviewed catalog for your team's AI skills. Draft, check, approve exact bytes, release to canary then production, and see which machines hold which version. Self-hosted, no dependencies, one SQLite file. Free during the private beta for teams that use two or more AI coding tools. Join the beta: [link]</pre></div>
+
+  <h3>Cold email to a platform lead</h3>
+  <div class="copyblock"><div class="k">plain text<button data-copy>Copy</button></div><pre>Subject: which version of your skills is each machine running?
+
+Hi [name],
+
+Quick one. If your team shares Claude Code / Codex skills by copying SKILL.md folders, you probably can't answer that subject line today. We built a small self-hosted tool that can: one reviewed catalog, checks on the exact draft, approval by a second maintainer with a SHA-256 on the version, canary/production channels with rollback, and status/sync for every copy.
+
+We're onboarding 5 to 10 teams for a free beta and would trade direct support for two things: whether you keep review switched on, and whether sync ever catches a bad copy.
+
+Worth 20 minutes? [link]
+
+[your name]</pre></div>
+
+  <div class="note">Measure one thing per channel: sign-ups on the beta form, tagged by concept (add <code>?c=method</code>, <code>?c=drift</code> or <code>?c=bytes</code> to the link; the form records the page's host as <code>source</code>, so extend it to read the query string if you want the tag stored). Rewrite all of this after the first five pilot conversations, in their words.</div>
+</div>
+<script>
+  document.querySelectorAll('button[data-copy]').forEach((b) => b.addEventListener('click', async () => {
+    const pre = b.closest('.copyblock').querySelector('pre');
+    try { await navigator.clipboard.writeText(pre.textContent); b.textContent = 'Copied'; } catch (e) { b.textContent = 'Select and copy'; }
+    setTimeout(() => (b.textContent = 'Copy'), 1600);
+  }));
+</script>
