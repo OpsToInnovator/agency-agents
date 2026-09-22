@@ -252,6 +252,11 @@ pip install pytest    # the app itself has no dependencies
 pytest
 ```
 
+One test drives the landing page's waitlist form in a real browser
+(`tests/browser/landing_form.mjs`, Node + Playwright). It runs when `node`
+and a `playwright` package are available and is skipped otherwise, so the
+suite still passes on a machine with only Python.
+
 ## Limits, honestly
 
 - One server process per database file. SQLite with a process-level lock is
