@@ -38,8 +38,10 @@ What is actually enforced, in two tiers:
                 module into the interpreter's own dist-packages, because the first version
                 hid a LIST of paths and a list can never name every writable directory on
                 a host. Scrubbed environment. rlimits on CPU, memory, processes, file size,
-                open files. Wall-clock kill. Nothing written anywhere but the run directory
-                survives the process, and the run directory is deleted after it. The
+                open files. Wall-clock kill. /proc/sys read-only, since a fresh /proc is otherwise a
+                writable window onto host-wide sysctls (a fifth red team set vm.overcommit
+                for the whole host from inside). Nothing written anywhere but the run
+                directory survives the process, and the run directory is deleted after it. The
                 strategy itself runs in one more user namespace, unmapped: no capabilities,
                 every mount locked, so the read-only trees stay read-only even against a
                 ctypes mount() call. And the parent bounds what it will take from the
@@ -79,6 +81,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
@@ -249,6 +252,11 @@ for m in /etc/arbbot; do [ -d "$new$m" ] && mount -t tmpfs -o size=1m,nodev,nosu
 for f in null zero urandom random; do touch "dev/$f"; mount --bind "/dev/$f" "dev/$f"; done
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs tmp
 mount -t proc proc proc
+mount --bind proc/sys proc/sys
+mount -o remount,bind,ro,nosuid,nodev,noexec proc/sys
+for m in proc/sysrq-trigger proc/irq proc/bus; do
+  if [ -d "$m" ]; then mount -t tmpfs -o size=1m,ro tmpfs "$m"; elif [ -e "$m" ]; then mount --bind dev/null "$m"; fi
+done
 mount --bind "$run" src
 mount -o remount,bind,ro,nodev,nosuid src
 mount -t tmpfs -o nodev,nosuid,size="$workmb"m tmpfs work
@@ -306,6 +314,7 @@ class Sandbox:
         self.source_dir = src
         self.entry, self.func, self.limits = entry, func, limits
         self.isolation: Isolation = isolation or detect_isolation()
+        self._owns_work_root = work_root is None
         self.work_root = Path(work_root).resolve() if work_root else Path(tempfile.mkdtemp(prefix="edgecheck-"))
         self.work_root.mkdir(parents=True, exist_ok=True)
         # Staged once. Every run copies from here, never from the source, so a run that
@@ -314,6 +323,28 @@ class Sandbox:
         shutil.copytree(src, self.strategy_dir, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         self.records: list[RunRecord] = []
+        # The staged copy is the customer's source, sitting in a world-readable temp dir for
+        # as long as the host lives unless someone removes it; a long-lived auditor would
+        # also fill the disk one stage at a time. Removed on close(), on leaving a `with`
+        # block, and by the finalizer if neither happened.
+        self._finalizer = weakref.finalize(self, Sandbox._cleanup, self.strategy_dir,
+                                           self.work_root if self._owns_work_root else None)
+
+    def close(self) -> None:
+        """Remove the staged copy, and the work root if this sandbox created it."""
+        self._finalizer()
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    @staticmethod
+    def _cleanup(stage: Path, owned_root: Path | None) -> None:
+        for d in (stage, owned_root):
+            if d is not None and d.exists():
+                Sandbox._remove_tree(d)
 
     @classmethod
     def from_file(cls, path: Path | str, **kw: Any) -> "Sandbox":
@@ -613,11 +644,11 @@ class Precheck:
         if self.isolation == "plain":
             lines.append("  plain tier: files written outside the run directory survive between runs, "
                          "so state CAN carry; the namespace tier is what prevents it")
-        lines.append("same tape twice            -> " + ("identical output" if self.deterministic else
+        lines.append("same tape, 3 times         -> " + ("identical output" if self.deterministic else
                      "DIFFERENT output: the strategy is nondeterministic, so no divergence could be attributed to the data"))
-        lines.append("same varied tape twice     -> " + ("identical output" if self.deterministic_on_varied else
-                     "DIFFERENT output: deterministic on the real tape but not on a varied one -- the strategy "
-                     "is telling the two apart, and nothing it does under a probe can be trusted"))
+        lines.append("same varied tape, 3 times  -> " + ("identical output" if self.deterministic_on_varied else
+                     "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
+                     "real data from varied data, or it is intermittently nondeterministic; neither can be audited"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
                      "IDENTICAL output: the output does not change when the bars we can vary change, so nothing can be proved about it"))
         if self.files_written:
@@ -645,14 +676,16 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
     strategy no probe can move.
     """
     varied = continuation(tape, GATE_BOUNDARY, seed=7)
-    a = sandbox(tape)
-    c1 = sandbox(varied)
-    b = sandbox(tape)          # the pairs are interleaved on purpose, to space them in time
-    c2 = sandbox(varied)
-    written = tuple(sorted({f for r in sandbox.records[-4:] for f in r.files_written}))
-    return Precheck(deterministic=(a == b), deterministic_on_varied=(c1 == c2), input_dependent=(a != c1),
-                    isolation=sandbox.isolation, visible=sandbox.records[-1].visible,
-                    files_written=written, first_boundary=GATE_BOUNDARY)
+    # Three of each, interleaved to space them in time. One pair per tape let a strategy that
+    # flips one bar with a small probability, inspecting nothing, pass as deterministic on
+    # the real tape and fail on the varied one -- and be accused of telling the two apart.
+    a = [sandbox(tape)]; c = [sandbox(varied)]
+    a.append(sandbox(tape)); c.append(sandbox(varied))
+    a.append(sandbox(tape)); c.append(sandbox(varied))
+    written = tuple(sorted({f for r in sandbox.records[-6:] for f in r.files_written}))
+    return Precheck(deterministic=(a[0] == a[1] == a[2]), deterministic_on_varied=(c[0] == c[1] == c[2]),
+                    input_dependent=(a[0] != c[0]), isolation=sandbox.isolation,
+                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY)
 
 
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:

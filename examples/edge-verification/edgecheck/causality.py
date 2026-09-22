@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, Sequence
 
 __all__ = ["Bar", "Strategy", "Divergence", "Proven", "Suspected", "Report",
-           "check_causality", "default_boundaries", "sparse_boundaries", "continuation",
+           "check_causality", "default_boundaries", "sparse_boundaries", "continuation", "sign_design",
            "realized_sigma", "DEFAULT_DRAWS", "SIGMA_FLOOR", "MIN_BOUNDARY"]
 
 DEFAULT_DRAWS = 2
@@ -86,7 +86,7 @@ class Divergence:
     detail: str
 
     @property
-    def horizon(self) -> int:
+    def horizon(self) -> int | None:
         """How many bars past the decision point the output reached, as a LOWER BOUND.
 
         The probe shows that signals[index] depends on some bar at or after ``boundary``,
@@ -95,9 +95,11 @@ class Divergence:
         Report it as "at least", never as the exact depth.
 
         Zero means the strategy read its own bar -- deciding at the open using the close.
-        Only the perturbation probe can produce a zero; truncation removes whole bars, so
-        the shallowest thing it can demonstrate is a reach of one bar past the data.
+        Truncation carries no reach at all: it also shortens the tape, and a dependence on
+        how much data there is diverges under it without any future value being read.
         """
+        if self.probe != "perturbation":
+            return None
         return max(0, self.boundary - self.index)
 
 
@@ -114,7 +116,7 @@ class Proven:
     summary: str
 
     @property
-    def horizon(self) -> int:
+    def horizon(self) -> int | None:
         return self.evidence.horizon
 
 
@@ -154,12 +156,26 @@ class Report:
         something from len(bars) diverges under it without reading any future value. A
         third red team's count-dependent strategy was reported as reading 172 bars ahead;
         it read none. Truncation-only findings carry no reach."""
-        return max((p.horizon for p in self.proven if p.evidence.probe == "perturbation"), default=None)
+        return max((p.horizon for p in self.proven if p.horizon is not None), default=None)
+
+    draws: int = DEFAULT_DRAWS
 
     def coverage_note(self) -> str:
+        if self.draws >= 8:
+            combos = "every sign combination of move, wick and volume tried at each"
+            residual = "a read of a magnitude rather than a direction can still go unseen"
+        elif self.draws >= 4:
+            combos = ("move, wick and volume each pushed both ways and every pair pushed apart at each "
+                      f"({min(self.draws, 8)} of 8 sign combinations)")
+            residual = ("a read of a magnitude rather than a direction, or of a pattern across all three "
+                        "directions at once, can still go unseen")
+        else:
+            combos = "move, wick and volume each pushed both ways at each"
+            residual = ("a read of a magnitude rather than a direction, or of how two directions relate, "
+                        "can still go unseen")
         if self.coverage >= 1.0:
-            return ("every bar was probed, its move, wick and volume each pushed both ways; a read of "
-                    "something finer than a direction can still go unseen")
+            return (f"every bar from {MIN_BOUNDARY} on was probed (bars 0-{MIN_BOUNDARY - 1} cannot be: "
+                    f"nothing before them can be varied), {combos}; {residual}")
         return (f"probed at {len(self.boundaries)} of {self.bars_tested - MIN_BOUNDARY} possible boundaries "
                 f"({self.coverage:.0%}); a leak confined to bars that were not probed would not show up here")
 
@@ -169,9 +185,9 @@ class Report:
                     "divergence can be attributed to the data.\n" +
                     "\n".join(f"  {s.summary}\n    {s.reason}" for s in self.suspected))
         if self.recognises_input:
-            return ("NOTHING PROVED, AND THAT IS ITSELF THE FINDING: the strategy reproduces its output on the "
-                    "real tape and fails to reproduce it on a varied one. It is telling the two apart. A "
-                    "strategy that behaves differently under a probe cannot be audited by probing.\n" +
+            return ("NOTHING PROVED: the strategy reproduced its output on the real tape three times and "
+                    "failed to reproduce it on a varied one. Either it distinguishes real data from varied "
+                    "data, or it is intermittently nondeterministic; neither can be audited by probing.\n" +
                     "\n".join(f"  {s.summary}\n    {s.reason}" for s in self.suspected))
         if not self.proven:
             base = (f"No causal dependency on future data was demonstrated over {self.bars_tested} bars "
@@ -182,20 +198,25 @@ class Report:
                     f"  {s.summary}\n    {s.reason}" for s in self.suspected)
             return base
         h = self.worst_horizon
+        trunc = [p for p in self.proven if p.evidence.probe == "truncation"]
         if h is None:
             first = min(p.evidence.boundary for p in self.proven)
-            lines = [f"PROVEN: this strategy's output changed when the tape was shortened past bar {first - 1} -- "
-                     f"a dependence on data after that bar, or on how much data there is. The perturbation "
-                     f"probe did not corroborate it, so no reach into future values is claimed.",
-                     f"  ({self.coverage_note()})", ""]
+            head = (f"PROVEN: this strategy's output changed when the tape was shortened past bar {first - 1} -- "
+                    f"a dependence on data after that bar, or on how much data there is. The perturbation "
+                    f"probe did not corroborate it, so no reach into future values is claimed.")
         else:
             reach = ("its own bar (decided at the open, read the close)" if h == 0
                      else f"at least {h} bar(s) into the future")
-            lines = [f"PROVEN: this strategy reads {reach}.", f"  ({self.coverage_note()})", ""]
+            head = f"PROVEN: this strategy reads {reach}."
+            if trunc:
+                head += (" Its output also changed when the tape was shortened, which is a dependence on "
+                         "later data or on how much data there is; no reach is claimed for that part.")
+        lines = [head, f"  ({self.coverage_note()})", ""]
         for p in self.proven:
             e = p.evidence
+            tail = f"horizon {e.horizon}" if e.horizon is not None else "reach not bounded"
             lines.append(f"  signals[{e.index}] = {e.baseline} normally, {e.variant} once bar {e.boundary} "
-                         f"onward was {e.detail} ({e.probe} probe, horizon {e.horizon})")
+                         f"onward was {e.detail} ({e.probe} probe, {tail})")
         return "\n".join(lines)
 
 
@@ -240,7 +261,7 @@ def realized_sigma(tape: Sequence[Any]) -> float:
 
 
 def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, volume_of,
-              boundary_sign: int = 0) -> list[Any]:
+              wick_sign: int = 0) -> list[Any]:
     """Rebuild the walk from ``boundary`` on, keeping every invariant the pristine tape has --
     IN DISTRIBUTION, never per bar.
 
@@ -270,15 +291,17 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
         d_top, d_bot = max(d.open, d.close), min(d.open, d.close)
         wick_up = d.high / d_top if d_top > 0 else 1.0
         wick_dn = d.low / d_bot if d_bot > 0 else 1.0
-        if i == boundary and boundary_sign:
-            # The boundary bar's WICK is pushed the same way its move is: a top-heavy bar in
-            # one draw, a bottom-heavy one in the other, at the tape's own wick scale. With a
-            # random donor the wick's asymmetry was a coin toss, and a fourth red team's
-            # same-bar wick read went unseen in one audit out of eight while the report said
-            # every bar was probed. A direction that is forced cannot be missed.
-            scale = _wick_scale(tape)
-            wick_up, wick_dn = ((1.0 + 2.0 * scale, 1.0 - 0.25 * scale) if boundary_sign > 0
-                                else (1.0 + 0.25 * scale, 1.0 - 2.0 * scale))
+        if i == boundary and wick_sign:
+            # The boundary bar's wick SKEW is forced -- top-heavy or bottom-heavy -- but its
+            # MAGNITUDES are a donor's, so they follow the tape's own distribution. A fourth
+            # red team found the skew was a coin toss; a fifth found the fix had made the
+            # magnitude a constant, so a wick-size threshold below it was never crossed.
+            # Forced direction, drawn size: a threshold is missed only when every draw's
+            # donor lands on the same side of it.
+            big, small = max(wick_up - 1.0, 1.0 - wick_dn), min(wick_up - 1.0, 1.0 - wick_dn)
+            if big - small < 0.25 * _wick_scale(tape):
+                big = small + 0.25 * _wick_scale(tape)
+            wick_up, wick_dn = ((1.0 + big, 1.0 - small) if wick_sign > 0 else (1.0 + small, 1.0 - big))
         if i == boundary:
             opened, ts = b.open, b.ts
         else:
@@ -329,8 +352,27 @@ def _index_of(tape: Sequence[Any], bar: Any) -> int:
     return 0
 
 
+def sign_design(nonce: int, boundary: int) -> list[tuple[int, int, int]]:
+    """The order in which a probed bar's move, wick skew and volume are pushed, as sign
+    triples. A covering design under a random mask: with ``s`` drawn from the nonce,
+
+        s, -s, s*(1,1,-1), s*(-1,1,1)          -- the first four draws --
+
+    push every field both ways (draws 0 and 1 are complements), push every PAIR of fields
+    apart in at least one draw, and flip the parity of all three. The last four are the
+    remaining combinations, so eight draws cover every sign pattern there is. Two random
+    draws after the complementary pair left a one-in-four chance that move and wick still
+    agreed; a fixed design would have been a target. A masked design is neither."""
+    r = random.Random(nonce ^ (boundary * 7_919 + 17))
+    s = (r.choice((1, -1)), r.choice((1, -1)), r.choice((1, -1)))
+    mul = lambda a, b: (a[0] * b[0], a[1] * b[1], a[2] * b[2])
+    neg = lambda a: (-a[0], -a[1], -a[2])
+    a, b, c = mul(s, (1, 1, -1)), mul(s, (-1, 1, 1)), mul(s, (1, -1, 1))
+    return [s, neg(s), a, b, c, neg(a), neg(b), neg(c)]
+
+
 def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | None,
-               boundary_sign: int = 0) -> list[Any]:
+               signs: tuple[int, int, int] = (0, 0, 0)) -> list[Any]:
     """Nudge everything unknowable at the moment bar ``boundary``'s position was chosen.
 
     The nudge is a small multiplicative change to each bar's own move, applied to the pristine
@@ -346,23 +388,28 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
     # nudge inflated the variance of the varied region by half again, and a red team
     # measured the difference. Fresh moves have the pristine distribution.
     #
-    # The boundary bar's move can be forced up or down. A same-bar read that decides on the
-    # sign of close - open only flips when the varied sign differs from the pristine one --
-    # a coin toss per draw, measured at a third of single-bar leaks missed at a probed bar.
-    # Mirroring the first two draws makes one of them certain, at the same magnitude.
+    # The boundary bar's move, wick skew and volume can each be forced up or down, and the
+    # three are forced INDEPENDENTLY: ``signs`` is a triple. The first two draws of an audit
+    # push all three one way and then all three the other, so each direction is certainly
+    # flipped; later draws take a random triple from the audit nonce. A fifth red team read
+    # the AGREEMENT of move and wick, which two lockstep draws never changed -- a fixed
+    # design is a design a leak can be written against, so the combinations beyond the
+    # first two are not fixed.
+    m_sign, w_sign, v_sign = signs
+
     def move(i, b):
         m = rng.gauss(0.0, sg)
-        if i == boundary and boundary_sign:
-            m = math.copysign(abs(m) or sg, boundary_sign)
+        if i == boundary and m_sign:
+            m = math.copysign(abs(m) or sg, m_sign)
         return math.exp(m)
 
     def volume(i, b):
         v = rng.gauss(0.0, 0.25)
-        if i == boundary and boundary_sign:
-            v = math.copysign(max(abs(v), 0.3), boundary_sign)     # and the volume, likewise
+        if i == boundary and v_sign:
+            v = math.copysign(max(abs(v), 0.3), v_sign)
         return b.volume * math.exp(v)
 
-    return _rethread(tape, boundary, rng, move, volume, boundary_sign)
+    return _rethread(tape, boundary, rng, move, volume, w_sign)
 
 
 def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
@@ -387,7 +434,7 @@ def _first_disagreement(a: Sequence[int], b: Sequence[int], upto: int) -> int | 
 
 
 def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequence[int] | None = None,
-                    draws: int = DEFAULT_DRAWS, sigma: float | None = None,
+                    draws: int | None = None, sigma: float | None = None,
                     probes: str = "sparse", seed: int | None = None) -> Report:
     """Run both probes and return what could be demonstrated.
 
@@ -418,6 +465,8 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     if n < 8:
         raise ValueError(f"need at least 8 bars to probe, got {n}")
     nonce = seed if seed is not None else int.from_bytes(os.urandom(8), "big")
+    if draws is None:
+        draws = 4 if probes == "every_bar" else DEFAULT_DRAWS
     if boundaries is not None:
         trunc_bounds = pert_bounds = sorted({b for b in boundaries if MIN_BOUNDARY <= b < n})
     elif probes == "every_bar":
@@ -452,9 +501,11 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
             candidates.append((d, (lambda c=cut: list(strategy(c))), truncated))
 
     for k in pert_bounds:
+        design = sign_design(nonce, k)
+        extra = random.Random(nonce ^ (k * 104_729 + 3))
         for d_i in range(draws):
-            sign = (1, -1)[d_i] if d_i < 2 else 0
-            varied = _perturbed(tape, k, seed=nonce ^ (k * 1_000_003 + d_i), sigma=sigma, boundary_sign=sign)
+            signs = design[d_i] if d_i < 8 else (extra.choice((1, -1)), extra.choice((1, -1)), extra.choice((1, -1)))
+            varied = _perturbed(tape, k, seed=nonce ^ (k * 1_000_003 + d_i), sigma=sigma, signs=signs)
             variant = list(strategy(varied))
             runs += 1
             idx = _first_disagreement(full, variant, k + 1)
@@ -467,26 +518,30 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     proven: list[Proven] = []
     suspected: list[Suspected] = []
     truncation_hits: list[Divergence] = []
-    meta = dict(probes_run=runs, bars_tested=n, boundaries=tuple(pert_bounds), seed=nonce)
+    meta = dict(probes_run=runs, bars_tested=n, boundaries=tuple(pert_bounds), seed=nonce, draws=draws)
 
     if candidates:
-        # Reproduction before promotion. One extra pristine run, one extra variant run per
-        # candidate. Which side fails to reproduce says what kind of strategy this is.
-        runs += 1
-        if list(strategy(tape)) != full:
-            return Report(suspected=(Suspected(
-                summary="the pristine tape gave two different outputs",
-                reason="output changed between identical runs; the strategy is nondeterministic"),),
-                nondeterministic=True, **{**meta, "probes_run": runs})
+        # Reproduction before promotion. The pristine tape is replayed THREE times, not once:
+        # a strategy that flips one bar with a small probability on any tape, inspecting
+        # nothing, reproduced once on the real tape and failed on a varied one, and was
+        # accused of telling the two apart. Three replays make that accusation rarer, and
+        # the wording below never asserts intent.
+        for _ in range(3):
+            runs += 1
+            if list(strategy(tape)) != full:
+                return Report(suspected=(Suspected(
+                    summary="the pristine tape gave two different outputs",
+                    reason="output changed between identical runs; the strategy is nondeterministic"),),
+                    nondeterministic=True, **{**meta, "probes_run": runs})
         for d, replay, first in candidates:
             again = replay()
             runs += 1
             if again != first:
                 return Report(suspected=(Suspected(
                     summary=f"the {d.probe} run at boundary {d.boundary} gave two different outputs, "
-                            f"while the pristine tape reproduced exactly",
-                    reason="deterministic on the real data and not on varied data: the strategy "
-                           "distinguishes the two, so no probe result about it can be trusted"),),
+                            f"while the pristine tape reproduced three times",
+                    reason="either the strategy distinguishes real data from varied data, or it is "
+                           "intermittently nondeterministic; neither can be audited by probing"),),
                     recognises_input=True, **{**meta, "probes_run": runs})
             if d.probe == "truncation":
                 truncation_hits.append(d)
@@ -504,8 +559,11 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     # real dependence on the future shows up wherever you cut. So a truncation finding
     # standing alone at a single boundary is filed as SUSPECTED, not PROVEN.
     #
-    # The perturbation probe holds row count, column set and index fixed and changes only
-    # values, so it cannot produce this artifact. Its corroboration promotes.
+    # The perturbation probe holds row count fixed, so it cannot produce the LENGTH artifact.
+    # A global transform still mixes every value into every output at the 1e-14 level, and
+    # a perturbed future bar can flip a past cell on a knife-edge -- a real, if useless,
+    # dependence on the future under this contract, reported as one. Its corroboration
+    # promotes.
     corroborated = bool(proven) or len(truncation_hits) >= 2
     for d in truncation_hits:
         if corroborated:
@@ -518,5 +576,5 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
                        "length-dependent arithmetic can flip a threshold without any "
                        "dependence on the future"))
 
-    proven.sort(key=lambda p: (-p.horizon, p.evidence.index))
+    proven.sort(key=lambda p: (p.horizon is None, -(p.horizon or 0), p.evidence.index))
     return Report(proven=tuple(proven), suspected=tuple(suspected), **meta)

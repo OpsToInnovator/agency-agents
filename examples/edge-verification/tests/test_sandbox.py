@@ -472,7 +472,7 @@ def test_precheck_names_a_strategy_that_is_deterministic_only_on_the_real_tape(t
     """)
     pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
     assert pc.deterministic and not pc.deterministic_on_varied and not pc.provable
-    assert "telling the two apart" in pc.describe()
+    assert "distinguishes real data from varied data" in pc.describe()
 
 
 def test_the_interpreter_and_its_packages_are_there_but_read_only(tape, tmp_path):
@@ -606,3 +606,39 @@ def test_a_deeply_nested_result_on_the_pipe_is_a_strategy_error_not_a_crash(tape
     """)
     with pytest.raises(StrategyError, match="malformed"):
         Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_host_sysctls_cannot_be_written(tape, tmp_path):
+    """A fresh /proc is a writable window onto host-wide sysctls. A fifth red team set
+    vm.overcommit_memory for the whole host from inside; /proc/sys is read-only now."""
+    before = open("/proc/sys/vm/overcommit_ratio").read().strip()
+    p = strategy_file(tmp_path, "sysctl", """
+        def signals(bars):
+            wrote = 0
+            for f, v in (("/proc/sys/vm/overcommit_ratio", "77"), ("/proc/sys/kernel/hostname", "x")):
+                try:
+                    open(f, "w").write(v); wrote += 1
+                except OSError:
+                    pass
+            return [wrote] * len(bars)
+    """)
+    assert Sandbox.from_file(p, work_root=tmp_path / "runs")(tape) == [0] * len(tape)
+    assert open("/proc/sys/vm/overcommit_ratio").read().strip() == before
+
+
+def test_close_removes_the_staged_source_and_an_owned_work_root(tape):
+    sb = Sandbox.from_file(FIX / "clean_lagged.py")          # default work root: created by the sandbox
+    stage, root = sb.strategy_dir, sb.work_root
+    sb(tape)
+    assert stage.exists() and root.exists()
+    sb.close()
+    assert not stage.exists() and not root.exists()
+
+
+def test_a_supplied_work_root_is_left_in_place_on_close(tape, tmp_path):
+    root = tmp_path / "runs"
+    with Sandbox.from_file(FIX / "clean_lagged.py", work_root=root) as sb:
+        sb(tape)
+        stage = sb.strategy_dir
+    assert root.exists() and not stage.exists()

@@ -47,7 +47,11 @@ or it does not, and when it does it is perfectly reproducible, which is exactly 
 finding looks like.
 
 A clean numpy strategy built on that filter was **not** falsely accused on this tape — the
-difference never landed on a crossing. That is luck, not safety.
+difference never landed on a crossing. That is luck, not safety. And a global transform mixes
+every value into every output at the 1e-14 level, so a perturbed *future* bar can flip a
+*past* cell on a knife-edge too: under this contract that is a real, if useless, dependence
+on the future, and it is reported as one. Perturbation removes the *length* artifact; it does
+not make a global transform causal.
 
 So a truncation finding standing alone at a single boundary is filed as `Suspected`, not
 `Proven`. A real dependence on the future shows up wherever you cut; a float artifact is a
@@ -113,16 +117,22 @@ Two modes now, and the report states which and what it covered:
 - `probes="sparse"` (default) draws the boundary set from a nonce the strategy never sees. A
   same-bar leak confined to one bar is caught with probability *B / (n − 4)* per audit — 14% on
   a 300-bar tape — and the report prints that number as coverage rather than implying more.
-- `probes="every_bar"` probes every bar, and truncates at every bar too, one run each — a
-  dependence on *how much data there is* shows up only under a cut between the index it
-  moves and the length it keys on, and the four fixed cuts stopped at 0.9n. ~2n runs. This
-  is what a paid report should use.
+- `probes="every_bar"` probes every bar from bar 4 on (bars 0–3 cannot be: nothing before them
+  can be varied) and truncates at every bar too — a dependence on *how much data there is*
+  shows up only under a cut between the index it moves and the length it keys on, and the
+  four fixed cuts stopped at 0.9n. ~5n runs with the default four draws. This is what a paid
+  report should use.
 
-At a probed bar the boundary bar's move, its wick and its volume are each pushed one way in
-the first draw and the other way in the second, so a decision on the *direction* of any of
-them flips in one draw for certain rather than on a coin toss. The report says exactly that,
-and adds the honest residual: a read of something finer than a direction can still go
-unseen. A fourth red team's one-bar wick read was being missed in one audit out of eight
+At a probed bar the boundary bar's move, its wick skew and its volume are each pushed one way
+in the first draw and the other way in the second, so a decision on the *direction* of any of
+them flips in one draw for certain. The draws after those two take a **random sign triple**
+from the audit nonce — a fifth red team read whether the move and the wick *agreed*, which two
+lockstep draws never changed, and a fixed design is a design a leak can be written against.
+The wick's magnitudes are a donor bar's, with only the skew forced — the previous fix had made
+the size a constant, so a wick-size threshold just below it was never crossed. Every-bar mode
+uses four draws by default. The report says how many of the eight sign combinations were tried
+and states the residual: a read of a magnitude rather than a direction, or one constant across
+the combinations tried, can still go unseen. A fourth red team's one-bar wick read was being missed in one audit out of eight
 while the report said "every bar was probed"; the wick was a random donor's, and only the
 move had been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than its close
 is, and a red team read one behind a harmless price term because no probe had ever moved it.
@@ -132,12 +142,13 @@ is, and a red team read one behind a harmless price term because no probe had ev
 A strategy seeded on a coarse clock passed the same-tape-twice gate — the two runs shared a
 one-second bucket — and was then convicted of a 130-bar lookahead that the clock, not the data,
 had produced. Now every candidate divergence is re-run on both sides, and only an exact
-reproduction becomes `Proven`. Which side fails says what the strategy is: if the pristine run
-does not reproduce, the strategy is nondeterministic and nothing in the report is attributed
-to the data. If the pristine run reproduces and a varied one does not, the strategy is telling
-real data from probe data — a second red team built exactly that, deterministic only on a
-tape it recognised by checksum and random everywhere else — and the report says so instead
-of calling it inconclusive. `precheck` catches the same pattern earlier by checking
+reproduction becomes `Proven`. Which side fails says something, and the report says only what
+it can: if the pristine run does not reproduce (it is replayed three times), the strategy is
+nondeterministic and nothing is attributed to the data. If the pristine run reproduces and a
+varied one does not, then *either* the strategy distinguishes real data from varied data — a
+second red team built exactly that — *or* it is intermittently nondeterministic and the real
+tape got lucky; the report names both, because a fifth red team showed a plain p = 0.2 flake
+being accused of the first. `precheck` catches the same pattern earlier by checking
 determinism on a varied tape as well as the real one.
 
 ## Truncation needs corroboration; perturbation does not
@@ -261,6 +272,8 @@ Two tiers, and the report says which ran:
 | the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
 | the strategy runs in one more, unmapped user namespace: no capabilities, every mount locked | yes | no |
 | its own UTS and IPC namespaces: the host's hostname is not the child's to change | yes | no |
+| `/proc/sys` read-only, `sysrq-trigger`, `irq` and `bus` masked: host sysctls are not the child's either | yes | no |
+| `close()` / `with` removes the staged source and an owned work root | yes | yes |
 | the parent bounds what it takes: result and record sizes, run-dir entries and depth; walks and teardown never recurse | yes | yes |
 | the strategy's copy of itself read-only; the run directory deleted after the run | yes | no |
 
@@ -297,7 +310,7 @@ Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What four red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What five red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -321,7 +334,14 @@ verdict-poisoning severity — a one-bar wick read missed in one every-bar audit
 (the boundary bar's wick and volume are now mirrored across the draws like its move), a
 count dependence above 0.9n (every-bar mode truncates at every bar), a `RecursionError` from
 a deeply nested result escaping the parent (caught, reported as malformed), and a child
-that could change the host's hostname through the shared UTS namespace (`--uts --ipc`).
+that could change the host's hostname through the shared UTS namespace (`--uts --ipc`). In
+the fifth: the agreement of move and wick invariant under two lockstep draws (random sign
+triples after the first two), a constant forced wick size (donor magnitudes, forced skew),
+host sysctls written through the fresh `/proc` (`/proc/sys` read-only), a rare flake accused
+of telling real from varied data (three pristine replays, and the report names both
+possibilities), truncation evidence lines printing a horizon under a headline that claimed
+none, "every bar was probed" while bars 0–3 cannot be, and staged source lingering in `/tmp`
+(`close()`).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
