@@ -47,13 +47,13 @@ These examples answer the question: *"What does it actually look like when the f
 
 **Key takeaway:** Thousands of gross-positive spreads per minute, zero or single digits net of fees, and the first "profit" it ever reported was a ticker collision (Binance `ONE` vs Kraken `ONE`). Build the scanner, learn the microstructure, keep your $68.
 
-### [team-skills/](./team-skills/)
+### [skillcurrent/](./skillcurrent/)
 
-**What:** A shared skill management system for teams: one reviewed catalog of Agent-Skills `SKILL.md` files, with roles, a draft → review → publish workflow, immutable semantic versions with SHA-256 digests, and an installer that keeps every member's Claude Code, Antigravity, Codex and Osaurus skill directories in sync.
+**What:** SkillCurrent, a shared skill management system for teams: one reviewed catalog of Agent-Skills `SKILL.md` files that walks every change through four steps, Edit → Test → Release → Adoption, with roles, deterministic pre-submit checks, approval of exact bytes, canary and production channels with rollback, and per-environment receipts.
 
-**The scenario:** Skills are the unit every AI coding tool now loads, and this repo already renders its agents into that format. A team that shares them by copying files has no idea who runs which version, who approved it, or which copies drifted. Team Skills is a dependency-free Python app (CLI + HTTP API + browser UI over one SQLite file) that answers all three: contributors draft, a different maintainer approves, members install and `sync`, and `status` reports current / outdated / modified / missing / deprecated copies. It imports this repository's agent files as drafts in one command.
+**The scenario:** Skills are the unit every AI coding tool now loads, and this repo already renders its agents into that format. A team that shares them by copying files has no idea who runs which version, who approved it, or which copies drifted. SkillCurrent is a dependency-free Python app (CLI + HTTP API + browser UI over one SQLite file): a contributor drafts, the checks must pass on the exact draft, a *different* maintainer approves and freezes an immutable version with its SHA-256, a channel is pointed at it, and members `install`, `status` and `sync` while every step leaves a receipt (installed, verified, loaded, task-tested). It imports this repository's agent files as drafts in one command.
 
-**Key takeaway:** The catalog, not the copy on disk, is the source of truth; every published version has a digest and a published `index` generation, so any runtime can prove it retrieved exactly what was approved.
+**Key takeaway:** The catalog, not the copy on disk, is the source of truth. Approval attaches to bytes, channels decide what installs resolve to, and "installed is not the same as loaded": the adoption view reports evidence about specific events rather than a blanket guarantee.
 
 ## Adding New Examples
 

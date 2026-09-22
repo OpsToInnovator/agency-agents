@@ -1,7 +1,7 @@
 """A session binds an actor to a team and dispatches operations.
 
 ``LocalSession`` calls the ``Service`` in-process against a local database;
-``RemoteSession`` sends the same operations to a ``teamskills serve``
+``RemoteSession`` sends the same operations to a ``skillcurrent serve``
 instance over HTTP. Both expose ``call(op, **args)`` so the CLI and the
 installer never care which one they hold.
 """
@@ -10,7 +10,7 @@ import json
 import urllib.error
 import urllib.request
 
-from .errors import Invalid, TeamSkillsError, Unauthorized, from_code
+from .errors import Invalid, SkillCurrentError, Unauthorized, from_code
 from .service import RPC_OPS, Service
 
 
@@ -39,9 +39,9 @@ class RemoteSession:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self.team:
-            headers["X-TeamSkills-Team"] = self.team
+            headers["X-SkillCurrent-Team"] = self.team
         if self.actor:
-            headers["X-TeamSkills-User"] = self.actor
+            headers["X-SkillCurrent-User"] = self.actor
         return headers
 
     def call(self, op: str, **args):
@@ -54,9 +54,9 @@ class RemoteSession:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
-                raise TeamSkillsError(f"server returned HTTP {exc.code}") from exc
+                raise SkillCurrentError(f"server returned HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
-            raise TeamSkillsError(f"cannot reach {self.url}: {exc.reason}") from exc
+            raise SkillCurrentError(f"cannot reach {self.url}: {exc.reason}") from exc
         if payload.get("ok"):
             return payload.get("result")
         err = payload.get("error") or {}

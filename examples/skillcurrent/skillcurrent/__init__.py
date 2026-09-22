@@ -1,4 +1,4 @@
-"""Team Skills: a shared skill management system for teams.
+"""SkillCurrent: a shared skill management system for teams.
 
 A team keeps one catalog of Agent-Skills ``SKILL.md`` files. Members draft
 skills, submit them for review, maintainers approve and publish immutable

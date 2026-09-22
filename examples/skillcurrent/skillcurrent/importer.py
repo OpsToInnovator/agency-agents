@@ -9,7 +9,7 @@ are slugified ("backend-architect") so they become valid skills.
 from pathlib import Path
 
 from . import frontmatter, skillfile
-from .errors import Conflict, TeamSkillsError
+from .errors import Conflict, SkillCurrentError
 
 
 def collect_sources(path: str | Path) -> list[tuple[Path, str]]:
@@ -58,8 +58,8 @@ def import_path(session, path: str | Path, update: bool = False) -> list[dict]:
             try:
                 session.call("update_draft", slug=slug, content=content)
                 results.append({"source": str(source), "slug": slug, "action": "updated"})
-            except TeamSkillsError as exc:
+            except SkillCurrentError as exc:
                 results.append({"source": str(source), "slug": slug, "action": "skipped", "reason": exc.message})
-        except TeamSkillsError as exc:
+        except SkillCurrentError as exc:
             results.append({"source": str(source), "slug": slug, "action": "skipped", "reason": exc.message})
     return results

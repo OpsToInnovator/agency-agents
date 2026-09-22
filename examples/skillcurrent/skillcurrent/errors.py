@@ -1,7 +1,7 @@
 """Error types shared by the service, the HTTP server and the CLI."""
 
 
-class TeamSkillsError(Exception):
+class SkillCurrentError(Exception):
     """Base class. ``code`` is the stable machine-readable name used on the wire."""
 
     code = "error"
@@ -12,27 +12,27 @@ class TeamSkillsError(Exception):
         self.message = message
 
 
-class NotFound(TeamSkillsError):
+class NotFound(SkillCurrentError):
     code = "not_found"
     http_status = 404
 
 
-class Forbidden(TeamSkillsError):
+class Forbidden(SkillCurrentError):
     code = "forbidden"
     http_status = 403
 
 
-class Invalid(TeamSkillsError):
+class Invalid(SkillCurrentError):
     code = "invalid"
     http_status = 400
 
 
-class Conflict(TeamSkillsError):
+class Conflict(SkillCurrentError):
     code = "conflict"
     http_status = 409
 
 
-class Unauthorized(TeamSkillsError):
+class Unauthorized(SkillCurrentError):
     code = "unauthorized"
     http_status = 401
 
@@ -40,5 +40,5 @@ class Unauthorized(TeamSkillsError):
 BY_CODE = {cls.code: cls for cls in (NotFound, Forbidden, Invalid, Conflict, Unauthorized)}
 
 
-def from_code(code: str, message: str) -> TeamSkillsError:
-    return BY_CODE.get(code, TeamSkillsError)(message)
+def from_code(code: str, message: str) -> SkillCurrentError:
+    return BY_CODE.get(code, SkillCurrentError)(message)

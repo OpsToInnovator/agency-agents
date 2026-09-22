@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from teamskills.cli import main
+from skillcurrent.cli import main
 from tests.conftest import skill_text
 
 
@@ -14,10 +14,10 @@ def run(capsys, *argv):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setenv("TEAMSKILLS_DB", str(tmp_path / "db.sqlite"))
-    monkeypatch.setenv("TEAMSKILLS_TEAM", "acme")
-    monkeypatch.setenv("TEAMSKILLS_USER", "ana")
-    monkeypatch.setenv("TEAMSKILLS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SKILLCURRENT_DB", str(tmp_path / "db.sqlite"))
+    monkeypatch.setenv("SKILLCURRENT_TEAM", "acme")
+    monkeypatch.setenv("SKILLCURRENT_USER", "ana")
+    monkeypatch.setenv("SKILLCURRENT_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -36,18 +36,32 @@ def test_full_cli_workflow(env, capsys):
     bad = env / "bad.md"
     bad.write_text("---\nname: Bad\n---\n", encoding="utf-8")
     code, out, _ = run(capsys, "skills", "validate", bad)
-    assert code == 1 and "INVALID" in out
+    assert code == 1 and "NEEDS ATTENTION" in out
 
     code, out, _ = run(capsys, "--as", "cai", "skills", "new", skill_file)
     assert code == 0 and "Created draft release-notes" in out
     code, out, _ = run(capsys, "--as", "cai", "skills", "new", "--name", "pr-review", "--description", "Review pull requests the team way.")
     assert code == 0
+    code, out, _ = run(capsys, "--as", "cai", "skills", "checks", "pr-review")
+    assert code == 1 and "FAIL" in out and "placeholders" in out.lower()
+    code, _, err = run(capsys, "--as", "cai", "skills", "submit", "release-notes", "--note", "first")
+    assert code == 1 and "run the checks" in err
+    code, out, _ = run(capsys, "--as", "cai", "skills", "checks", "release-notes")
+    assert code == 0 and "checks passed" in out
     code, out, _ = run(capsys, "--as", "cai", "skills", "submit", "release-notes", "--note", "first")
     assert code == 0 and "version 1.0.0" in out
     code, out, err = run(capsys, "--as", "cai", "skills", "approve", "release-notes")
     assert code == 1 and "forbidden" in err
     code, out, _ = run(capsys, "--as", "ben", "skills", "approve", "release-notes")
-    assert code == 0 and "Published release-notes 1.0.0" in out
+    assert code == 0 and "Approved release-notes 1.0.0" in out and "Nothing is installed yet" in out
+    code, out, _ = run(capsys, "skills", "list", "--status", "approved")
+    assert "release-notes" in out
+    code, _, err = run(capsys, "--as", "cai", "install", "release-notes")
+    assert code == 1 and "no release on the production channel" in err
+    code, out, _ = run(capsys, "--as", "ben", "skills", "release", "release-notes", "--channel", "canary")
+    assert code == 0 and "canary release" in out
+    code, out, _ = run(capsys, "--as", "ben", "skills", "release", "release-notes")
+    assert code == 0 and "production release" in out
     code, out, _ = run(capsys, "skills", "list", "--status", "published")
     assert "release-notes" in out and "pr-review" not in out
     code, out, _ = run(capsys, "skills", "cat", "release-notes")
@@ -64,17 +78,38 @@ def test_full_cli_workflow(env, capsys):
     assert run(capsys, "--as", "cai", "skills", "edit", "release-notes", skill_file)[0] == 0
     code, out, _ = run(capsys, "--as", "cai", "skills", "diff", "release-notes")
     assert "+## More" in out
+    assert run(capsys, "--as", "cai", "skills", "checks", "release-notes")[0] == 0
     assert run(capsys, "--as", "cai", "skills", "submit", "release-notes", "--bump", "minor")[0] == 0
     code, out, _ = run(capsys, "reviews")
     assert "1.1.0" in out
     assert run(capsys, "--as", "ben", "skills", "reject", "release-notes", "--reason", "add examples")[0] == 0
     assert run(capsys, "--as", "cai", "skills", "submit", "release-notes", "--bump", "minor")[0] == 0
-    assert run(capsys, "--as", "ana", "skills", "approve", "release-notes")[0] == 0
+    code, out, _ = run(capsys, "--as", "ana", "skills", "approve", "release-notes", "--release", "production")
+    assert code == 0 and "Released to production" in out
     code, out, _ = run(capsys, "--as", "cai", "status")
     assert code == 2 and out.count("outdated") == 2
     code, out, _ = run(capsys, "--as", "cai", "sync")
     assert code == 0 and out.count("updated") == 2
     assert run(capsys, "--as", "cai", "status")[0] == 0
+    code, out, _ = run(capsys, "--as", "ben", "skills", "rollback", "release-notes", "--reason", "regression")
+    assert code == 0 and "back to release-notes 1.0.0" in out
+    code, out, _ = run(capsys, "--as", "cai", "status")
+    assert code == 2 and out.count("outdated") == 2
+    assert run(capsys, "--as", "ben", "skills", "release", "release-notes", "1.1.0")[0] == 0
+    assert run(capsys, "--as", "cai", "sync")[0] == 0
+    code, out, _ = run(capsys, "--as", "cai", "report", "release-notes", "loaded", "--detail", "session hook")
+    assert code == 0 and "Recorded loaded receipt" in out
+    code, out, _ = run(capsys, "adoption", "--slug", "release-notes")
+    assert code == 0 and "loaded" in out and "2 environments" in out
+    code, out, _ = run(capsys, "skills", "history", "release-notes")
+    assert "rollback" in out and "1.1.0" in out
+    code, out, _ = run(capsys, "skills", "passport", "release-notes")
+    assert "acme/release-notes" in out
+    code, out, _ = run(capsys, "--as", "ben", "rules", "add", "no-screenshots-first", "forbid", "ask (the user )?for a screenshot", "--category", "evidence")
+    assert code == 0 and "Added rule" in out
+    code, out, _ = run(capsys, "rules")
+    assert "no-screenshots-first" in out
+    assert run(capsys, "--as", "ben", "rules", "remove", "no-screenshots-first")[0] == 0
     code, out, _ = run(capsys, "--as", "cai", "uninstall", "release-notes", "--target", "claude-code-project", "--project", env / "proj")
     assert code == 0
 
@@ -86,6 +121,8 @@ def test_full_cli_workflow(env, capsys):
     assert "1.1.0" in out and "1.0.0" in out
     code, out, _ = run(capsys, "dashboard")
     assert "published 1" in out and "drafts 1" in out
+    code, out, _ = run(capsys, "index")
+    assert "production" in out and "1.1.0" in out
     code, out, _ = run(capsys, "activity", "--limit", "5")
     assert "skill.restored" in out
     code, out, _ = run(capsys, "targets")

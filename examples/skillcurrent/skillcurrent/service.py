@@ -13,14 +13,19 @@ import json
 import re
 import secrets
 
-from . import semver, skillfile
+from . import checks, semver, skillfile
 from .errors import Conflict, Forbidden, Invalid, NotFound
 from .store import Store, now
 
 ROLES = ("viewer", "contributor", "maintainer", "owner")
 RANK = {role: i for i, role in enumerate(ROLES)}
-STATUSES = ("draft", "in_review", "published", "deprecated")
+STATUSES = ("draft", "in_review", "approved", "published", "deprecated")
+CHANNELS = ("canary", "production")
+DEFAULT_CHANNEL = "production"
+RECEIPT_EVENTS = ("installed", "verified", "loaded", "task_tested")
+EVIDENCE_RANK = {e: i for i, e in enumerate(RECEIPT_EVENTS)}
 HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 SLUG_RE = skillfile.NAME_RE
 TOKEN_PREFIX = "ts_"
 
@@ -125,29 +130,56 @@ class Service:
             out["skill_title"] = r["skill_title"]
         return out
 
-    def _status(self, skill: dict, pending: dict | None) -> str:
+    def _status(self, skill: dict, pending: dict | None, channels: dict | None = None) -> str:
         if skill["lifecycle"] == "deprecated":
             return "deprecated"
         if pending is not None:
             return "in_review"
-        if skill["latest_version_id"]:
+        channels = channels if channels is not None else self.store.channels(skill["id"])
+        if DEFAULT_CHANNEL in channels:
             return "published"
+        if skill["latest_version_id"]:
+            return "approved"
         return "draft"
+
+    @staticmethod
+    def _channel_view(c: dict) -> dict:
+        return {"version": c["version"], "content_hash": c["content_hash"], "set_by": c["set_by"], "set_at": c["set_at"]}
+
+    def _checks_view(self, skill: dict) -> dict | None:
+        run = self.store.latest_check_run(skill["id"])
+        if run is None:
+            return None
+        draft_hash = skillfile.content_hash(skill["draft_content"]) if skill["draft_content"] is not None else None
+        return {
+            "passed": run["passed"],
+            "failed": sum(1 for r in run["results"] if not r["passed"]),
+            "total": len(run["results"]),
+            "content_hash": run["content_hash"],
+            "run_by": run["run_by"],
+            "run_at": run["run_at"],
+            "current": run["content_hash"] == draft_hash,
+        }
 
     def _skill_view(self, skill: dict, install_count: int | None = None) -> dict:
         pending = self.store.pending_review(skill["id"])
         latest = self.store.version_by_id(skill["latest_version_id"]) if skill["latest_version_id"] else None
+        channels = self.store.channels(skill["id"])
         view = {
             "slug": skill["slug"],
             "title": skill["title"],
             "description": skill["description"],
             "owner": skill["owner_handle"],
             "tags": json.loads(skill["tags"]),
-            "status": self._status(skill, pending),
+            "status": self._status(skill, pending, channels),
             "lifecycle": skill["lifecycle"],
             "deprecation_reason": skill["deprecation_reason"],
             "latest_version": latest["version"] if latest else None,
-            "published_at": latest["created_at"] if latest else None,
+            "latest_hash": latest["content_hash"] if latest else None,
+            "approved_at": latest["created_at"] if latest else None,
+            "channels": {name: self._channel_view(c) for name, c in channels.items()},
+            "production_version": channels[DEFAULT_CHANNEL]["version"] if DEFAULT_CHANNEL in channels else None,
+            "checks": self._checks_view(skill),
             "has_draft": skill["draft_content"] is not None,
             "draft_editor": skill["draft_editor"] if skill["draft_content"] is not None else None,
             "draft_updated_at": skill["draft_updated_at"] if skill["draft_content"] is not None else None,
@@ -191,6 +223,30 @@ class Service:
             return None
         m = self.store.member_by_token_hash(_hash_token(token))
         return (m["team_slug"], m["handle"]) if m else None
+
+    # ----------------------------------------------------------- beta waitlist
+    def record_beta_signup(self, email: str, team_size: str = "", tools=None, note: str = "", source: str = "") -> dict:
+        """Store a landing-page sign-up. Unauthenticated by design; validated and size-capped."""
+        email = (email or "").strip().lower()
+        if not EMAIL_RE.match(email) or len(email) > 254:
+            raise Invalid("enter a valid email address")
+        team_size = str(team_size or "").strip()[:32]
+        if isinstance(tools, str):
+            tools = [t for t in tools.split(",") if t.strip()]
+        tools = [str(t).strip().lower()[:32] for t in (tools or []) if str(t).strip()][:20]
+        note = str(note or "").strip()[:2000]
+        source = str(source or "").strip()[:200]
+        self.store.upsert_beta_signup(email, team_size, tools, note, source)
+        return {"email": email, "team_size": team_size, "tools": tools}
+
+    @rpc
+    def list_beta_signups(self, team: str, actor: str) -> list[dict]:
+        _, m = self._ctx(team, actor)
+        self._require(m, "owner", "reading beta sign-ups")
+        return [
+            {k: r[k] for k in ("email", "team_size", "tools", "note", "source", "created_at", "updated_at")}
+            for r in self.store.beta_signups()
+        ]
 
     # ------------------------------------------------------------------ members
     @rpc
@@ -384,11 +440,20 @@ class Service:
     def _resolve_ref(self, skill: dict, ref: str | None) -> tuple[str, str, str]:
         """Return (ref label, version string, content) for ``ref``.
 
-        ``ref`` is None/"latest" (latest published), "draft", or a version.
+        ``ref`` is None/"production" (the production channel), "canary",
+        "latest" (newest approved version), "draft", or a version number.
         """
-        if ref in (None, "", "latest"):
+        if ref in (None, "", *CHANNELS):
+            channel = ref or DEFAULT_CHANNEL
+            c = self.store.channel(skill["id"], channel)
+            if c is None:
+                hint = "use ref='latest' for the newest approved version or ref='draft'" if skill["latest_version_id"] else "use ref='draft'"
+                raise NotFound(f"{skill['slug']!r} has no release on the {channel} channel ({hint})")
+            v = self.store.version_by_id(c["version_id"])
+            return channel, v["version"], v["content"]
+        if ref == "latest":
             if not skill["latest_version_id"]:
-                raise NotFound(f"{skill['slug']!r} has no published version yet (use ref='draft')")
+                raise NotFound(f"{skill['slug']!r} has no approved version yet (use ref='draft')")
             v = self.store.version_by_id(skill["latest_version_id"])
             return "latest", v["version"], v["content"]
         if ref == "draft":
@@ -408,6 +473,7 @@ class Service:
         return {
             "slug": slug,
             "ref": label,
+            "channel": label if label in CHANNELS else None,
             "version": version,
             "content": content,
             "content_hash": skillfile.content_hash(content),
@@ -425,9 +491,9 @@ class Service:
         t, _ = self._ctx(team, actor)
         skill = self._skill(t, slug)
         try:
-            from_label, _, a = self._resolve_ref(skill, from_ref)
+            from_label, _, a = self._resolve_ref(skill, from_ref or "latest")
         except NotFound:
-            if from_ref in (None, "", "latest"):
+            if from_ref in (None, "", "latest", *CHANNELS):
                 from_label, a = "empty", ""
             else:
                 raise
@@ -452,6 +518,11 @@ class Service:
             raise Conflict(f"{slug!r} already has a pending review")
         skillfile.parse(skill["draft_content"])  # re-validate; fail loudly if the draft went stale
         content_hash = skillfile.content_hash(skill["draft_content"])
+        run = self.store.latest_check_run(skill["id"])
+        if run is None or run["content_hash"] != content_hash:
+            raise Conflict(f"run the checks on the current draft of {slug!r} before submitting it (run_checks)")
+        if not run["passed"]:
+            raise Conflict(f"the current draft of {slug!r} fails {sum(1 for r in run['results'] if not r['passed'])} check(s); fix them and rerun")
         with self.store.tx():
             review_id = self.store.insert_review(skill["id"], actor, bump, note or "", content_hash)
             self._log(t, actor, "review.submitted", slug, bump=bump, note=note or "", proposed_version=self._next_version(skill, bump))
@@ -475,9 +546,17 @@ class Service:
         return self._skill_view(self._skill(t, slug))
 
     @rpc
-    def approve(self, team: str, actor: str, slug: str, comment: str = "") -> dict:
+    def approve(self, team: str, actor: str, slug: str, comment: str = "", release: str | None = None) -> dict:
+        """Freeze the submitted draft as an immutable, approved version.
+
+        Approval attaches to these exact bytes and nothing is installed until
+        the version is released to a channel; ``release`` performs that step
+        in the same call for teams that do not stage rollouts.
+        """
         t, m = self._ctx(team, actor)
         self._require(m, "maintainer", "approving skills")
+        if release is not None and release not in CHANNELS:
+            raise Invalid(f"release must be one of {', '.join(CHANNELS)}")
         skill = self._skill(t, slug)
         pending = self.store.pending_review(skill["id"])
         if pending is None:
@@ -499,10 +578,174 @@ class Service:
                 skill["id"], latest_version_id=version_id, draft_content=None, draft_editor=None, draft_updated_at=None,
                 lifecycle="active", deprecation_reason=None, title=doc.title, description=doc.description, tags=doc.tags,
             )
-            self._log(t, actor, "skill.published", slug, version=version, author=pending["submitted_by"], comment=comment or "")
+            self._log(t, actor, "skill.approved", slug, version=version, author=pending["submitted_by"], comment=comment or "")
+            if release:
+                self._set_channel(t, actor, self._skill(t, slug), version, release, "release", pending["note"])
         out = self._skill_view(self._skill(t, slug))
-        out["published"] = self._version_view(self.store.version_by_id(version_id))
+        out["approved"] = self._version_view(self.store.version_by_id(version_id))
         return out
+
+    def _set_channel(self, team: dict, actor: str, skill: dict, version: str, channel: str, kind: str, reason: str) -> dict:
+        v = self.store.version(skill["id"], version)
+        if v is None:
+            raise NotFound(f"{skill['slug']!r} has no approved version {version!r}")
+        current = self.store.channel(skill["id"], channel)
+        previous = current["version"] if current else None
+        if previous == version:
+            raise Conflict(f"{skill['slug']!r} {version} is already the {channel} release")
+        with self.store.tx():
+            self.store.set_channel(skill["id"], channel, v["id"], version, previous, kind, reason or "", actor)
+            self._log(team, actor, f"skill.{kind}", skill["slug"], channel=channel, version=version, previous=previous, reason=reason or "")
+        return {"slug": skill["slug"], "channel": channel, "version": version, "previous": previous, "content_hash": v["content_hash"]}
+
+    @rpc
+    def release(self, team: str, actor: str, slug: str, version: str | None = None, channel: str = DEFAULT_CHANNEL, note: str = "") -> dict:
+        """Point a channel at an approved version. Installs on that channel now resolve to these bytes."""
+        t, m = self._ctx(team, actor)
+        self._require(m, "maintainer", "releasing skills")
+        if channel not in CHANNELS:
+            raise Invalid(f"channel must be one of {', '.join(CHANNELS)}")
+        skill = self._skill(t, slug)
+        if skill["lifecycle"] == "deprecated":
+            raise Conflict(f"{slug!r} is deprecated; restore it before releasing")
+        if version is None:
+            if not skill["latest_version_id"]:
+                raise Invalid(f"{slug!r} has no approved version to release")
+            version = self.store.version_by_id(skill["latest_version_id"])["version"]
+        return self._set_channel(t, actor, skill, version, channel, "release", note)
+
+    @rpc
+    def rollback(self, team: str, actor: str, slug: str, channel: str = DEFAULT_CHANNEL, reason: str = "") -> dict:
+        """Point a channel back at the version it served before the current one.
+
+        Rollback changes what the channel resolves to. It does not delete
+        downloaded copies; ``sync`` brings environments back in line.
+        """
+        t, m = self._ctx(team, actor)
+        self._require(m, "maintainer", "rolling back releases")
+        if channel not in CHANNELS:
+            raise Invalid(f"channel must be one of {', '.join(CHANNELS)}")
+        skill = self._skill(t, slug)
+        current = self.store.channel(skill["id"], channel)
+        if current is None:
+            raise Invalid(f"{slug!r} has nothing on the {channel} channel")
+        previous = next((h for h in self.store.channel_history(skill["id"], channel) if h["version"] != current["version"]), None)
+        if previous is None:
+            raise Invalid(f"{slug!r} has no earlier {channel} release to roll back to")
+        return self._set_channel(t, actor, skill, previous["version"], channel, "rollback", reason)
+
+    @rpc
+    def release_history(self, team: str, actor: str, slug: str) -> dict:
+        t, _ = self._ctx(team, actor)
+        skill = self._skill(t, slug)
+        channels = self.store.channels(skill["id"])
+        return {
+            "slug": slug,
+            "channels": {name: self._channel_view(c) for name, c in channels.items()},
+            "versions": [self._version_view(v) for v in self.store.versions(skill["id"])],
+            "events": [
+                {
+                    "channel": h["channel"], "version": h["version"], "previous_version": h["previous_version"],
+                    "kind": h["kind"], "reason": h["reason"], "by": h["set_by"], "at": h["set_at"],
+                }
+                for h in self.store.channel_history(skill["id"])
+            ],
+        }
+
+    @rpc
+    def passport(self, team: str, actor: str, slug: str) -> dict:
+        """Identity, ownership and boundaries that travel with the skill."""
+        t, _ = self._ctx(team, actor)
+        skill = self._skill(t, slug)
+        view = self._skill_view(skill, self.store.install_counts(t["id"]).get(skill["id"], 0))
+        adoption = self.adoption(team, actor, slug=slug)
+        return {
+            "canonical_id": f"{t['slug']}/{slug}",
+            "slug": slug,
+            "title": view["title"],
+            "description": view["description"],
+            "owner": view["owner"],
+            "tags": view["tags"],
+            "status": view["status"],
+            "lifecycle": view["lifecycle"],
+            "latest_version": view["latest_version"],
+            "latest_hash": view["latest_hash"],
+            "channels": view["channels"],
+            "rules": [r["name"] for r in self.store.rules(t["id"])],
+            "environments": adoption["summary"],
+            "created_at": view["created_at"],
+            "updated_at": view["updated_at"],
+        }
+
+    # ------------------------------------------------------------------- checks
+    @rpc
+    def check_content(self, team: str, actor: str, content: str) -> dict:
+        """Run the checks against arbitrary content without recording anything."""
+        t, _ = self._ctx(team, actor)
+        return checks.run(content, self.store.rules(t["id"]))
+
+    @rpc
+    def run_checks(self, team: str, actor: str, slug: str) -> dict:
+        """Run the checks against the current draft and record the result.
+
+        Submission requires a passing run against the exact draft bytes.
+        """
+        t, m = self._ctx(team, actor)
+        skill = self._skill(t, slug)
+        self._require_edit(m, skill)
+        if skill["draft_content"] is None:
+            raise Invalid(f"{slug!r} has no draft to check")
+        report = checks.run(skill["draft_content"], self.store.rules(t["id"]))
+        with self.store.tx():
+            self.store.insert_check_run(skill["id"], report["content_hash"], report["passed"], report["results"], actor)
+            self._log(t, actor, "checks.run", slug, passed=report["passed"], failed=report["failed"], total=report["total"])
+        report["slug"] = slug
+        report["run_by"] = actor
+        return report
+
+    @rpc
+    def list_rules(self, team: str, actor: str) -> list[dict]:
+        t, _ = self._ctx(team, actor)
+        return [self._rule_view(r) for r in self.store.rules(t["id"])]
+
+    @staticmethod
+    def _rule_view(r: dict) -> dict:
+        return {k: r[k] for k in ("name", "kind", "pattern", "category", "rationale", "created_by", "created_at")}
+
+    @rpc
+    def add_rule(self, team: str, actor: str, name: str, kind: str, pattern: str, category: str = "team", rationale: str = "") -> dict:
+        t, m = self._ctx(team, actor)
+        self._require(m, "maintainer", "adding check rules")
+        if not SLUG_RE.match(name or ""):
+            raise Invalid("rule name must be lowercase letters, digits and single hyphens")
+        if kind not in checks.RULE_KINDS:
+            raise Invalid(f"kind must be one of {', '.join(checks.RULE_KINDS)}")
+        if category not in checks.CATEGORIES:
+            raise Invalid(f"category must be one of {', '.join(checks.CATEGORIES)}")
+        try:
+            re.compile(pattern or "")
+        except re.error as exc:
+            raise Invalid(f"pattern is not a valid regular expression: {exc}") from None
+        if not pattern:
+            raise Invalid("pattern is required")
+        if self.store.rule(t["id"], name):
+            raise Conflict(f"rule {name!r} already exists")
+        with self.store.tx():
+            self.store.insert_rule(t["id"], name, kind, pattern, category, rationale or "", actor)
+            self._log(t, actor, "rule.added", None, name=name, kind=kind, pattern=pattern)
+        return self._rule_view(self.store.rule(t["id"], name))
+
+    @rpc
+    def remove_rule(self, team: str, actor: str, name: str) -> dict:
+        t, m = self._ctx(team, actor)
+        self._require(m, "maintainer", "removing check rules")
+        rule = self.store.rule(t["id"], name)
+        if rule is None:
+            raise NotFound(f"rule {name!r} does not exist")
+        with self.store.tx():
+            self.store.delete_rule(rule["id"])
+            self._log(t, actor, "rule.removed", None, name=name)
+        return {"removed": name}
 
     @rpc
     def reject(self, team: str, actor: str, slug: str, reason: str) -> dict:
@@ -557,57 +800,148 @@ class Service:
 
     # ----------------------------------------------------------------- installs
     @rpc
-    def record_install(self, team: str, actor: str, slug: str, version: str, target: str, path: str, content_hash: str) -> dict:
+    def record_install(self, team: str, actor: str, slug: str, version: str, target: str, path: str, content_hash: str, host: str = "", channel: str = DEFAULT_CHANNEL) -> dict:
+        """Record that an environment (member + host + target) holds these bytes, and write an ``installed`` receipt."""
         t, _ = self._ctx(team, actor)
         skill = self._skill(t, slug)
         if version != "draft" and self.store.version(skill["id"], version) is None:
             raise NotFound(f"{slug!r} has no version {version!r}")
+        if channel not in CHANNELS:
+            raise Invalid(f"channel must be one of {', '.join(CHANNELS)}")
+        host = host or ""
         with self.store.tx():
-            self.store.upsert_install(t["id"], actor, skill["id"], version, target, path, content_hash)
-            self._log(t, actor, "skill.installed", slug, version=version, target=target)
-        return {"slug": slug, "version": version, "target": target, "path": path}
+            self.store.upsert_install(t["id"], actor, host, skill["id"], version, channel, target, path, content_hash)
+            self.store.insert_receipt(t["id"], actor, host, target, skill["id"], version, "installed", content_hash, path)
+            self._log(t, actor, "skill.installed", slug, version=version, target=target, host=host, channel=channel)
+        return {"slug": slug, "version": version, "target": target, "path": path, "host": host, "channel": channel}
 
     @rpc
-    def remove_install(self, team: str, actor: str, slug: str, target: str) -> dict:
+    def remove_install(self, team: str, actor: str, slug: str, target: str, host: str = "") -> dict:
         t, _ = self._ctx(team, actor)
         skill = self._skill(t, slug)
         with self.store.tx():
-            removed = self.store.delete_install(t["id"], actor, skill["id"], target)
+            removed = self.store.delete_install(t["id"], actor, host or "", skill["id"], target)
             if removed:
-                self._log(t, actor, "skill.uninstalled", slug, target=target)
-        return {"slug": slug, "target": target, "removed": bool(removed)}
+                self._log(t, actor, "skill.uninstalled", slug, target=target, host=host or "")
+        return {"slug": slug, "target": target, "host": host or "", "removed": bool(removed)}
 
     @rpc
-    def list_installs(self, team: str, actor: str, handle: str | None = None) -> list[dict]:
-        t, m = self._ctx(team, actor)
-        if handle == "*":
-            self._require(m, "maintainer", "listing every member's installs")
-            rows = self.store.installs(t["id"])
-        else:
-            handle = handle or actor
-            if handle != actor:
-                self._require(m, "maintainer", "listing another member's installs")
-            rows = self.store.installs(t["id"], handle)
-        skills = {s["id"]: s for s in self.store.skills(t["id"])}
+    def report(self, team: str, actor: str, slug: str, event: str, target: str, host: str = "", version: str = "", content_hash: str = "", detail: str = "") -> dict:
+        """Record a receipt from an environment: ``verified`` (bytes re-hashed and
+        matched), ``loaded`` (a runtime reported loading the skill) or
+        ``task_tested`` (a named fixture task passed). Receipts are evidence
+        about a specific event, never proof that an agent always follows a skill."""
+        t, _ = self._ctx(team, actor)
+        skill = self._skill(t, slug)
+        if event not in RECEIPT_EVENTS[1:]:
+            raise Invalid(f"event must be one of {', '.join(RECEIPT_EVENTS[1:])}")
+        host = host or ""
+        if not version:
+            install = next(iter(self.store.installs(t["id"], actor, host, skill["id"])), None)
+            install = install if install and install["target"] == target else next((i for i in self.store.installs(t["id"], actor, host, skill["id"]) if i["target"] == target), None)
+            if install is None:
+                raise Invalid(f"{slug!r} is not recorded as installed for {actor}@{host or 'default'} on {target}; pass version explicitly")
+            version = install["version"]
+            content_hash = content_hash or install["content_hash"]
+        with self.store.tx():
+            self.store.insert_receipt(t["id"], actor, host, target, skill["id"], version, event, content_hash or "", detail or "")
+            self._log(t, actor, f"receipt.{event}", slug, version=version, target=target, host=host, detail=detail or "")
+        return {"slug": slug, "event": event, "version": version, "target": target, "host": host}
+
+    def _install_rows(self, team: dict, rows: list[dict]) -> list[dict]:
+        skills = {s["id"]: s for s in self.store.skills(team["id"])}
         out = []
         for r in rows:
             skill = skills[r["skill_id"]]
+            channel = self.store.channel(skill["id"], r["channel"])
             latest = self.store.version_by_id(skill["latest_version_id"]) if skill["latest_version_id"] else None
             out.append(
                 {
                     "handle": r["handle"],
+                    "host": r["host"],
                     "slug": r["skill_slug"],
                     "version": r["version"],
+                    "channel": r["channel"],
                     "target": r["target"],
                     "path": r["path"],
                     "content_hash": r["content_hash"],
                     "installed_at": r["installed_at"],
+                    "target_version": channel["version"] if channel else None,
+                    "target_hash": channel["content_hash"] if channel else None,
                     "latest_version": latest["version"] if latest else None,
-                    "latest_hash": latest["content_hash"] if latest else None,
                     "lifecycle": skill["lifecycle"],
                 }
             )
         return out
+
+    @rpc
+    def list_installs(self, team: str, actor: str, handle: str | None = None, host: str | None = None) -> list[dict]:
+        """Installs for one member (own by default; ``handle='*'`` for everyone, maintainers only)."""
+        t, m = self._ctx(team, actor)
+        if handle == "*":
+            self._require(m, "maintainer", "listing every member's installs")
+            rows = self.store.installs(t["id"], None, host)
+        else:
+            handle = handle or actor
+            if handle != actor:
+                self._require(m, "maintainer", "listing another member's installs")
+            rows = self.store.installs(t["id"], handle, host)
+        return self._install_rows(t, rows)
+
+    @rpc
+    def adoption(self, team: str, actor: str, slug: str | None = None) -> dict:
+        """Where each release landed: one row per environment with its strongest receipt.
+
+        Evidence levels, weakest to strongest: installed (bytes written),
+        verified (re-hashed and matched), loaded (a runtime reported loading
+        it), task_tested (a named fixture task passed).
+        """
+        t, _ = self._ctx(team, actor)
+        skill = self._skill(t, slug) if slug else None
+        rows = self._install_rows(t, self.store.installs(t["id"], None, None, skill["id"] if skill else None))
+        receipts = self.store.receipts(t["id"], skill["id"] if skill else None, limit=5000)
+        best: dict[tuple, dict] = {}
+        for r in receipts:
+            key = (r["handle"], r["host"], r["target"], r["skill_slug"], r["version"])
+            cur = best.get(key)
+            if cur is None or EVIDENCE_RANK[r["event"]] > EVIDENCE_RANK[cur["event"]]:
+                best[key] = r
+        last_seen: dict[tuple, str] = {}
+        for r in receipts:
+            key = (r["handle"], r["host"], r["target"], r["skill_slug"])
+            last_seen[key] = max(last_seen.get(key, ""), r["created_at"])
+        environments = []
+        for row in rows:
+            key = (row["handle"], row["host"], row["target"], row["slug"], row["version"])
+            strongest = best.get(key)
+            evidence = strongest["event"] if strongest else "installed"
+            if row["lifecycle"] == "deprecated":
+                state = "deprecated"
+            elif row["target_version"] is None:
+                state = "unreleased"
+            elif row["version"] == row["target_version"]:
+                state = "current"
+            else:
+                state = "stale"
+            environments.append(
+                {
+                    "environment": f"{row['handle']}@{row['host']}" if row["host"] else row["handle"],
+                    "handle": row["handle"], "host": row["host"], "runtime": row["target"], "slug": row["slug"],
+                    "version": row["version"], "channel": row["channel"], "target_version": row["target_version"],
+                    "evidence": evidence, "state": state,
+                    "last_seen": last_seen.get(key[:4], row["installed_at"]),
+                    "needs_attention": state in ("stale", "deprecated"),
+                }
+            )
+        environments.sort(key=lambda e: (-EVIDENCE_RANK[e["evidence"]], e["environment"], e["slug"]))
+        summary = {
+            "environments": len(environments),
+            "current": sum(1 for e in environments if e["state"] == "current"),
+            "needs_attention": sum(1 for e in environments if e["needs_attention"]),
+        }
+        for event in RECEIPT_EVENTS:
+            summary[event] = sum(1 for e in environments if EVIDENCE_RANK[e["evidence"]] >= EVIDENCE_RANK[event])
+        return {"slug": slug, "summary": summary, "environments": environments}
 
     @rpc
     def catalog_index(self, team: str, actor: str) -> dict:
@@ -617,15 +951,13 @@ class Service:
         t, _ = self._ctx(team, actor)
         entries = []
         for skill in self.store.skills(t["id"]):
-            if not skill["latest_version_id"]:
-                continue
-            v = self.store.version_by_id(skill["latest_version_id"])
-            entries.append(
-                {
-                    "slug": skill["slug"], "version": v["version"], "content_hash": v["content_hash"],
-                    "published_at": v["created_at"], "lifecycle": skill["lifecycle"],
-                }
-            )
+            for name, c in self.store.channels(skill["id"]).items():
+                entries.append(
+                    {
+                        "slug": skill["slug"], "channel": name, "version": c["version"], "content_hash": c["content_hash"],
+                        "published_at": c["published_at"], "released_at": c["set_at"], "lifecycle": skill["lifecycle"],
+                    }
+                )
         canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
         index_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         latest = max((e["published_at"] for e in entries), default=None)

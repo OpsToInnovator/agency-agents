@@ -1,9 +1,9 @@
 import pytest
 
-from teamskills import skillfile
-from teamskills.service import Service
-from teamskills.session import LocalSession
-from teamskills.store import Store
+from skillcurrent import skillfile
+from skillcurrent.service import Service
+from skillcurrent.session import LocalSession
+from skillcurrent.store import Store
 
 
 SKILL = """---
@@ -60,13 +60,19 @@ def sessions(service, team):
     return {h: LocalSession(service, "acme", h) for h in ("ana", "ben", "cai", "dee")}
 
 
+def publish(service, slug, bump="minor", note="", release="production", editor="cai", approver="ben"):
+    """Run checks, submit, approve and release the current draft of ``slug``."""
+    service.run_checks("acme", editor, slug)
+    service.submit_review("acme", editor, slug, bump=bump, note=note)
+    return service.approve("acme", approver, slug, release=release)
+
+
 @pytest.fixture
 def published(service, team):
-    """release-notes 1.0.0 published (drafted by cai, approved by ben)."""
+    """release-notes 1.0.0 approved and released to production (drafted by cai, approved by ben)."""
     service.create_skill("acme", "cai", skill_text())
-    service.submit_review("acme", "cai", "release-notes", note="first cut")
-    service.approve("acme", "ben", "release-notes")
+    publish(service, "release-notes", note="first cut")
     return "release-notes"
 
 
-__all__ = ["skill_text", "skillfile"]
+__all__ = ["skill_text", "skillfile", "publish"]

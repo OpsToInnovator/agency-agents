@@ -1,8 +1,8 @@
 import pytest
 
-from teamskills.errors import Conflict, Forbidden, Invalid, NotFound
-from teamskills import skillfile
-from tests.conftest import skill_text
+from skillcurrent.errors import Conflict, Forbidden, Invalid, NotFound
+from skillcurrent import skillfile
+from tests.conftest import publish, skill_text
 
 
 def test_create_team_and_authenticate(service):
@@ -65,6 +65,17 @@ def test_draft_review_publish_workflow(service, team):
         service.update_draft("acme", "cai", "release-notes", skill_text(name="other-name"))
     service.update_draft("acme", "cai", "release-notes", skill_text(body_extra="\n## More\n\nText.\n"))
 
+    # Submission needs a passing check run against the exact draft bytes.
+    with pytest.raises(Conflict, match="run the checks"):
+        service.submit_review("acme", "cai", "release-notes")
+    report = service.run_checks("acme", "cai", "release-notes")
+    assert report["passed"] and report["total"] >= 7
+    service.update_draft("acme", "cai", "release-notes", skill_text(body_extra="\n## More\n\nOther text.\n"))
+    assert service.get_skill("acme", "cai", "release-notes")["checks"]["current"] is False
+    with pytest.raises(Conflict, match="run the checks"):
+        service.submit_review("acme", "cai", "release-notes")
+    service.run_checks("acme", "cai", "release-notes")
+
     review = service.submit_review("acme", "cai", "release-notes", bump="major", note="v1")
     assert review["proposed_version"] == "1.0.0"  # first release ignores the bump
     assert service.get_skill("acme", "dee", "release-notes")["status"] == "in_review"
@@ -83,23 +94,32 @@ def test_draft_review_publish_workflow(service, team):
     with pytest.raises(Forbidden):
         service.approve("acme", "ben", "release-notes")
     out = service.approve("acme", "ana", "release-notes", comment="ship it")
-    assert out["status"] == "published" and out["latest_version"] == "1.0.0" and not out["has_draft"]
-    assert out["published"]["author"] == "ben" and out["published"]["approved_by"] == "ana"
+    assert out["status"] == "approved" and out["latest_version"] == "1.0.0" and not out["has_draft"]
+    assert out["approved"]["author"] == "ben" and out["approved"]["approved_by"] == "ana"
+    assert out["channels"] == {} and out["production_version"] is None
+    with pytest.raises(NotFound, match="no release on the production channel"):
+        service.get_content("acme", "dee", "release-notes")  # approved is not released
+    assert service.get_content("acme", "dee", "release-notes", ref="latest")["version"] == "1.0.0"
+
+    rel = service.release("acme", "ben", "release-notes")
+    assert rel["version"] == "1.0.0" and rel["previous"] is None and rel["channel"] == "production"
     content = service.get_content("acme", "dee", "release-notes")
-    assert "version: 1.0.0" in content["content"] and content["ref"] == "latest"
+    assert "version: 1.0.0" in content["content"] and content["ref"] == "production" and content["channel"] == "production"
+    assert service.get_skill("acme", "dee", "release-notes")["status"] == "published"
 
     # Second iteration: patch bump, reject, then approve.
     service.update_draft("acme", "cai", "release-notes", skill_text(body_extra="\n## Even more\n\nText.\n"))
     assert service.get_skill("acme", "cai", "release-notes")["status"] == "published"  # draft overlays a published skill
     assert "+## Even more" in service.diff("acme", "cai", "release-notes")["diff"]
+    service.run_checks("acme", "cai", "release-notes")
     service.submit_review("acme", "cai", "release-notes", bump="patch")
     with pytest.raises(Invalid):
         service.reject("acme", "ben", "release-notes", reason="  ")
     service.reject("acme", "ben", "release-notes", reason="needs examples")
     skill = service.get_skill("acme", "cai", "release-notes")
     assert skill["status"] == "published" and skill["has_draft"] and skill["reviews"][0]["decision"] == "rejected"
-    service.submit_review("acme", "cai", "release-notes", bump="patch")
-    assert service.approve("acme", "ben", "release-notes")["latest_version"] == "1.0.1"
+    service.submit_review("acme", "cai", "release-notes", bump="patch")  # the check run still matches these bytes
+    assert service.approve("acme", "ben", "release-notes", release="production")["production_version"] == "1.0.1"
     versions = [v["version"] for v in service.list_versions("acme", "dee", "release-notes")]
     assert versions == ["1.0.1", "1.0.0"]
     assert service.get_content("acme", "dee", "release-notes", ref="1.0.0")["version"] == "1.0.0"
@@ -150,6 +170,7 @@ def test_ownership_transfer_and_member_removal(service, team, published):
 
 def test_list_filters_and_dashboard(service, team, published):
     service.create_skill("acme", "cai", skill_text(name="pr-review", description="Review pull requests the team's way."))
+    service.run_checks("acme", "cai", "pr-review")
     service.submit_review("acme", "cai", "pr-review")
     service.create_skill("acme", "cai", skill_text(name="onboarding"))
     assert [s["slug"] for s in service.list_skills("acme", "dee")] == ["onboarding", "pr-review", "release-notes"]
@@ -160,7 +181,7 @@ def test_list_filters_and_dashboard(service, team, published):
         service.list_skills("acme", "dee", status="weird")
     service.record_install("acme", "dee", published, "1.0.0", "claude-code", "/tmp/x/SKILL.md", "abc")
     d = service.dashboard("acme", "dee")
-    assert d["by_status"] == {"draft": 1, "in_review": 1, "published": 1, "deprecated": 0}
+    assert d["by_status"] == {"draft": 1, "in_review": 1, "approved": 0, "published": 1, "deprecated": 0}
     assert d["most_installed"][0] == {"slug": published, "title": "Release Notes", "installs": 1}
     assert [r["skill"] for r in d["pending_reviews"]] == ["pr-review"]
     assert d["drafts_in_progress"][0]["slug"] == "onboarding"
@@ -189,8 +210,12 @@ def test_catalog_index_is_deterministic_and_changes_on_publish(service, team, pu
     assert a["generation"] == b["generation"] and a["generation"].endswith(a["index_hash"][:12])
     content = service.get_content("acme", "dee", published)
     assert a["skills"][0]["content_hash"] == content["content_hash"] == skillfile.content_hash(content["content"])
+    assert a["skills"][0]["channel"] == "production"
     service.update_draft("acme", "cai", published, skill_text(body_extra="\n## Changed\n\nx.\n"))
-    service.submit_review("acme", "cai", published, bump="minor")
-    service.approve("acme", "ben", published)
+    publish(service, published, release=None)
+    b2 = service.catalog_index("acme", "dee")
+    assert b2["index_hash"] == a["index_hash"]  # approved but unreleased versions do not change the index
+    service.release("acme", "ben", published, channel="canary")
     c = service.catalog_index("acme", "dee")
-    assert c["index_hash"] != a["index_hash"] and c["skills"][0]["version"] == "1.1.0"
+    assert c["index_hash"] != a["index_hash"]
+    assert {(e["channel"], e["version"]) for e in c["skills"]} == {("production", "1.0.0"), ("canary", "1.1.0")}
