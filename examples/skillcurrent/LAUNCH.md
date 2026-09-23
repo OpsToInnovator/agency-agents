@@ -39,10 +39,11 @@ facts.
 | **Hosting** | One small VPS running `serve --public` behind Caddy | It is the path that's fully tested end to end, and sign-ups land straight in `skillcurrent beta`. The alternatives are below. |
 | **Domain** | A domain you own, with the page on `beta.<domain>` | Needed for HTTPS and a trustworthy reply address. Check the name for trademark conflicts in your market before paying for it. |
 | **Reply address** | A mailbox on that domain, with SPF, DKIM and DMARC set up by your mail provider | The page and every email send replies there. Avoid forwarding into a personal inbox and replying with "send mail as" through that inbox's servers: the mail isn't signed for your domain, so it can fail DMARC and land in spam. Don't publish a personal address. |
-| **Licence** | Decide now, before anyone else contributes | The only licence file is the repository's MIT licence, "Copyright (c) 2025 AgentLand Contributors". To state your own terms, add `examples/skillcurrent/LICENSE` with your copyright line. Ask a lawyer if you're unsure. |
+| **Licence** | Keep the core under MIT and add your own copyright line in `examples/skillcurrent/LICENSE`, before anyone else contributes (`BUSINESS.md` section 8) | The only licence file is the repository's MIT licence, "Copyright (c) 2025 AgentLand Contributors". The business sells support, not access, so it doesn't need a different licence. |
 | **Repository home** | Keep it here for the beta. Consider its own repository before Show HN | The install command works from here today. A dedicated repository gives issues, releases and stars their own home. |
 | **Team cap** | Invite up to 10 qualified teams and expect two or three to stall | The page promises 5 to 10. |
-| **After the beta** | Say it plainly in the terms, e.g. "stays available under its licence; any paid version is optional for pilot teams" | Teams will ask. Don't promise prices or dates. |
+| **After the beta** | The terms already say it: the source stays open, and pilot teams get any paid plan free for 12 months. The plan itself is in `BUSINESS.md` | Teams will ask. Don't promise prices or dates until the exit interviews have tested them. |
+| **Legal review** | One fixed-fee review covering terms, privacy, ad claims, names and the order form. Send `docs/business/legal-brief.md` | Terms and privacy before the first pilot team signs; ad copy before paid spend; the order form before the first invoice. |
 | **Exit rules** | Adopt section 6 or edit it, before week 1 | Deciding after you see the data invites wishful reading. |
 
 ## 2. Go live (day 0, about half a day)

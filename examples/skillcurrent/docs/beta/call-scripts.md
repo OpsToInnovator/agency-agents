@@ -120,8 +120,16 @@ When a report arrives:
 4. "Did sync matter? Would you have noticed the bad copy without it?"
 5. "Who else on your team or in your company should have been involved?"
 6. "What would you have to see before paying for something like this?"
-   Listen; don't quote a price.
-7. "May I describe your results publicly? Anonymously only, or with your
+   Listen; don't quote a price yet.
+7. "For the whole team, per month, at what price would it be so expensive
+   you wouldn't consider it?" Then: "At what price would it be so cheap
+   you'd doubt it?"
+8. "If a supported plan cost [the hypothesis price in `BUSINESS.md`], would
+   you buy it when the beta ends? Yes, no, or 'I'd need to ask someone'?"
+   If they name someone, write down who. Record all three answers in the
+   tracking sheet; `BUSINESS.md` section 5 says how to use them.
+9. "May I describe your results publicly? Anonymously only, or with your
    name?" Get any yes in writing, by email, and keep it.
+10. "Who else in your company should see this?"
 
 Afterwards, send the wrap-up email and offer to delete their data.
