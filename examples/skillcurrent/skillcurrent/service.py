@@ -634,6 +634,9 @@ class Service:
             raise Invalid(f"{slug!r} has no pending review")
         if pending["submitted_by"] == actor:
             raise Forbidden("a submission must be approved by a different maintainer")
+        if actor in self.store.draft_authors(t["id"], slug):
+            # Separation of duties covers editors too: approving bytes you wrote is approving your own work.
+            raise Forbidden("you wrote or edited this draft; it must be approved by a maintainer who did neither")
         draft = skill["draft_content"]
         if draft is None or skillfile.content_hash(draft) != pending["content_hash"]:
             raise Conflict("the draft changed since it was submitted; ask for a fresh submission")

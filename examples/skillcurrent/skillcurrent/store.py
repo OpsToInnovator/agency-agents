@@ -562,6 +562,17 @@ class Store:
             r["details"] = json.loads(r["details"])
         return rows
 
+    def draft_authors(self, team_id: int, slug: str) -> set[str]:
+        """Everyone who created or edited the current draft: activity since the skill's last approval or discard."""
+        rows = self.all(
+            "SELECT DISTINCT actor FROM activity WHERE team_id = ? AND skill_slug = ?"
+            " AND action IN ('skill.created', 'skill.draft_updated')"
+            " AND id > COALESCE((SELECT MAX(id) FROM activity WHERE team_id = ? AND skill_slug = ?"
+            " AND action IN ('skill.approved', 'skill.draft_discarded')), 0)",
+            (team_id, slug, team_id, slug),
+        )
+        return {r["actor"] for r in rows}
+
     def receipts_since(self, team_id: int, event: str, since: str | None = None) -> list[dict]:
         """Where and when receipts of one kind arrived: (handle, host, target, created_at) only."""
         sql = "SELECT handle, host, target, created_at FROM receipts WHERE team_id = ? AND event = ?"

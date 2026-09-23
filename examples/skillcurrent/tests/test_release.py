@@ -91,3 +91,46 @@ def test_passport(service, team, published):
     p = service.passport("acme", "dee", published)
     assert p["canonical_id"] == f"acme/{published}" and p["channels"]["production"]["version"] == "1.0.0"
     assert p["environments"]["environments"] == 0 and p["rules"] == []
+
+
+def test_nobody_who_wrote_or_edited_the_draft_can_approve_it(service, team):
+    """Separation of duties covers editors, not just the submitter: ben fixes cai's draft, cai submits,
+    and ben still cannot approve bytes he wrote. ana, who touched nothing, can."""
+    from skillcurrent.errors import Forbidden
+    from tests.conftest import skill_text
+
+    service.create_skill("acme", "cai", skill_text())
+    service.update_draft("acme", "ben", "release-notes", skill_text(body_extra="\n## Fix\n\nben's edit.\n"))
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes")
+    with pytest.raises(Forbidden, match="wrote or edited"):
+        service.approve("acme", "ben", "release-notes")
+    assert service.approve("acme", "ana", "release-notes")["approved"]["version"] == "1.0.0"
+
+    # After an approval the slate is clean: ben's earlier edit no longer counts against the next version.
+    service.update_draft("acme", "cai", "release-notes", skill_text(body_extra="\n## Two\n\ncai again.\n"))
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes", bump="patch")
+    assert service.approve("acme", "ben", "release-notes")["approved"]["version"] == "1.0.1"
+
+    # Whoever created the skill wrote its first draft, even if someone else submits it.
+    service.create_skill("acme", "ben", skill_text(name="handoff"))
+    service.run_checks("acme", "ana", "handoff")
+    service.submit_review("acme", "ana", "handoff")
+    with pytest.raises(Forbidden, match="wrote or edited"):
+        service.approve("acme", "ben", "handoff")
+
+
+def test_a_discarded_draft_no_longer_counts_as_an_edit(service, team):
+    from tests.conftest import skill_text
+
+    service.create_skill("acme", "cai", skill_text())
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes")
+    service.approve("acme", "ben", "release-notes")
+    service.update_draft("acme", "ben", "release-notes", skill_text(body_extra="\n## Abandoned\n\nx.\n"))
+    service.discard_draft("acme", "ben", "release-notes")
+    service.update_draft("acme", "cai", "release-notes", skill_text(body_extra="\n## Kept\n\nx.\n"))
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes", bump="patch")
+    assert service.approve("acme", "ben", "release-notes")["approved"]["version"] == "1.0.1"

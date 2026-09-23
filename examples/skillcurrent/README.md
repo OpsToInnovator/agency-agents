@@ -129,7 +129,8 @@ Compose file, a systemd unit and a daily backup script.
 - **Checks gate submission.** `submit` needs a recorded, passing check run
   whose hash equals the draft's. Edit the draft and the run is stale.
 - **Approval attaches to bytes.** The approver must differ from the
-  submitter. Approval stamps `version:` into the front matter and stores the
+  submitter and from anyone who created or edited the draft since the last
+  approval (checked per account). Approval stamps `version:` into the front matter and stores the
   SHA-256 of the result. Approved is not released: nothing is installed
   until a channel points at the version (`approve --release production`
   collapses the two steps for teams that do not stage rollouts).
