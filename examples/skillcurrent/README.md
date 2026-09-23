@@ -358,3 +358,8 @@ smoke test.
   restart and is not shared between processes.
 - Schema upgrades are additive only (new columns and tables), so an upgrade
   keeps the evidence a team has collected. Take a `backup` first anyway.
+
+## Licence
+
+MIT, copyright ApexForm Life Pty Ltd (Perth, Western Australia). See
+[`LICENSE`](LICENSE).

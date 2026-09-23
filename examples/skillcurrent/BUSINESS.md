@@ -7,6 +7,10 @@ publish. Section 5 says how to test them and what to do with each result.
 
 Written 23 September 2026. Revisit after the beta's exit interviews.
 
+**The business:** SkillCurrent is a product of ApexForm Life Pty Ltd, Perth,
+Western Australia (apexformlife.com). ApexForm Life holds the copyright,
+signs the order forms and issues the invoices.
+
 ## 1. The constraint that shapes everything
 
 - **The code is open source (MIT) and runs on the customer's servers.**
@@ -71,6 +75,17 @@ whether it can.
 
 **Pilot teams:** the Supported plan free for 12 months after it launches.
 
+**Currency and GST.** The figures above are US dollars, because most buyers
+and every competitor price found are overseas. ApexForm Life is Australian,
+so:
+
+- Australian customers are quoted in Australian dollars, with GST shown
+  on the invoice once ApexForm Life is registered for GST.
+- Overseas business customers are generally quoted without GST.
+- Ask your accountant to confirm both before the first invoice, and whether
+  to register for GST now or when turnover requires it. The legal brief
+  asks counsel the same.
+
 ## 4. What must exist before you charge
 
 Don't sell what isn't built. Before the first invoice:
@@ -87,8 +102,8 @@ Don't sell what isn't built. Before the first invoice:
    the beta terms (see `docs/business/legal-brief.md`).
 4. **Payment.** Card or invoice through a payment provider you trust. Annual
    invoices suit the enterprise buyer and cut your admin.
-5. **Your own copyright line.** Decide the licence before charging (section
-   8).
+5. **Your own copyright line.** Done: `LICENSE` in this directory names
+   ApexForm Life Pty Ltd (section 8).
 
 Features for larger teams, such as single sign-on, go on the Enterprise
 roadmap only when a paying customer asks for them.
@@ -169,15 +184,68 @@ customer:
    the pilot introduces you to. Ask every pilot team: "Who else in your
    company should see this?"
 
+### Campaigns by plan and stage
+
+It's a timeline first, then an audience split. The three plans are the same
+software under one brand, so they never get separate products, sites or ad
+accounts. What differs is who you talk to, where, and what you ask them to
+do.
+
+**Until the week 8 decision: one campaign.** Every ad, post and email
+recruits pilot teams and sends them to the beta page. Show no plans and no
+prices. The ads say "free during the beta" and nothing more (section 5).
+Running plan-specific ads now would advertise a price you haven't tested,
+and would split a small audience before you know which message works.
+
+**After the price is validated: three tracks.**
+
+| | **Community** | **Supported** | **Enterprise** |
+|---|---|---|---|
+| Who | Developers and small teams trying skills | Platform and developer-experience leads at teams on two or more agents | Security, compliance and platform leads at larger organisations |
+| Where | GitHub, Hacker News, Reddit, Discord and the open feature threads; no paid spend | LinkedIn, paid search on skills terms, the warm network | Direct outreach, introductions from pilot and Supported teams, security meet-ups |
+| Message | How it works: the method, drift and bytes concepts | The hook: refused, early, noticed, yours | Audit evidence and separation of duties: refused, noticed, the evidence pack |
+| Ask | Star or install it from the README | Start the Supported plan, or book an install session | Talk to us |
+| Tag | `utm_campaign=community` | `utm_campaign=supported` | `utm_campaign=enterprise` |
+| Success measure | Installs, issues and stars; people who move up to Supported | Paying organisations; cost per paying organisation | Qualified conversations; signed annual contracts |
+
+**How the tracks connect.** Community is the top of the funnel and costs
+nothing but your time. Supported is where paid spend goes. Enterprise is
+mostly sales conversations, and the ads only have to earn the first meeting.
+Each track's ask leads to the next one up: once the plan exists, the README
+should mention the Supported plan, and the pricing page should offer "talk
+to us" for larger teams.
+
+**When a track starts:**
+
+- **Community:** at the week 8 decision, whatever it is. The tool stays
+  free and open either way.
+- **Supported:** when section 4's list is done and the price is published.
+  Start with organic posts and LinkedIn. Add paid search only once three
+  organisations have paid, so you know what a customer is worth before
+  buying clicks.
+- **Enterprise:** after the first two Supported customers, so there's a
+  reference and a tested evidence pack to show.
+
+**What changes on the page.** Add one pricing page with three columns.
+Community ads link to the README, Supported ads to the pricing page, and
+Enterprise emails to a "talk to us" address. Keep the tag on every link:
+the beta form already stores `utm_campaign`, and `skillcurrent beta
+--sources` counts sign-ups by tag.
+
+**What never changes between tracks:** the claims. Every track draws on
+`marketing/ads/claims.md`, and every claim keeps the limits written there,
+whoever the audience.
+
 ## 8. Licence and ownership
 
 - **Keep the core under MIT.** Versions already published under MIT stay
   MIT for anyone who has them. Changing the licence later only affects new
   versions, and would undercut the "open source, on your server" pitch. The
   business doesn't need it: it sells support, not access.
-- **Add your own copyright line** in `examples/skillcurrent/LICENSE` before
-  anyone else contributes. The repository's only licence file today names
-  "AgentLand Contributors".
+- **Your own copyright line is in place.** `examples/skillcurrent/LICENSE`
+  is the MIT licence, copyright ApexForm Life Pty Ltd, and
+  `pyproject.toml` names ApexForm Life as the author. The repository's root
+  licence still names "AgentLand Contributors" for everything else in it.
 - **Ask contributors to sign off their commits** with a Developer
   Certificate of Origin line. It records that they had the right to
   contribute, which keeps ownership clear if you sell support for their
@@ -214,7 +282,7 @@ Decide by the end of the beta's week 8, using the exit criteria in
 
 | When | What | Done when |
 |---|---|---|
-| Now | Licence line; lawyer engaged (see `docs/business/legal-brief.md`) | Fixed-fee quote accepted |
+| Now | ABN and contact address in the beta terms; lawyer engaged (see `docs/business/legal-brief.md`) | Fixed-fee quote accepted |
 | Weeks 1 to 4 | Recruit and install pilot teams (`LAUNCH.md`) | 5 teams installed |
 | Weeks 4 to 8 | Weekly reports, day-14 calls, exit interviews with the price questions | 5 teams answered section 5 |
 | Week 8 | Decide: Supported plan, hosted version, services, or stop | Decision written down with the evidence |
