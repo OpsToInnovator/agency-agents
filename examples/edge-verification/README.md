@@ -148,10 +148,12 @@ high and higher low, then a lower high and lower low.
 from the far level, so at a bar that gapped 3% the probe's move was six times the largest
 the tape had made — and a strategy that read its own close on real-sized moves and followed
 the gap on huge ones waited every probe out, where round five's module had convicted it.
-Now every size forced into the probed bar is one the tape has printed: its move is drawn
-from the tape's own moves, its wicks from its own wicks, its volume ratio from its own
-bar-to-bar ratios, each jittered off its exact value (a verbatim copy is a duplicate no
-real tape prints) and never past the largest. A level further from the open than any move
+Now every size forced into the probed bar is drawn from the tape's own: its move from the
+tape's moves, its wicks from its wicks, its volume ratio from its bar-to-bar ratios, each
+jittered off its exact value (a verbatim copy is a duplicate no real tape prints) and never
+past the largest; where no size lands in the interval a target needs, a point inside it
+short of the largest is used, and a tape with no sizes at all — a flat one — gets a floor.
+A level further from the open than any move
 the tape has made is left alone, and the report counts the bars where that happened. The
 same round showed that all-up-then-all-down leaves every read of how two relations
 *combine* untouched — an inside bar, a failed breakout, a close between the open and the
@@ -160,6 +162,19 @@ random, and the range once inside and once outside the previous bar's. And the r
 had landed exactly *on* the previous extreme, so `low <= previous low` never flipped; every
 target is now met strictly. Where the open already sits beyond the previous extreme, that
 side is decided by a value the strategy may read, and nothing is claimed.
+
+*What the note claims is checked, not planned.* An eighth red team showed round seven's
+range targets quietly overriding the planned wick skew — at a bar whose open sat just above
+the previous low, a higher low, a higher high and a longer lower wick cannot all hold — so
+"move, wick and volume each both ways" was false there, and a one-bar skew read walked in a
+quarter of audits. Each probed bar is now checked, as built, against every relation the note
+lists for it (limited to what the open leaves open and the tape's own sizes can reach); any
+the planned draws missed gets a repair draw of its own with nothing else forced, and a bar
+where even that fails is counted in the report. On the fixture tapes nothing goes
+undelivered and repairs are under 3% of runs. The same round found that zero volume had
+never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
+this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
+where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
 
 Every-bar mode uses four draws by default. The report says what was pushed where at the
 bars that did not diverge, that probing of a bar stopped at its first divergence, how many
@@ -287,11 +302,15 @@ watching the output. A strategy that brought its own prices is unmoved by anythi
 - **same tape twice → identical output**, else nondeterministic and no divergence could be
   attributed to the data;
 - **the bars from the first probe boundary on replaced with a fresh continuation → different
-  output**, else the output does not change when the bars we can vary change, and nothing can
-  be proved about it. (The first version tested a wholly different tape, which a strategy
-  depending on bar 0 alone — a bar no probe ever moves — passed.)
+  output**, else the output does not change when the bars we can vary change, and a clean
+  result would mean nothing. (The first version tested a wholly different tape, which a
+  strategy depending on bar 0 alone — a bar no probe ever moves — passed.)
 
-Either failing is reported `UNPROVABLE`, in those words.
+A nondeterministic strategy is reported `UNPROVABLE`, in those words. One the continuation
+could not move is still probed — `PROOF ONLY` — because the continuation varies what the
+probes vary without forcing the relations they force: an eighth red team's same-bar volume
+read was blocked here as unprovable while the probes convicted it. A proof is reported; a
+clean result on such a strategy is withheld.
 
 Two tiers, and the report says which ran:
 
@@ -302,6 +321,7 @@ Two tiers, and the report says which ran:
 | rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
 | wall-clock kill of the whole process group, always, after every run | yes | yes |
 | audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
+| the **kernel** refuses every new process — `execve`, `fork`, any clone that is not a thread — by any route, `ctypes` included (seccomp, x86-64 and arm64; the report says whether it was on) | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
@@ -395,13 +415,24 @@ horizon-0 headline naming the bar's own fields for a strategy that read only the
 timestamp ("or a later bar"), two-draw text printed for one draw and for none, spawns through
 `multiprocessing` and `os.forkpty` that raised no audited event (refused and recorded),
 `from_file`'s first copy of the source left in `/tmp`, and a long stderr log pushing the
-error that ended a run out of the report (the tail is kept).
+error that ended a run out of the report (the tail is kept). In the eighth — two holes that
+the seventh's fixes had opened, and two older ones — range targets overriding the planned
+wick skew, so "each both ways" and, at eight draws, "every sign combination" were false at
+some bars (what each bar delivered is now checked and repaired), zero volume never pushed
+(zero is a level), a gate that blocked a strategy the probes convicted (proof only), and a
+fresh import of `_posixsubprocess` restoring the real `fork_exec` with no audit event for
+any step of it (the kernel now refuses the process itself).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
 on exit codes: the child catches `SIGXCPU` and writes down why it is dying; the parent
 measures the run's real CPU through `getrusage`. And the child must not coerce output —
 `int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
+
+**What the record cannot name.** The audit hook names every spawn it sees; the kernel refuses
+the ones it does not — a freshly imported `_posixsubprocess`, a `ctypes` call to `fork` — and
+such an attempt fails with `EPERM` inside the strategy without appearing in the record. No
+process is started either way.
 
 **What is not cleaned up.** An auditor that is killed or terminated mid-run — `SIGKILL`, or
 the `SIGTERM` a `timeout` sends — runs no finalizer, so its work root stays behind with the

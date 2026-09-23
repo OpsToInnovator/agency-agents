@@ -456,6 +456,97 @@ def test_from_file_leaves_no_copy_of_the_source_behind(tape, tmp_path):
     assert set(tmp.glob("edgecheck-strategy-*")) == before
 
 
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+@pytest.mark.parametrize("how", ["reimport", "ctypes"])
+def test_the_kernel_refuses_a_new_process_by_any_route(how, iso, tape, tmp_path):
+    """An eighth red team popped _posixsubprocess from sys.modules, imported a fresh copy with
+    the real fork_exec, and started a process with nothing recorded: no audit event fires for
+    any step of it. A seccomp filter installed before the strategy is imported now makes the
+    kernel refuse every new process -- by that route, and by ctypes, which was outside the
+    model until now."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    body = {"reimport": """
+        import importlib, sys, multiprocessing.util
+        def signals(bars):
+            sys.modules.pop("_posixsubprocess", None)
+            importlib.import_module("_posixsubprocess")
+            try:
+                multiprocessing.util.spawnv_passfds(b"/bin/sh", [b"/bin/sh", b"-c", b"echo ran > MARKER"], ())
+                started = True
+            except OSError:
+                started = False
+            return [1 if started else -1] * len(bars)
+    """, "ctypes": """
+        import ctypes, os
+        def signals(bars):
+            libc = ctypes.CDLL(None, use_errno=True)
+            pid = libc.fork()
+            if pid == 0:
+                os._exit(0)
+            return [1 if pid > 0 else -1] * len(bars)
+    """}[how]
+    p = strategy_file(tmp_path, f"spawn_{how}", body)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    assert sb(tape) == [-1] * len(tape), "a process was started"
+    assert sb.records[-1].spawn_lock
+    assert "MARKER" not in sb.records[-1].files_written
+
+
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+def test_the_spawn_lock_leaves_threads_alone(iso, tape, tmp_path):
+    """Threads are clones too. The filter lets a clone with CLONE_THREAD through, and answers
+    clone3 with ENOSYS so libc falls back to clone -- or every threaded strategy would die."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    p = strategy_file(tmp_path, "threaded", """
+        import threading
+        def signals(bars):
+            out = [0] * len(bars)
+            def work(lo, hi):
+                for i in range(max(lo, 1), hi):
+                    out[i] = 1 if bars[i - 1].close > bars[i - 1].open else -1
+            ts = [threading.Thread(target=work, args=(j * 40, (j + 1) * 40)) for j in range(3)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            return out
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    expected = [0] + [1 if b.close > b.open else -1 for b in tape[:-1]]
+    assert sb(tape) == expected and sb.records[-1].spawn_lock
+
+
+def test_a_proof_is_not_withheld_because_the_gate_could_not_move_the_strategy(tmp_path):
+    """The gate replaced bars from 4 on with a fresh continuation and, when the output did not
+    move, blocked the probes with "nothing can be proved about it" -- about a strategy the
+    probes convicted. A strategy the continuation does not move is now probed for a proof
+    only: a proof is reported, a clean result withheld."""
+    from edgecheck.causality import continuation
+    from edgecheck.sandbox import GATE_BOUNDARY
+    tape = bars(120, gap_prob=0.3, late_prob=0.1)
+    varied = continuation(tape, GATE_BOUNDARY, seed=7)
+    up = lambda b: b.close > b.open
+    at = next(i for i in range(60, 110) if up(varied[i]) == up(tape[i]))
+    p = strategy_file(tmp_path, "one_bar", f"""
+        def signals(bars):
+            out = [0] * len(bars)
+            if len(bars) > {at}:
+                out[{at}] = 1 if bars[{at}].close > bars[{at}].open else -1
+            return out
+    """)
+    pc, report = prove(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape, probes="every_bar", seed=1)
+    assert not pc.input_dependent and pc.proof_only and not pc.provable
+    assert "PROOF ONLY" in pc.describe() and "nothing can be proved" not in pc.describe()
+    assert report is not None and report.leaks and report.worst_horizon == 0
+
+    q = strategy_file(tmp_path, "constant", """
+        def signals(bars):
+            return [1] * len(bars)
+    """)
+    pc, report = prove(Sandbox.from_file(q, work_root=tmp_path / "runs2"), tape, probes="every_bar", seed=1)
+    assert pc.proof_only and report is None
+
+
 def test_the_error_that_ended_a_run_survives_a_long_log(tape, tmp_path):
     """A run that dies without writing a result is reported from the tail of its stderr.
     Stderr kept its FIRST 64 KiB, so a long log pushed the real final error out of the
@@ -469,8 +560,9 @@ def test_the_error_that_ended_a_run_survives_a_long_log(tape, tmp_path):
             sys.stderr.flush()
             os._exit(1)
     """)
-    with pytest.raises(StrategyError, match="the real cause is here"):
+    with pytest.raises(StrategyError, match="the real cause is here") as ei:
         Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain")(tape)
+    assert "the strategy's own stderr ended" in str(ei.value)
 
 
 def test_a_multiline_exception_cannot_plant_a_reassuring_last_line(tape, tmp_path):

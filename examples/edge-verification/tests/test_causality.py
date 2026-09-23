@@ -573,7 +573,8 @@ def test_a_one_bar_read_against_the_previous_bar_is_caught_at_gap_bars(field):
     is a probe a strategy can recognise. Such bars must be disclosed in the report."""
     from edgecheck.causality import _sizes, beyond_reach
     gappy = bars(200, gap_prob=0.3, late_prob=0.1)
-    moves, wicks, _ = _sizes(gappy)
+    sz = _sizes(gappy)
+    moves, wicks = sz.moves, sz.wicks
     top_move, top_wick = moves[-1], wicks[-1]
     missed, out_of_reach = [], []
     for at in range(4, 200, 7):
@@ -618,7 +619,8 @@ def test_the_boundary_bar_is_pushed_past_every_level_it_can_reach():
     largest the tape has made."""
     from edgecheck.causality import _sizes, draw_plans
     gappy = bars(200, gap_prob=0.3, late_prob=0.1)
-    moves, wicks, _ = _sizes(gappy)
+    sz = _sizes(gappy)
+    moves, wicks = sz.moves, sz.wicks
     top_move, top_wick = moves[-1], wicks[-1]
     inside = [k for k in range(4, 200) if gappy[k - 1].low < gappy[k].open < gappy[k - 1].high]
     assert len(inside) > 40
@@ -698,7 +700,7 @@ def test_a_probe_never_forces_a_move_larger_than_the_tape_has_made():
             assert r.leaks and any(p.evidence.index == 100 for p in r.proven), (tape_seed, seed)
             assert 100 in r.beyond_reach
             assert "further from the open than any move the tape has made" in r.coverage_note()
-        top = _sizes(t)[0][-1]
+        top = _sizes(t).moves[-1]
         for nonce in range(6):
             for i, plan in enumerate(draw_plans(nonce, 100, 4)):
                 b = _perturbed(t, 100, seed=nonce ^ (100 * 1_000_003 + i), sigma=None, plan=plan)[100]
@@ -806,3 +808,113 @@ def test_a_rebuilt_tape_repeats_none_of_the_values_it_was_built_from():
         p = _perturbed(tape, k, seed=5 ^ (k * 1_000_003 + i), sigma=None, plan=plan)
         made = set().union(*(shape(p[j], p[j - 1]) for j in range(k, 300))) - {0.0}
         assert not (made & seen), f"draw {i} repeated {sorted(made & seen)[:3]}"
+
+
+def _zero_volume_tape(gap_prob: float, n: int = 200, seed: int = 7):
+    """A tape with illiquid stretches: runs of bars that did not trade. An eighth red team's."""
+    import random
+    t = bars(n, gap_prob=gap_prob, late_prob=0.1, seed=seed)
+    r, out, zero = random.Random(seed + 1), [], False
+    for i, b in enumerate(t):
+        if r.random() < 0.08:
+            zero = True
+        elif zero and r.random() < 0.4:
+            zero = False
+        out.append(dataclasses.replace(b, volume=0.0) if zero and i else b)
+    return out
+
+
+def _trades_after_a_quiet_bar(bs):
+    """After an untraded bar, takes a position only if THIS bar trades -- its own volume."""
+    out = [0, 0]
+    for i in range(2, len(bs)):
+        if bs[i - 1].volume == 0:
+            out.append(1 if bs[i].volume > 0 else 0)
+        else:
+            out.append(1 if bs[i - 1].close > bs[i - 1].open else -1)
+    return out
+
+
+@pytest.mark.parametrize("gap_prob", [0.3, 0.0])
+def test_whether_a_bar_traded_is_varied(gap_prob):
+    """The volume push was a multiple of the previous bar's volume, so after an untraded bar
+    every draw was zero and "does this bar trade" never moved -- at every seed -- while the note
+    claimed the volume was pushed both ways. Zero is now a level like any other: pushed to
+    and away from, where the tape prints zeros."""
+    tape = _zero_volume_tape(gap_prob)
+    assert sum(1 for i in range(1, len(tape)) if tape[i - 1].volume == 0) > 10
+    for seed in (1, 2, 3):
+        r = check_causality(_trades_after_a_quiet_bar, tape, probes="every_bar", seed=seed)
+        assert r.leaks and r.worst_horizon == 0, f"missed at seed {seed}"
+    clean = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
+    assert not clean.leaks and clean.undelivered == ()
+    assert "to zero and away from it" in clean.coverage_note()
+
+
+def test_the_planned_wick_skew_is_delivered_even_against_a_range_target():
+    """Round seven's range targets won over the planned wick skew, so at a bar whose open sat
+    just above the previous low the skew was never pushed the other way, and a one-bar skew
+    read walked in 49 audits of 200. What each built bar delivered is now checked against what
+    the note claims, and a repair draw makes up any shortfall."""
+    tape = bars(200, gap_prob=0.3, late_prob=0.1)
+    AT, ts = 32, tape[32].ts
+
+    def skew(bs):
+        out = []
+        for b in bs:
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            out.append((1 if b.high / top - 1.0 > 1.0 - b.low / bot else -1) if b.ts == ts else 0)
+        return out
+
+    for seed in (6, 21, 22, *range(40)):
+        r = check_causality(skew, tape, boundaries=[AT], draws=4, seed=seed)
+        assert r.leaks, f"missed at seed {seed}"
+
+
+@pytest.mark.parametrize("gap_prob", [0.3, 0.0])
+def test_eight_draws_deliver_every_sign_combination(gap_prob):
+    """At draws=8 the note claims every sign combination of move, wick and volume; range
+    targets used to override the skew, and four of the eight were never produced at some
+    seeds. Each is now checked on the bar as built and repaired if missing."""
+    import itertools
+    tape = bars(200, gap_prob=gap_prob, late_prob=0.1)
+    AT = 120
+
+    def signs(b, p):
+        top, bot = max(b.open, b.close), min(b.open, b.close)
+        return (1 if b.close > b.open else -1, 1 if b.high / top - 1.0 > 1.0 - b.low / bot else -1,
+                1 if b.volume > p.volume else -1)
+
+    pristine = signs(tape[AT], tape[AT - 1])
+    for target in itertools.product((1, -1), repeat=3):
+        if target == pristine:
+            continue
+
+        def reader(bs, target=target):
+            out = [0] * len(bs)
+            if len(bs) > AT:
+                out[AT] = 1 if signs(bs[AT], bs[AT - 1]) == target else 0
+            return out
+
+        for seed in range(5):
+            assert check_causality(reader, tape, boundaries=[AT], draws=8, seed=seed).leaks, (target, seed)
+
+
+@pytest.mark.parametrize("gap_prob", [0.3, 0.0])
+def test_every_claimed_push_is_delivered_on_the_fixture_tapes(gap_prob):
+    """The note's claims are checked facts: on the fixture tapes nothing the note lists goes
+    undelivered, and the repair draws that make that so are a small share of the audit."""
+    tape = bars(200, gap_prob=gap_prob, late_prob=0.1)
+    for draws in (2, 4, 8):
+        r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", draws=draws, seed=3)
+        assert not r.leaks and r.undelivered == (), (draws, r.undelivered)
+        assert r.repairs < 0.1 * r.probes_run, (draws, r.repairs, r.probes_run)
+        assert "checked on the bar as built" in r.coverage_note()
+
+
+def test_an_audit_that_probed_no_bar_says_so(tape):
+    """Explicit boundaries=[] used to print the full list of pushes over a single run."""
+    r = check_causality(strat("clean_lagged").signals, tape, boundaries=[], draws=4, seed=1)
+    note = r.coverage_note()
+    assert r.coverage == 0.0 and note.startswith("no perturbation ran")
+    assert "truncation did not run either" in note and "both ways" not in note

@@ -50,7 +50,7 @@ import math
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, NamedTuple, Protocol, Sequence
 
 __all__ = ["Bar", "Strategy", "Divergence", "Proven", "Suspected", "Report",
            "check_causality", "default_boundaries", "sparse_boundaries", "continuation", "sign_design",
@@ -60,6 +60,7 @@ __all__ = ["Bar", "Strategy", "Divergence", "Proven", "Suspected", "Report",
 DEFAULT_DRAWS = 2
 SIGMA_FLOOR = 0.002
 JITTER = 0.1
+EDGE = 1e-9   # a level exactly as far as the tape's largest size is out of reach, not within it
 MIN_BOUNDARY = 4
 
 
@@ -149,7 +150,7 @@ class Report:
     def coverage(self) -> float:
         """Share of bars at which a same-bar read could have been caught: one per perturbed
         boundary, and none at all when no perturbation ran."""
-        if self.draws <= 0:
+        if self.draws <= 0 or not self.boundaries:
             return 0.0
         probeable = max(1, self.bars_tested - MIN_BOUNDARY)
         return min(1.0, len(self.boundaries) / probeable)
@@ -169,11 +170,16 @@ class Report:
 
     draws: int = DEFAULT_DRAWS
     beyond_reach: tuple[int, ...] = ()
+    undelivered: tuple[int, ...] = ()
+    repairs: int = 0
+    truncations: int = 0
 
     def coverage_note(self) -> str:
-        if self.draws <= 0:
+        if self.draws <= 0 or not self.boundaries:
+            cut = (f"truncation ran at {self.truncations} cut(s)" if self.truncations
+                   else "truncation did not run either")
             return ("no perturbation ran: nothing a bar had not yet printed at its open was varied, so a "
-                    "read of a bar's own close, high, low or volume cannot show up here; only truncation ran")
+                    f"read of a bar's own close, high, low or volume cannot show up here; {cut}")
         levels = "the previous bar's open, close, high and low"
         caveat = ("where the open does not already decide it and a move or wick of a size the tape has "
                   "made can get there")
@@ -186,7 +192,8 @@ class Report:
         else:
             combos = (f"the close pushed both ways past its open and past the farthest of {levels} it could "
                       f"reach, the high and the low both ways past the previous bar's, the volume both ways "
-                      f"past the previous bar's, and move, wick and volume each both ways")
+                      f"past the previous bar's (and to zero and away from it, where the tape prints zeros), "
+                      f"and move, wick and volume each both ways")
             if self.draws >= 4:
                 pairs = ("every sign combination of move, wick and volume" if self.draws >= 8 else
                          f"every pair of move, wick and volume pushed apart ({min(self.draws, 8)} of 8 sign "
@@ -203,12 +210,16 @@ class Report:
                 residual = ("a read of a magnitude rather than a direction, against a level further back than "
                             "the previous bar, of where the close sits between two of the previous bar's levels, "
                             "of an inside or outside range, or of how two directions relate, can still go unseen")
-            combos += f" ({caveat})"
+            combos += (f" ({caveat}), each checked on the bar as built, with a repair draw wherever the "
+                       f"planned draws fell short")
         stopped = ("; at a bar that diverged, probing stopped at the first divergence"
                    if any(p.evidence.probe == "perturbation" for p in self.proven) else "")
         far = (f"; at {len(self.beyond_reach)} of the probed bars one of {levels} lay further from the open "
                f"than any move the tape has made, and the close was not pushed past it"
                if self.beyond_reach else "")
+        if self.undelivered:
+            far += (f"; at {len(self.undelivered)} of the probed bars a push listed here could not be made "
+                    f"with sizes the tape has made, even on a repair draw, and was not")
         if self.coverage >= 1.0:
             return (f"every bar from {MIN_BOUNDARY} on was probed (bars 0-{MIN_BOUNDARY - 1} never are, so a "
                     f"leak confined to them would not show up here), {combos}, at the bars that did not "
@@ -359,13 +370,25 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, move_of, v
     return out
 
 
-def _sizes(tape: Sequence[Any]) -> tuple[list[float], list[float], list[float]]:
-    """The sizes the tape itself has printed: each bar's move as |log(close/open)|, each wick
-    as a fraction of the body end it hangs from, and each bar-to-bar volume ratio as
-    |log|, each sorted. The probed bar is built from these and nothing else."""
+class Sizes(NamedTuple):
+    """The sizes the tape itself has printed, each sorted: every bar's move as |log(close/open)|,
+    every wick as a fraction of the body end it hangs from, every bar-to-bar volume ratio as
+    |log|, every nonzero volume -- and whether it has printed a zero volume at all. The
+    probed bar is built from these and nothing else."""
+
+    moves: list[float]
+    wicks: list[float]
+    ratios: list[float]
+    volumes: list[float]
+    zero: bool
+
+
+def _sizes(tape: Sequence[Any]) -> Sizes:
     moves: list[float] = []
     wicks: list[float] = []
-    vols: list[float] = []
+    ratios: list[float] = []
+    volumes: list[float] = []
+    zero = False
     before = None
     for b in tape:
         if b.open > 0 and b.close > 0:
@@ -375,12 +398,31 @@ def _sizes(tape: Sequence[Any]) -> tuple[list[float], list[float], list[float]]:
             top, bot = max(b.open, b.close), min(b.open, b.close)
             wicks.append(max(0.0, b.high / top - 1.0))
             wicks.append(min(max(0.0, 1.0 - b.low / bot), 0.99))
+        if b.volume > 0:
+            volumes.append(b.volume)
+        elif b.volume == 0:
+            zero = True
         if before is not None and before.volume > 0 and b.volume > 0:
             r = abs(math.log(b.volume / before.volume))
             if r > 0:
-                vols.append(r)
+                ratios.append(r)
         before = b
-    return sorted(moves), sorted(wicks), sorted(vols)
+    return Sizes(sorted(moves), sorted(wicks), sorted(ratios), sorted(volumes), zero)
+
+
+def _volume_of(tape: Sequence[Any], rng: random.Random, sizes: Sizes):
+    """How a rebuilt bar after the boundary gets its volume: its own, nudged -- and, on a tape
+    that prints zero volumes, zero or not as a random donor bar was. Scaling each bar's own
+    volume kept an untraded bar untraded under every probe, a per-bar invariant of exactly
+    the kind a third red team read; an eighth read it."""
+    donors = range(1, len(tape)) if len(tape) > 1 else range(1)
+
+    def volume(i: int, b: Any) -> float:
+        if sizes.zero and tape[rng.choice(donors)].volume == 0:
+            return 0.0
+        base = b.volume if b.volume > 0 else (rng.choice(sizes.volumes) if sizes.volumes else 0.0)
+        return base * math.exp(rng.gauss(0.0, 0.25))
+    return volume
 
 
 def _draw_within(pool: Sequence[float], lo: float, hi: float, rng: random.Random) -> float | None:
@@ -432,12 +474,12 @@ def beyond_reach(tape: Sequence[Any], boundary: int, top_move: float | None = No
     previous high was six times the largest move on the tape, and a strategy that fell back
     to a causal rule on any move that size walked. Such a level is left alone and counted."""
     if top_move is None:
-        moves = _sizes(tape)[0]
+        moves = _sizes(tape).moves
         top_move = moves[-1] if moves else 0.0
     o = tape[boundary].open
     if o <= 0:
         return False
-    return any(abs(math.log(x / o)) >= top_move for x in _levels(tape[boundary - 1]) if x != o)
+    return any(abs(math.log(x / o)) >= top_move * (1.0 - EDGE) for x in _levels(tape[boundary - 1]) if x != o)
 
 
 def _gap_of(tape: Sequence[Any], bar: Any) -> float:
@@ -494,7 +536,8 @@ class Plan:
     reach; ``"random"`` puts it in a band between those levels chosen at random. ``high`` /
     ``low``: the high above (+1) or below (-1) the previous high, the low above (+1) or
     below (-1) the previous low. Zero leaves a field free. ``inside`` keeps the close inside
-    the previous bar's range so that an inside range is possible at all.
+    the previous bar's range so that an inside range is possible at all. ``zero`` sends a
+    downward volume all the way to zero, a volume the tape must itself have printed.
     """
 
     move: int = 0
@@ -504,6 +547,7 @@ class Plan:
     high: int = 0
     low: int = 0
     inside: bool = False
+    zero: bool = False
 
     @property
     def forced(self) -> bool:
@@ -540,15 +584,15 @@ def draw_plans(nonce: int, boundary: int, draws: int) -> list[Plan]:
 
 
 def _forced_bar(tape: Sequence[Any], boundary: int, rng: random.Random, plan: Plan, sg: float,
-                sizes: tuple[list[float], list[float], list[float]] | None = None
-                ) -> tuple[float, float, float, float]:
+                sizes: Sizes | None = None) -> tuple[float, float, float, float]:
     """The probed bar's close, high, low and volume under ``plan``, built only from sizes the
     tape itself has made. Returns values that satisfy every target that is reachable, each
     strictly; a target the open already decides, or that lies beyond the tape's own sizes,
     is dropped rather than forced with a size the tape never printed."""
     b, prev = tape[boundary], tape[boundary - 1]
     o = b.open
-    moves, wicks, vols = sizes if sizes is not None else _sizes(tape)
+    sizes = sizes if sizes is not None else _sizes(tape)
+    moves, wicks, vols = sizes.moves, sizes.wicks, sizes.ratios
     top_move = moves[-1] if moves else 0.0
 
     # The close: a band on the move's side of the open, reachable by a move of the tape's size.
@@ -632,13 +676,20 @@ def _forced_bar(tape: Sequence[Any], boundary: int, rng: random.Random, plan: Pl
     if below_l and low >= prev.low:
         low = math.nextafter(prev.low, -math.inf)
 
-    # The volume: to the chosen side of the previous bar's, by one of the tape's own ratios.
-    if plan.volume:
-        base = prev.volume if prev.volume > 0 else b.volume
+    # The volume: to the chosen side of the previous bar's, by one of the tape's own ratios --
+    # and against zero as well, where the tape prints zeros. An untraded previous bar used to
+    # make the push a multiple of zero, so "does this bar trade" never moved.
+    if plan.volume < 0 and (plan.zero or prev.volume <= 0):
+        volume = 0.0                         # nothing is below an untraded bar but another one
+    elif plan.volume and prev.volume > 0:
         r = _draw_within(vols, 0.0, math.inf, rng)
-        volume = base * math.exp(plan.volume * (r if r is not None else 0.25))
-        if base > 0 and (volume - base) * plan.volume <= 0:
-            volume = math.nextafter(base, math.inf if plan.volume > 0 else -math.inf)
+        volume = prev.volume * math.exp(plan.volume * (r if r is not None else 0.25))
+        if (volume - prev.volume) * plan.volume <= 0:
+            volume = math.nextafter(prev.volume, math.inf if plan.volume > 0 else -math.inf)
+    elif plan.volume > 0:                    # above an untraded bar: a volume the tape has printed
+        pool = sizes.volumes
+        volume = (_jitter(rng.choice(pool), rng) if pool
+                  else (b.volume if b.volume > 0 else 1.0) * math.exp(rng.gauss(0.0, 0.25)))
     else:
         volume = b.volume * math.exp(rng.gauss(0.0, 0.25))
     return closed, high, low, volume
@@ -646,7 +697,7 @@ def _forced_bar(tape: Sequence[Any], boundary: int, rng: random.Random, plan: Pl
 
 def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | None,
                signs: tuple[int, int, int] = (0, 0, 0), plan: Plan | None = None,
-               sizes: tuple[list[float], list[float], list[float]] | None = None) -> list[Any]:
+               sizes: Sizes | None = None) -> list[Any]:
     """Vary everything unknowable at the moment bar ``boundary``'s position was chosen.
 
     Every bar after the boundary gets a fresh move at the tape's own scale and is re-threaded,
@@ -669,25 +720,167 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
     if plan is None:
         m, w, v = signs
         plan = Plan(m, w, v, "far", m, m)
+    sizes = sizes if sizes is not None else _sizes(tape)
     first = _forced_bar(tape, boundary, rng, plan, sg, sizes) if plan.forced else None
     return _rethread(tape, boundary, rng,
                      lambda i, b: math.exp(rng.gauss(0.0, sg)),
-                     lambda i, b: b.volume * math.exp(rng.gauss(0.0, 0.25)),
+                     _volume_of(tape, rng, sizes),
                      first=first)
+
+
+def _delivered(bar: Any, prev: Any) -> set:
+    """Every relation the probed bar, as built, actually has to its open and to the previous
+    bar. The note is checked against these, not against what the plan intended: an eighth red
+    team showed a range target overriding the planned wick skew with nothing recorded."""
+    o, c, v, pv = bar.open, bar.close, bar.volume, prev.volume
+    top, bot = max(o, c), min(o, c)
+    up_w = bar.high / top - 1.0 if top > 0 else 0.0
+    dn_w = 1.0 - bar.low / bot if bot > 0 else 0.0
+    m = 1 if c > o else -1 if c < o else 0
+    w = 1 if up_w > dn_w else -1 if dn_w > up_w else 0
+    got = set()
+    if m:
+        got.add(("move", m))
+    if w:
+        got.add(("wick", w))
+    if v > pv:
+        got.add(("vol", 1))
+    elif v < pv or v == 0:                   # below the previous volume, or untraded after untraded
+        got.add(("vol", -1))
+    got.add(("zero", v == 0))
+    for name, level in (("open", prev.open), ("close", prev.close), ("high", prev.high), ("low", prev.low)):
+        if c > level:
+            got.add(("past", name, 1))
+        elif c < level:
+            got.add(("past", name, -1))
+    got.add(("high", 1 if bar.high > prev.high else -1 if bar.high < prev.high else 0))
+    got.add(("low", 1 if bar.low > prev.low else -1 if bar.low < prev.low else 0))
+    if bar.high < prev.high and bar.low > prev.low:
+        got.add(("range", "inside"))
+    if bar.high > prev.high and bar.low < prev.low:
+        got.add(("range", "outside"))
+    if m and w:
+        got.add(("signs", (m, w, 1 if v > pv else -1)))
+    return got
+
+
+def _reach(o: float, p: Any, sizes: Sizes) -> dict:
+    """What the tape's own sizes can do from open ``o`` against previous bar ``p``, computed
+    in the same terms the probed bar is built in, and a hair short of the tape's largest size:
+    no draw gets STRICTLY past a level that sits exactly at it, and a ninth-round tie showed a
+    log-space comparison calling such a level reachable."""
+    tm = (sizes.moves[-1] if sizes.moves else 0.0) * (1.0 - EDGE)
+    tw = (sizes.wicks[-1] if sizes.wicks else 0.0) * (1.0 - EDGE)
+    up, dn = o * math.exp(tm), o * math.exp(-tm)
+    return {
+        "move": tm > 0,
+        "wick": tw > 0,
+        "past": lambda level: (math.log(level / o) if level > o else math.log(o / level)) < tm,
+        "high_up": o > p.high or p.high < up * (1.0 + tw),
+        "low_dn": o < p.low or p.low > dn * (1.0 - tw),
+        "outside_up": (o > p.high or p.high < up * (1.0 + tw)) and (o < p.low or p.low > o * (1.0 - tw)),
+        "outside_dn": (o < p.low or p.low > dn * (1.0 - tw)) and (o > p.high or p.high < o * (1.0 + tw)),
+    }
+
+
+def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan]) -> set:
+    """What the coverage note claims was pushed at bar ``k``, limited to what the open leaves
+    open and the tape's own sizes can reach -- the note's own qualification."""
+    b, p = tape[k], tape[k - 1]
+    o = b.open
+    if not plans or o <= 0:
+        return set()
+    r = _reach(o, p, sizes)
+    vol_up = (p.volume > 0 and bool(sizes.ratios)) or (p.volume <= 0 and bool(sizes.volumes))
+    if len(plans) == 1:
+        m, w, v = plans[0].move, plans[0].wick, plans[0].volume
+        owed = set()
+        if r["move"] and m:
+            owed.add(("move", m))
+        if r["wick"] and w:
+            owed.add(("wick", w))
+        if v > 0 and vol_up or v < 0:
+            owed.add(("vol", v))
+        return owed
+    owed = set()
+    if r["move"]:
+        owed |= {("move", 1), ("move", -1)}
+    if r["wick"]:
+        owed |= {("wick", 1), ("wick", -1)}
+    if vol_up:
+        owed.add(("vol", 1))
+    owed.add(("vol", -1))                    # below the previous volume, or zero after a zero
+    if sizes.zero:
+        owed |= {("zero", True), ("zero", False)}
+    if r["move"]:
+        for name, level in (("open", p.open), ("close", p.close), ("high", p.high), ("low", p.low)):
+            if level <= 0 or level == o:
+                continue
+            owed.add(("past", name, -1 if level > o else 1))           # the way the move gets there
+            if r["past"](level):
+                owed.add(("past", name, 1 if level > o else -1))       # past it, within reach
+        if r["high_up"]:
+            owed.add(("high", 1))
+        if o < p.high:
+            owed.add(("high", -1))
+        if o > p.low:
+            owed.add(("low", 1))
+        if r["low_dn"]:
+            owed.add(("low", -1))
+    if len(plans) >= 4:
+        if p.low < o < p.high:
+            owed.add(("range", "inside"))
+        if r["move"] and (r["outside_up"] or r["outside_dn"]):
+            owed.add(("range", "outside"))
+        if r["move"] and r["wick"]:
+            for pl in plans[:8]:
+                if pl.volume > 0 and not vol_up:
+                    continue
+                owed.add(("signs", (pl.move, pl.wick, pl.volume)))
+    return owed
+
+
+def _repair(item: tuple, tape: Sequence[Any], k: int, sizes: Sizes, coin: int) -> Plan:
+    """A draw aimed at one relation the planned draws did not deliver, with nothing else
+    forced that could get in its way."""
+    kind = item[0]
+    if kind == "move":
+        return Plan(move=item[1], band="random")
+    if kind == "wick":
+        return Plan(move=coin, wick=item[1], band="random")
+    if kind == "vol":
+        return Plan(volume=item[1])
+    if kind == "zero":
+        return Plan(volume=-1, zero=True) if item[1] else Plan(volume=1)
+    if kind == "past":
+        return Plan(move=item[2], band="far")
+    if kind == "high":
+        return Plan(move=item[1], band="far", high=item[1])
+    if kind == "low":
+        return Plan(move=item[1], band="far", low=item[1])
+    if kind == "range" and item[1] == "inside":
+        return Plan(move=coin, band="random", high=-1, low=1, inside=True)
+    if kind == "range":
+        up = _reach(tape[k].open, tape[k - 1], sizes)["outside_up"]
+        return Plan(move=1 if up else -1, band="far", high=1, low=-1)
+    m, w, v = item[1]
+    return Plan(m, w, v, band="random")
 
 
 def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
     """A fresh continuation from ``boundary`` on: same prefix, same shape, different moves.
 
     This is what the input-dependence gate feeds the strategy. It differs from the pristine
-    tape exactly where the probes can reach and nowhere else, so a strategy unmoved by it is
-    a strategy no probe can move.
+    tape only where the probes can reach, and varies what they vary -- moves, wicks, gaps,
+    time steps, volumes, and whether a bar traded at all. It does not force the relations
+    the probes force, so a strategy it leaves unmoved may still be moved by a probe: the gate
+    withholds a CLEAN result on such a strategy, never a proof.
     """
     rng = random.Random(seed)
     sg = realized_sigma(tape)
     return _rethread(tape, boundary, rng,
                      lambda i, b: math.exp(rng.gauss(0.0, sg)),
-                     lambda i, b: b.volume * math.exp(rng.gauss(0.0, 0.25)))
+                     _volume_of(tape, rng, _sizes(tape)))
 
 
 def _first_disagreement(a: Sequence[int], b: Sequence[int], upto: int) -> int | None:
@@ -738,7 +931,7 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
         # only under a cut between the index it moves and the length it keys on, and the
         # four fixed fractions stop at 0.9n. A fourth red team keyed a flip at index 185 on
         # len >= 190 and got a clean report. Complete now costs about 5n runs -- n
-        # truncations and up to four perturbation draws a bar -- and says so.
+        # truncations, up to four perturbation draws a bar, and any repair draws -- and says so.
         trunc_bounds = list(range(MIN_BOUNDARY, n))
         pert_bounds = list(range(MIN_BOUNDARY, n))
     elif probes == "sparse":
@@ -766,27 +959,61 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
             candidates.append((d, (lambda c=cut: list(strategy(c))), truncated))
 
     sizes = _sizes(tape)
-    top_move = sizes[0][-1] if sizes[0] else 0.0
+    top_move = sizes.moves[-1] if sizes.moves else 0.0
     sg = realized_sigma(tape) if sigma is None else sigma
     far = tuple(k for k in pert_bounds if draws and beyond_reach(tape, k, top_move))
+    short: list[int] = []
+    repairs = 0
+
+    def probe(k: int, plan: Plan, salt: int) -> tuple[list[Any], bool]:
+        nonlocal runs
+        varied = _perturbed(tape, k, seed=nonce ^ (k * 1_000_003 + salt), sigma=sg, plan=plan, sizes=sizes)
+        variant = list(strategy(varied))
+        runs += 1
+        idx = _first_disagreement(full, variant, k + 1)
+        if idx is not None:
+            d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=variant[idx],
+                           probe="perturbation", detail="varied within the tape's own range")
+            candidates.append((d, (lambda v=varied: list(strategy(v))), variant))
+            return varied, True
+        return varied, False
+
     for k in pert_bounds:
-        for d_i, plan in enumerate(draw_plans(nonce, k, draws)):
-            varied = _perturbed(tape, k, seed=nonce ^ (k * 1_000_003 + d_i), sigma=sg, plan=plan,
-                                sizes=sizes)
-            variant = list(strategy(varied))
-            runs += 1
-            idx = _first_disagreement(full, variant, k + 1)
-            if idx is not None:
-                d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=variant[idx],
-                               probe="perturbation", detail="varied within the tape's own range")
-                candidates.append((d, (lambda v=varied: list(strategy(v))), variant))
+        plans = draw_plans(nonce, k, draws)
+        got: set = set()
+        diverged = False
+        for d_i, plan in enumerate(plans):
+            varied, diverged = probe(k, plan, d_i)
+            if diverged:
                 break
+            got |= _delivered(varied[k], tape[k - 1])
+        if diverged or not plans:
+            continue
+        # Checked, not assumed: whatever the note will claim for this bar and the planned draws
+        # did not deliver gets a draw of its own, twice at most; what still fails is disclosed.
+        owed = _owed(tape, k, sizes, plans)
+        tries: dict = {}
+        coin = random.Random(nonce ^ (k * 7_907 + 11))
+        while True:
+            todo = sorted((x for x in owed - got if tries.get(x, 0) < 2), key=repr)
+            if not todo:
+                break
+            item = todo[0]
+            tries[item] = tries.get(item, 0) + 1
+            repairs += 1
+            varied, diverged = probe(k, _repair(item, tape, k, sizes, coin.choice((1, -1))),
+                                     1_000 + repairs)
+            if diverged:
+                break
+            got |= _delivered(varied[k], tape[k - 1])
+        if not diverged and owed - got:
+            short.append(k)
 
     proven: list[Proven] = []
     suspected: list[Suspected] = []
     truncation_hits: list[Divergence] = []
     meta = dict(probes_run=runs, bars_tested=n, boundaries=tuple(pert_bounds), seed=nonce, draws=draws,
-                beyond_reach=far)
+                beyond_reach=far, undelivered=tuple(short), repairs=repairs, truncations=len(trunc_bounds))
 
     if candidates:
         # Reproduction before promotion. The pristine tape is replayed THREE times, not once:

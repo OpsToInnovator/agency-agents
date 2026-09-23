@@ -160,6 +160,7 @@ class RunRecord:
     visible: tuple[str, ...]
     files_written: tuple[str, ...]
     violations: tuple[str, ...]
+    spawn_lock: bool = False      # the kernel refused new processes (seccomp), per the child
 
 
 _ISOLATION_CACHE: dict[str, Isolation] = {}
@@ -477,13 +478,15 @@ class Sandbox:
             tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
             if cpu_used >= self.limits.cpu_s:
                 raise ResourceExceeded(f"used {cpu_used:.1f}s CPU against a {self.limits.cpu_s}s limit")
-            raise StrategyError(f"no output (rc={proc.returncode}, {cpu_used:.1f}s CPU): {tail}")
+            raise StrategyError(f"no output (rc={proc.returncode}, {cpu_used:.1f}s CPU); "
+                                f"the strategy's own stderr ended: {tail}")
         try:
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("not an object")
         except (ValueError, RecursionError) as e:     # a deeply nested array recurses in the decoder
             raise StrategyError(f"malformed result from the strategy process: {type(e).__name__}") from None
+        self.records[-1] = rec = dataclasses.replace(rec, spawn_lock=payload.get("spawn_lock") is True)
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
@@ -642,10 +645,20 @@ class Precheck:
     files_written: tuple[str, ...]
     first_boundary: int
     hash_seed_pinned: bool = True
+    spawn_lock: bool = False
 
     @property
     def provable(self) -> bool:
         return self.deterministic and self.deterministic_on_varied and self.input_dependent
+
+    @property
+    def proof_only(self) -> bool:
+        """Reproducible, but unmoved by the gate's continuation. The continuation varies what
+        the probes vary without forcing the relations they force, so a probe may still move
+        the output -- an eighth red team's same-bar volume read was blocked here as unprovable
+        while the probes convicted it. The probes run; only a proof is reported, because a
+        clean result on a strategy the gate could not move would mean nothing."""
+        return self.deterministic and self.deterministic_on_varied and not self.input_dependent
 
     def describe(self) -> str:
         lines = [f"isolation: {self.isolation}" +
@@ -660,12 +673,18 @@ class Precheck:
                      "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
                      "real data from varied data, or it is intermittently nondeterministic; neither can be audited"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
-                     "IDENTICAL output: the output does not change when the bars we can vary change, so nothing can be proved about it"))
+                     "IDENTICAL output: the output does not change when the bars we can vary change under a fresh "
+                     "continuation of the tape, so a clean result would mean nothing; the probes still run, for a proof only"))
         if self.files_written:
             lines.append(f"files written by the strategy during a run: {', '.join(self.files_written)} "
                          f"-- this is what a feature cache looks like")
         lines.append("hash seed pinned to 0 for every run, so dict and set order cannot differ between them")
-        lines.append("PROVABLE" if self.provable else "UNPROVABLE: no probe result would mean anything; fix the above first")
+        lines.append("new processes refused by the kernel (seccomp), by any route" if self.spawn_lock else
+                     "the kernel's spawn lock is not available here: only the audit hook refuses new processes, "
+                     "and only by the routes it sees")
+        lines.append("PROVABLE" if self.provable else
+                     "PROOF ONLY: the probes run, and only a proof would be reported" if self.proof_only else
+                     "UNPROVABLE: no probe result would mean anything; fix the above first")
         return "\n".join(lines)
 
 
@@ -695,12 +714,18 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
     written = tuple(sorted({f for r in sandbox.records[-6:] for f in r.files_written}))
     return Precheck(deterministic=(a[0] == a[1] == a[2]), deterministic_on_varied=(c[0] == c[1] == c[2]),
                     input_dependent=(a[0] != c[0]), isolation=sandbox.isolation,
-                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY)
+                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY,
+                    spawn_lock=sandbox.records[-1].spawn_lock)
 
 
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:
-    """Gates first, probes second, never the other way round."""
+    """Gates first, probes second, never the other way round. A strategy the gate's
+    continuation could not move is still probed, and a proof against it is still a proof;
+    a clean result on it is withheld."""
     pc = precheck(sandbox, tape)
-    if not pc.provable:
-        return pc, None
-    return pc, check_causality(sandbox, tape, **kw)
+    if pc.provable:
+        return pc, check_causality(sandbox, tape, **kw)
+    if pc.proof_only:
+        report = check_causality(sandbox, tape, **kw)
+        return pc, (report if report.leaks else None)
+    return pc, None

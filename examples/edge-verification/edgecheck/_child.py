@@ -40,6 +40,60 @@ class Bar:
     volume: float
 
 
+def lock_spawns() -> bool:
+    """Have the kernel refuse every new process from here on: execve and execveat, fork and
+    vfork, and every clone that is not a thread. A seccomp filter, installed with
+    no_new_privs, which needs no privilege and cannot be removed by the process it binds.
+
+    The audit hook names the stdlib's ways of starting a process, and round seven replaced
+    _posixsubprocess.fork_exec, which raises no audit event. An eighth red team popped that
+    module from sys.modules, imported a fresh copy with the real fork_exec, and started a
+    process with nothing recorded; no audit event fires for any step of that. The kernel does
+    not care which module asked. Threads are clones with CLONE_THREAD and still work; clone3,
+    whose flags a filter cannot read, is answered ENOSYS so that libc falls back to clone.
+    Returns False, and nothing is installed, on an architecture this table does not know."""
+    import ctypes
+    import platform
+    import sys as _sys
+    table = {
+        "x86_64": (0xC000003E, (59, 322, 57, 58), 56, 435, 0x40000000),
+        "aarch64": (0xC00000B7, (221, 281), 220, 435, None),
+    }
+    if _sys.byteorder != "little" or platform.machine() not in table:
+        return False
+    arch, denied, clone, clone3, x32 = table[platform.machine()]
+    LD, JEQ, JGE, JSET, RET = 0x20, 0x15, 0x35, 0x45, 0x06
+    ALLOW, EPERM, ENOSYS = 0x7FFF0000, 0x00050000 | 1, 0x00050000 | 38
+    CLONE_THREAD = 0x00010000
+    # (code, jump-if-true label, jump-if-false label, k); None falls through
+    body = [(LD, None, None, 4), (JEQ, None, "deny", arch), (LD, None, None, 0)]
+    if x32 is not None:
+        body.append((JGE, "deny", None, x32))          # the x32 ABI's numbers, all of them
+    body += [(JEQ, "deny", None, nr) for nr in denied]
+    body += [(JEQ, "nosys", None, clone3), (JEQ, None, "allow", clone),
+             (LD, None, None, 16), (JSET, "allow", "deny", CLONE_THREAD)]
+    labels = {"allow": len(body), "deny": len(body) + 1, "nosys": len(body) + 2}
+    body += [(RET, None, None, ALLOW), (RET, None, None, EPERM), (RET, None, None, ENOSYS)]
+
+    class Filter(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte),
+                    ("k", ctypes.c_uint32)]
+
+    class Program(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(Filter))]
+
+    rel = lambda i, lab: 0 if lab is None else labels[lab] - (i + 1)
+    ins = (Filter * len(body))(*[Filter(c, rel(i, t), rel(i, f), k) for i, (c, t, f, k) in enumerate(body)])
+    prog = Program(len(body), ctypes.cast(ins, ctypes.POINTER(Filter)))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:              # PR_SET_NO_NEW_PRIVS
+            return False
+        return libc.prctl(22, 2, ctypes.byref(prog), 0, 0) == 0   # PR_SET_SECCOMP, FILTER
+    except (OSError, AttributeError):
+        return False
+
+
 def main(argv: list[str]) -> int:
     run_dir, entry, func = argv[1], argv[2], argv[3]
     out_fd, viol_fd = int(argv[4]), int(argv[5])
@@ -107,6 +161,9 @@ def main(argv: list[str]) -> int:
 
     _posixsubprocess.fork_exec = refuse_fork_exec
 
+    # And the kernel's refusal behind both, for every route neither of them sees.
+    spawn_lock = lock_spawns()
+
     # -- the tape ----------------------------------------------------------------------------------
     bars = []
     with open(os.path.join(run_dir, "tape.jsonl"), encoding="utf-8") as fh:
@@ -156,13 +213,14 @@ def main(argv: list[str]) -> int:
         # not a half-written result.
         values = [x.item() if hasattr(x, "item") else x for x in out]
         files, over = written(max_entries, max_depth)
-        body = dumps({"ok": True, "signals": values, "files_written": sorted(files)[:2000], "run_dir_over_limit": over})
+        body = dumps({"ok": True, "signals": values, "files_written": sorted(files)[:2000],
+                      "run_dir_over_limit": over, "spawn_lock": spawn_lock})
     except BaseException as e:  # noqa: BLE001 -- the error IS the report
         # The message is repr'd so a newline inside it cannot smuggle a reassuring last line
         # into the parent's summary; the formatted traceback rides along as an attachment.
         body = dumps({"ok": False,
                       "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300]},
-                      "traceback": format_exc()[-4000:]})
+                      "traceback": format_exc()[-4000:], "spawn_lock": spawn_lock})
     try:
         write_all(out_fd, body.encode("utf-8"))
     finally:
