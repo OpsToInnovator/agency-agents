@@ -173,6 +173,7 @@ class Report:
     undelivered: tuple[int, ...] = ()
     repairs: int = 0
     truncations: int = 0
+    floors: tuple[str, ...] = ()
 
     def coverage_note(self) -> str:
         if self.draws <= 0 or not self.boundaries:
@@ -181,14 +182,16 @@ class Report:
             return ("no perturbation ran: nothing a bar had not yet printed at its open was varied, so a "
                     f"read of a bar's own close, high, low or volume cannot show up here; {cut}")
         levels = "the previous bar's open, close, high and low"
-        caveat = ("where the open does not already decide it and a move or wick of a size the tape has "
-                  "made can get there")
+        caveat = ("where the open, or a previous bar that did not trade, does not already decide it and a "
+                  "size the tape has made can get there")
         if self.draws == 1:
             combos = (f"one draw at each bar, pushing the close past its open and past the farthest of "
                       f"{levels} it could reach, the high and the low past the previous bar's, and the "
-                      f"volume past the previous bar's, each one way chosen at random ({caveat})")
+                      f"volume past the previous bar's, each one way chosen at random ({caveat}), plus a "
+                      f"repair draw where that draw fell short of its own plan")
             residual = ("a read that only the other way would flip, a read of a magnitude rather than a "
-                        "direction, or of how two relations combine, can still go unseen")
+                        "direction (how far the close is from the open, where it sits within its own range), "
+                        "or of how two relations combine, can still go unseen")
         else:
             combos = (f"the close pushed both ways past its open and past the farthest of {levels} it could "
                       f"reach, the high and the low both ways past the previous bar's, the volume both ways "
@@ -200,23 +203,28 @@ class Report:
                          f"combinations)")
                 combos += (f"; on the further draws the close in a band between those levels chosen at random, "
                            f"the range once inside and once outside the previous bar's, and {pairs}")
-                residual = ("a read of a magnitude rather than a direction, against a level further back than "
+                residual = ("a read of a magnitude rather than a direction (how far the close is from the "
+                            "open, where it sits within its own range), against a level further back than "
                             "the previous bar, or of how two of these relations combine at one bar -- where the "
                             "close sits between two of the previous bar's levels, a failed breakout, an inside "
                             "or outside range together with where the close sits"
                             + ("" if self.draws >= 8 else ", a pattern across move, wick and volume at once")
                             + " -- is tried only on the draws that happen to produce it, and can go unseen")
             else:
-                residual = ("a read of a magnitude rather than a direction, against a level further back than "
+                residual = ("a read of a magnitude rather than a direction (how far the close is from the "
+                            "open, where it sits within its own range), against a level further back than "
                             "the previous bar, of where the close sits between two of the previous bar's levels, "
                             "of an inside or outside range, or of how two directions relate, can still go unseen")
             combos += (f" ({caveat}), each checked on the bar as built, with a repair draw wherever the "
                        f"planned draws fell short")
         stopped = ("; at a bar that diverged, probing stopped at the first divergence"
                    if any(p.evidence.probe == "perturbation" for p in self.proven) else "")
-        far = (f"; at {len(self.beyond_reach)} of the probed bars one of {levels} lay further from the open "
-               f"than any move the tape has made, and the close was not pushed past it"
+        far = (f"; at {len(self.beyond_reach)} of the probed bars one of {levels} lay at least as far from "
+               f"the open as the largest move the tape has made, and the close was not pushed past it"
                if self.beyond_reach else "")
+        if self.floors:
+            far += (f"; the tape has made no {' and no '.join(self.floors)}, so pushes of that kind used a "
+                    f"floor size, not one of its own")
         if self.undelivered:
             far += (f"; at {len(self.undelivered)} of the probed bars a push listed here could not be made "
                     f"with sizes the tape has made, even on a repair draw, and was not")
@@ -240,7 +248,7 @@ class Report:
                     "\n".join(f"  {s.summary}\n    {s.reason}" for s in self.suspected))
         if not self.proven:
             base = (f"No causal dependency on future data was demonstrated over {self.bars_tested} bars "
-                    f"and {self.probes_run} probe runs; {self.coverage_note()}. This is not a clean bill of "
+                    f"and {self.probes_run} runs of the strategy; {self.coverage_note()}. This is not a clean bill of "
                     f"health: a leak on a branch this data never took would not show up here.")
             if self.suspected:
                 base += "\n\nSUSPECTED, not proven:\n" + "\n".join(
@@ -554,7 +562,7 @@ class Plan:
         return bool(self.move or self.wick or self.volume or self.high or self.low)
 
 
-def draw_plans(nonce: int, boundary: int, draws: int) -> list[Plan]:
+def draw_plans(nonce: int, boundary: int, draws: int, zero: bool = False) -> list[Plan]:
     """The draws an audit makes at a bar, in order.
 
     Move, wick and volume signs follow ``sign_design``. The first two draws are its
@@ -580,6 +588,13 @@ def draw_plans(nonce: int, boundary: int, draws: int) -> list[Plan]:
             plans.append(Plan(m, w, v, "random", -1 if inside else 1, 1 if inside else -1, inside))
         else:
             plans.append(Plan(m, w, v, "random", r.choice((1, -1)), r.choice((1, -1))))
+    if zero:
+        # On a tape that prints zero volumes, the later downward volume push of the first four
+        # goes all the way to zero, so the planned draws deliver it rather than a repair --
+        # a push that only ever came from repairs would mark them out.
+        down = [i for i, pl in enumerate(plans[:4]) if pl.volume < 0]
+        if len(down) > 1:
+            plans[down[-1]] = dataclasses.replace(plans[down[-1]], zero=True)
     return plans
 
 
@@ -711,7 +726,8 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
     skew and volume are forced independently by a masked covering design, because lockstep
     pushes left their agreement invariant. The close is pushed past the previous bar's
     levels, not just its own open, because a close forced only against the open never
-    crossed the previous close at a gap bar. And every forced size is one the tape has
+    crossed the previous close at a gap bar. And every forced size is drawn from the tape's own
+    (a floor, disclosed, where it has made none of a kind), and never past the largest it has
     made, because a close forced past a far level by a move six times the tape's largest
     was a probe a strategy could recognise and wait out.
     """
@@ -799,7 +815,7 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan]) -> s
             owed.add(("move", m))
         if r["wick"] and w:
             owed.add(("wick", w))
-        if v > 0 and vol_up or v < 0:
+        if v > 0 and vol_up or v < 0 and p.volume > 0:
             owed.add(("vol", v))
         return owed
     owed = set()
@@ -809,7 +825,8 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan]) -> s
         owed |= {("wick", 1), ("wick", -1)}
     if vol_up:
         owed.add(("vol", 1))
-    owed.add(("vol", -1))                    # below the previous volume, or zero after a zero
+    if p.volume > 0:
+        owed.add(("vol", -1))                # nothing is below a bar that did not trade
     if sizes.zero:
         owed |= {("zero", True), ("zero", False)}
     if r["move"]:
@@ -973,13 +990,13 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
         idx = _first_disagreement(full, variant, k + 1)
         if idx is not None:
             d = Divergence(index=idx, boundary=k, baseline=full[idx], variant=variant[idx],
-                           probe="perturbation", detail="varied within the tape's own range")
+                           probe="perturbation", detail="varied at the tape's own scale")
             candidates.append((d, (lambda v=varied: list(strategy(v))), variant))
             return varied, True
         return varied, False
 
     for k in pert_bounds:
-        plans = draw_plans(nonce, k, draws)
+        plans = draw_plans(nonce, k, draws, zero=sizes.zero)
         got: set = set()
         diverged = False
         for d_i, plan in enumerate(plans):
@@ -1013,7 +1030,11 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     suspected: list[Suspected] = []
     truncation_hits: list[Divergence] = []
     meta = dict(probes_run=runs, bars_tested=n, boundaries=tuple(pert_bounds), seed=nonce, draws=draws,
-                beyond_reach=far, undelivered=tuple(short), repairs=repairs, truncations=len(trunc_bounds))
+                beyond_reach=far, undelivered=tuple(short), repairs=repairs, truncations=len(trunc_bounds),
+                # A tape with no wicks gets no wick push at all (none is claimed); moves and volume
+                # changes fall back to a floor size, which the note names.
+                floors=tuple(name for name, pool in (("moves", sizes.moves), ("volume changes", sizes.ratios))
+                             if draws and pert_bounds and not pool))
 
     if candidates:
         # Reproduction before promotion. The pristine tape is replayed THREE times, not once:

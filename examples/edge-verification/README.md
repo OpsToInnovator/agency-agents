@@ -10,8 +10,8 @@ is a conversation; a changed output is a fact.
 PROVEN: this strategy reads something from its own bar on that had not happened at its
 open -- its own close, high, low or volume, or a later bar; the evidence does not say which.
 
-  signals[45] = 1 normally, -1 once bar 45 onward was varied within a percent of its
-  true value (perturbation probe, horizon 0)
+  signals[45] = 1 normally, -1 once bar 45 onward was varied at the tape's own scale
+  (perturbation probe, horizon 0)
 ```
 
 ## Why this needs the code
@@ -152,8 +152,9 @@ Now every size forced into the probed bar is drawn from the tape's own: its move
 tape's moves, its wicks from its wicks, its volume ratio from its bar-to-bar ratios, each
 jittered off its exact value (a verbatim copy is a duplicate no real tape prints) and never
 past the largest; where no size lands in the interval a target needs, a point inside it
-short of the largest is used, and a tape with no sizes at all — a flat one — gets a floor.
-A level further from the open than any move
+short of the largest is used, and a tape that has made no size of some kind — flat prices,
+or a volume that never changes — gets a floor for it, which the report names.
+A level at least as far from the open as the largest move
 the tape has made is left alone, and the report counts the bars where that happened. The
 same round showed that all-up-then-all-down leaves every read of how two relations
 *combine* untouched — an inside bar, a failed breakout, a close between the open and the
@@ -171,7 +172,8 @@ quarter of audits. Each probed bar is now checked, as built, against every relat
 lists for it (limited to what the open leaves open and the tape's own sizes can reach); any
 the planned draws missed gets a repair draw of its own with nothing else forced, and a bar
 where even that fails is counted in the report. On the fixture tapes nothing goes
-undelivered and repairs are under 3% of runs. The same round found that zero volume had
+undelivered, and repairs are a few percent of runs (2.4% at four draws and 3.6% at eight,
+measured over ten audits of each). The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
 where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
@@ -421,7 +423,13 @@ wick skew, so "each both ways" and, at eight draws, "every sign combination" wer
 some bars (what each bar delivered is now checked and repaired), zero volume never pushed
 (zero is a level), a gate that blocked a strategy the probes convicted (proof only), and a
 fresh import of `_posixsubprocess` restoring the real `fork_exec` with no audit event for
-any step of it (the kernel now refuses the process itself).
+any step of it (the kernel now refuses the process itself). The ninth got nothing of either
+severity through — no genuine future read unproven without a caveat that covers it, no clean
+strategy convicted, the spawn lock held against every route tried — and found only sentences
+that were literally false: a precheck line promising probes that a failed determinism gate
+had cancelled, another saying the real tape reproduced when it had not, a hash-seed line
+ignoring sets of objects hashed by identity, "varied within the tape's own range" on every
+proof line, and smaller ones in the note. Each now says what happened.
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

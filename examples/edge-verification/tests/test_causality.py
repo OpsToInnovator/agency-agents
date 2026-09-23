@@ -138,7 +138,7 @@ def test_a_divergence_that_does_not_reproduce_is_not_proven(tape):
         out = [0] * len(bs)
         for i in range(3, len(bs)):
             out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
-        if calls[0] > 2:                      # the "clock" moves after the first two runs
+        if calls[0] > 2 and len(out) > 10:    # the "clock" moves after the first two runs
             out[10] = -out[10]
         return out
 
@@ -699,7 +699,7 @@ def test_a_probe_never_forces_a_move_larger_than_the_tape_has_made():
             r = check_causality(_gap_evader, t, probes="every_bar", seed=seed)
             assert r.leaks and any(p.evidence.index == 100 for p in r.proven), (tape_seed, seed)
             assert 100 in r.beyond_reach
-            assert "further from the open than any move the tape has made" in r.coverage_note()
+            assert "at least as far from the open as the largest move the tape has made" in r.coverage_note()
         top = _sizes(t).moves[-1]
         for nonce in range(6):
             for i, plan in enumerate(draw_plans(nonce, 100, 4)):
@@ -918,3 +918,50 @@ def test_an_audit_that_probed_no_bar_says_so(tape):
     note = r.coverage_note()
     assert r.coverage == 0.0 and note.startswith("no perturbation ran")
     assert "truncation did not run either" in note and "both ways" not in note
+
+
+def test_a_proof_line_does_not_claim_the_variation_stayed_in_the_tapes_range(tape):
+    """"varied within the tape's own range" was on every perturbation line, and most varied
+    tapes leave the tape's price range: moves are drawn at the tape's scale, not inside its
+    range. A ninth red team read it as the claim it is."""
+    r = check_causality(strat("leak_same_bar_close").signals, tape, probes="every_bar", seed=1)
+    text = r.describe()
+    assert "within the tape's own range" not in text and "at the tape's own scale" in text
+
+
+def test_a_tape_with_no_sizes_of_a_kind_says_its_pushes_used_a_floor():
+    """On a flat tape no move, no wick and no volume change exists to draw from; the pushes
+    fall back to a floor, and the note used to say nothing about it."""
+    flat = [dataclasses.replace(b, open=100.0, high=100.0, low=100.0, close=100.0, volume=1000.0)
+            for b in bars(60)]
+
+    def reads_its_close(bs):
+        return [1 if b.close > b.open else -1 if b.close < b.open else 0 for b in bs]
+
+    r = check_causality(reads_its_close, flat, probes="every_bar", seed=1)
+    assert r.leaks, "the floor-sized push still has to catch a same-bar read"
+    clean = check_causality(strat("clean_lagged").signals, flat, probes="every_bar", seed=1)
+    assert set(clean.floors) == {"moves", "volume changes"}
+    assert "used a floor size, not one of its own" in clean.coverage_note()
+    real = check_causality(strat("clean_lagged").signals, bars(200), probes="every_bar", seed=1)
+    assert real.floors == () and "floor size" not in real.coverage_note()
+
+
+def test_a_zero_volume_push_comes_from_the_planned_draws(tape):
+    """Zero volume at the probed bar used to come only from repair draws, which made a repair
+    draw recognisable in principle. On a tape that prints zeros the planned draws deliver it."""
+    from edgecheck.causality import draw_plans
+    plans = draw_plans(5, 60, 4, zero=True)
+    assert sum(p.zero for p in plans) == 1 and all(p.volume < 0 for p in plans if p.zero)
+    assert not any(p.zero for p in draw_plans(5, 60, 4))
+    zt = _zero_volume_tape(0.3)
+    with_zero = check_causality(strat("clean_lagged").signals, zt, probes="every_bar", seed=2)
+    assert with_zero.undelivered == ()
+    assert with_zero.repairs < 0.06 * with_zero.probes_run
+
+
+def test_the_one_draw_note_mentions_its_repairs_and_runs_are_named_as_runs(tape):
+    one = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", draws=1, seed=0)
+    assert "plus a repair draw where that draw fell short of its own plan" in one.coverage_note()
+    none = check_causality(strat("clean_lagged").signals, tape, boundaries=[], seed=0)
+    assert "runs of the strategy" in none.describe() and "probe runs" not in none.describe()

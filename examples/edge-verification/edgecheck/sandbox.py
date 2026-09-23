@@ -669,16 +669,23 @@ class Precheck:
                          "so state CAN carry; the namespace tier is what prevents it")
         lines.append("same tape, 3 times         -> " + ("identical output" if self.deterministic else
                      "DIFFERENT output: the strategy is nondeterministic, so no divergence could be attributed to the data"))
-        lines.append("same varied tape, 3 times  -> " + ("identical output" if self.deterministic_on_varied else
-                     "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
-                     "real data from varied data, or it is intermittently nondeterministic; neither can be audited"))
+        lines.append("same varied tape, 3 times  -> " + (
+            "identical output" if self.deterministic_on_varied else
+            "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
+            "real data from varied data, or it is intermittently nondeterministic; neither can be audited"
+            if self.deterministic else
+            "DIFFERENT output, as on the real tape"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
                      "IDENTICAL output: the output does not change when the bars we can vary change under a fresh "
-                     "continuation of the tape, so a clean result would mean nothing; the probes still run, for a proof only"))
+                     "continuation of the tape, so a clean result would mean nothing; " +
+                     ("the probes still run, for a proof only" if self.proof_only else
+                      "and with a gate above failed, the probes do not run")))
         if self.files_written:
             lines.append(f"files written by the strategy during a run: {', '.join(self.files_written)} "
                          f"-- this is what a feature cache looks like")
-        lines.append("hash seed pinned to 0 for every run, so dict and set order cannot differ between them")
+        lines.append("hash seed pinned to 0 for every run, so the order of dicts and sets keyed on strings or "
+                     "numbers cannot differ between runs; a set of objects hashed by identity still follows "
+                     "memory addresses, which do differ, and shows up above as nondeterminism")
         lines.append("new processes refused by the kernel (seccomp), by any route" if self.spawn_lock else
                      "the kernel's spawn lock is not available here: only the audit hook refuses new processes, "
                      "and only by the routes it sees")

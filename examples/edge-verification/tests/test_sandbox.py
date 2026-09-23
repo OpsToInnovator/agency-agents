@@ -808,3 +808,29 @@ def test_a_supplied_work_root_is_left_in_place_on_close(tape, tmp_path):
         sb(tape)
         stage = sb.strategy_dir
     assert root.exists() and not stage.exists()
+
+
+def test_the_precheck_never_promises_what_a_failed_gate_cancelled():
+    """A ninth red team: a nondeterministic strategy the continuation did not move got "the
+    probes still run, for a proof only" printed above UNPROVABLE, and prove() ran no probe; a
+    strategy nondeterministic on both tapes got "while the real tape reproduced 3 times"."""
+    from edgecheck.sandbox import Precheck
+    base = dict(isolation="plain", visible=(), files_written=(), first_boundary=4)
+    flaky = Precheck(deterministic=False, deterministic_on_varied=False, input_dependent=False, **base)
+    text = flaky.describe()
+    assert not flaky.proof_only and "UNPROVABLE" in text
+    assert "for a proof only" not in text and "the probes do not run" in text
+    assert "while the real tape reproduced" not in text and "DIFFERENT output, as on the real tape" in text
+    twofaced = Precheck(deterministic=True, deterministic_on_varied=False, input_dependent=False, **base)
+    assert "while the real tape reproduced 3 times" in twofaced.describe()
+    unmoved = Precheck(deterministic=True, deterministic_on_varied=True, input_dependent=False, **base)
+    assert unmoved.proof_only and "the probes still run, for a proof only" in unmoved.describe()
+
+
+def test_the_hash_seed_line_does_not_promise_set_order_it_cannot_pin(tape, tmp_path):
+    """PYTHONHASHSEED pins the hash of strings and numbers only; a set of plain objects
+    iterates in address order, and addresses differ between runs."""
+    pc = precheck(fixture_sandbox("clean_lagged", tmp_path), tape)
+    line = next(l for l in pc.describe().splitlines() if l.startswith("hash seed"))
+    assert "hashed by identity still follows memory addresses" in line
+    assert "dict and set order cannot differ" not in line
