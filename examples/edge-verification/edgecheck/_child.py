@@ -236,10 +236,31 @@ def main(argv: list[str]) -> int:
                 continue
         return out, over
 
+    def user_tasks(uid: int) -> int:
+        """The tasks (threads) this user runs, as far as this process's /proc shows them."""
+        count = 0
+        try:
+            pids = [p for p in os.listdir("/proc") if p.isdigit()]
+        except OSError:
+            return 0
+        for p in pids:
+            try:
+                with open(f"/proc/{p}/status", encoding="ascii", errors="replace") as fh:
+                    owner = next((ln.split()[1] for ln in fh if ln.startswith("Uid:")), None)
+                if owner is not None and int(owner) == uid:
+                    count += len(os.listdir(f"/proc/{p}/task"))
+            except (OSError, ValueError, IndexError):
+                continue
+        return count
+
     # -- the strategy ------------------------------------------------------------------------------
     import resource
     if rlimits is not None:
         memory, nproc, fsize, nofile = rlimits
+        # The kernel counts the process limit over every task the user runs, not the run's own: a
+        # user with seventy processes elsewhere could not start one thread here (a seventeenth red
+        # team). The run's own allowance is added to what the user already runs.
+        nproc += user_tasks(os.getuid())
         for res, value in ((resource.RLIMIT_AS, memory), (resource.RLIMIT_NPROC, nproc),
                            (resource.RLIMIT_FSIZE, fsize), (resource.RLIMIT_NOFILE, nofile)):
             resource.setrlimit(res, (value, value))

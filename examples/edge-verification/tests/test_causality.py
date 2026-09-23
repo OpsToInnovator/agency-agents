@@ -2296,3 +2296,121 @@ def test_a_tape_with_no_trades_names_no_floor_in_its_proof_line():
     idle = [dataclasses.replace(b, volume=0.0) for b in bars(120, seed=2)]
     r = check_causality(strat("leak_same_bar_close").signals, idle, boundaries=[60], draws=4, seed=1)
     assert r.proven and all("floor size" not in p.evidence.detail for p in r.proven), [p.evidence.detail for p in r.proven]
+
+
+# -- round seventeen ------------------------------------------------------------------------
+
+_MON0 = 1_700_438_400.0          # 2023-11-20 00:00 UTC, a Monday
+
+
+def _walk_bar(r, p, s, tick=None, gap=0.0):
+    o = p * math.exp(r.gauss(0, gap)) if gap else p
+    c = o * math.exp(r.gauss(0, s))
+    h, lo = max(o, c) * (1 + abs(r.gauss(0, s / 2))), min(o, c) * (1 - abs(r.gauss(0, s / 2)))
+    if tick:
+        o, c = round(o / tick) * tick, round(c / tick) * tick
+        h, lo = max(math.ceil(h / tick - 1e-9) * tick, o, c), min(math.floor(lo / tick + 1e-9) * tick, o, c)
+        o, c, h, lo = (round(x, 6) for x in (o, c, h, lo))
+    return o, h, lo, c
+
+
+def _weekday_sessions(days, seed, opens):
+    """Weekday sessions of 78 five-minute bars, opening at ``opens(session)`` seconds of the UTC day."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, out, t, d, p = random.Random(seed), [], _MON0, 0, 50.0
+    while d < days:
+        if int(t // 86400 + 3) % 7 < 5:
+            for j in range(78):
+                o, h, lo, c = _walk_bar(r, p * math.exp(r.gauss(0, 0.01)) if j == 0 and out else p, 0.0015, tick=0.01)
+                u = 1 + 3 * ((j - 39) / 39) ** 2
+                out.append(Bar(t + opens(d) + j * 300, o, h, lo, c, float(max(100, round(2000 * u * math.exp(r.gauss(0, 0.3)) / 100) * 100))))
+                p = c
+            d += 1
+        t += 86400
+    return out
+
+
+def _weekday_daily(n=500, seed=21):
+    """Daily bars on weekdays, a few holidays, and Mondays gapping three times wider."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, out, t, p = random.Random(seed), [], _MON0, 100.0
+    hol, wd_i = set(r.sample(range(550), 20)), 0
+    while len(out) < n:
+        if int(t // 86400 + 3) % 7 < 5:
+            wd_i += 1
+            if wd_i not in hol:
+                mon = bool(out) and t - out[-1].ts > 1.5 * 86400
+                o, h, lo, c = _walk_bar(r, p, 0.012, gap=0.012 if mon else 0.004)
+                out.append(Bar(t, o, h, lo, c, float(round(1e6 * math.exp(r.gauss(0, 0.3) + (0.4 if mon else 0.0))))))
+                p = c
+        t += 86400
+    return out
+
+
+def test_the_rebuilt_tail_uses_each_bar_once_keeps_each_days_hours_and_what_follows_a_weekend():
+    """A seventeenth red team: donors drawn again and again from sixty-odd bars made the tail repeat
+    its own runs; one set of hours merged across a change of clock gave every rebuilt day 90 bars
+    where every real day had 78; a late next bar mid-session was an overnight gap long; Mondays were
+    rebuilt from ordinary days and lost their gaps; and tail wicks set on a coarse tick came out
+    twice the largest the tape made."""
+    import collections
+    import random
+    import statistics
+    from edgecheck.causality import _Donors, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    coupled = _coupled_tape(400)
+    don = _Donors(coupled, 200, random.Random(1))
+    used = [don.at(i, coupled[i - 1].ts) for i in range(200, 400)]
+    assert len(set(used)) >= len(used) - 1, len(used) - len(set(used))
+
+    dst = _weekday_sessions(10, 24, lambda d: (14.5 if d < 5 else 13.5) * 3600)
+    sz = _sizes(dst)
+    long_days = []
+    for k in (120, 300, 500, 700):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(dst, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            per = collections.Counter(math.floor(b.ts / 86400) for b in v)
+            long_days += [c for day, c in per.items() if day != max(per) and c != 78]
+    assert not long_days, long_days[:5]
+
+    daily = _weekday_daily()
+    sz = _sizes(daily)
+    ratios = []
+    for k in (200, 300, 400):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(daily, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            after = [abs(math.log(v[j].open / v[j - 1].close)) for j in range(k + 2, len(v)) if v[j].ts - v[j - 1].ts > 1.5 * 86400]
+            other = [abs(math.log(v[j].open / v[j - 1].close)) for j in range(k + 2, len(v)) if v[j].ts - v[j - 1].ts <= 1.5 * 86400]
+            if after and other:
+                ratios.append(statistics.fmean(after) / statistics.fmean(other))
+    assert statistics.fmean(ratios) > 2.0, ratios
+
+    rng, tape, p, ts = random.Random(3), [], 10.0, 1.7e9
+    for _ in range(200):
+        o = round(p, 2)
+        c = round(o + rng.choice((-2, -1, 0, 1, 2)) * 0.01, 2)
+        tape.append(Bar(ts, o, round(max(o, c) + rng.choice((0, 0, 1)) * 0.01, 2),
+                        round(min(o, c) - rng.choice((0, 0, 1)) * 0.01, 2), c, float(rng.randint(1, 50) * 100)))
+        p, ts = c, ts + 60
+    sz = _sizes(tape)
+    wick = sz.wicks[-1]
+    over = 0
+    for i, plan in enumerate(draw_plans(1, 60, 4)):
+        for b in _perturbed(tape, 60, seed=1 ^ (60 * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)[62:]:
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            over += b.high / top - 1 > wick + 1e-9 or 1 - b.low / bot > wick + 1e-9
+    assert over == 0, over
+
+
+def test_the_tail_clause_says_what_each_tape_got():
+    """The note said later bars kept the tape's times of day on a tape with no calendar, and that the
+    tail's volatility stayed near the tape's own under a caller's sigma ten times it."""
+    flat = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1)
+    assert "their times stepping as those bars' own do" in flat.coverage_note()
+    assert "at the times of day" not in flat.coverage_note()
+    wide = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1, sigma=0.05)
+    assert "or of volatility, which is the given sigma's" in wide.coverage_note()
+    sess = check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100], draws=4, seed=1)
+    assert "at the times of day and on the days it prints" in sess.coverage_note()

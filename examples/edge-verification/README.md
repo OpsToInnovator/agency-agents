@@ -296,6 +296,25 @@ named a floor size nothing used, and an honest 32-worker thread pool could not s
 default 2 GiB address-space limit, glibc reserving a 64 MiB malloc arena per thread (the child now
 runs with `MALLOC_ARENA_MAX=2`).
 
+The seventeenth found what round sixteen's tail opened. Drawn again and again from a window of
+sixty-odd bars, half a rebuilt tail came from donors used twice, and it repeated its own runs as
+no real tape does: donors are now drawn without replacement within a rebuild. One set of times
+of day per weekday, merged across a change of clock, gave every rebuilt day both sessions' bars
+(90 where every real day had 78): each real day now keeps its own open and close, and a day past
+the tape's ends takes the nearest real day of its weekday's. A bar the calendar moved — across a
+weekend, a holiday — took a donor from after an ordinary night, so Mondays lost their gaps: such a
+bar now takes a donor that came after the same kind of gap. The next bar's early and late were
+planned from every step the tape makes, so a late bar in the middle of a session was an
+overnight gap long and ended the rebuilt day at ten in the morning: they are now planned from the
+steps the tape makes after a bar at that time of day. Tail moves and wicks, jittered and set on a
+coarse tick, went up to twice the largest the tape made under a proof line that said "the tape's
+own scale": they are capped at it. The note said the tail kept the tape's times of day on tapes
+with no calendar, and its volatility under a caller's sigma; it now says what each tape got. And
+the sandbox: a strategy that left its process group outlived the wall-clock kill in the namespace
+tier; the process limit counted every process the user ran elsewhere; a thread that could not
+start was blamed on a process limit the kernel does not apply to root; and a strategy's own stderr
+line that started "unshare:" was dropped as the launcher's without a word.
+
 Measured directly — two-sample tests of the rebuilt tail against the real one, over many
 boundaries and seeds — the same round found the tail's own seams. Donor runs started anywhere on
 the tape kept their own clock and level: on a 09:30–15:55 session tape more than half the rebuilt
@@ -469,8 +488,9 @@ Two tiers, and the report says which ran:
 |---|---|---|
 | fresh interpreter per run, `-s -B` | yes | yes |
 | child's environment built from scratch — no inherited keys or proxies | yes | yes |
-| rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
-| wall-clock kill of the whole process group, always, after every run | yes | yes |
+| rlimits: CPU, memory, file size, open files, no core | yes | yes |
+| a process limit over the run's own tasks (added to what the user already runs; the kernel exempts a root auditor from it, and threads are then bounded by the memory limit alone) | yes | yes |
+| wall-clock kill after every run: the whole process group, and in the namespace tier the whole namespace with its launcher (`unshare --kill-child`), so a strategy that leaves its group dies too | yes | group only |
 | audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
 | the **kernel** refuses every new process — `execve`, `fork`, any clone that is not a thread — by any route, `ctypes` included (seccomp, x86-64 and arm64; the report says whether it was on) | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
