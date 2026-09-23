@@ -71,6 +71,7 @@ no CPU consumed is reported as exactly that).
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import math
 import os
@@ -97,6 +98,7 @@ Isolation = Literal["namespace", "plain"]
 CHILD = Path(__file__).with_name("_child.py")
 SYSTEM_ROOTS = ("/usr", "/etc", "/lib", "/lib64", "/bin", "/sbin")   # bound read-only into the new root
 MASKED = ("/etc/arbbot",)                                             # exists on the host; not in the new root
+HARD_TICK = 0.05    # how far under the hard CPU limit wait4's exact figure may read at the kernel's kill
 SHELVES = ("/dev/shm", "/mnt", "/media")   # the new root is a fresh tmpfs mounted here, then pivoted to
 
 
@@ -329,6 +331,9 @@ exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd"
 '''
 
 
+_START_LINE = b'{"kind": "start", "detail": ""}\n'     # the child's first record line, exactly
+
+
 def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threading.Thread:
     """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
     say whether more than that arrived -- exactly ``cap`` is within it. A result or a record larger than the cap is not
@@ -520,7 +525,7 @@ class Sandbox:
         viols: list[bytes] = []
         errs: list[bytes] = []
         drains = [_drain(out_r, outs, self.limits.result_bytes),
-                  _drain(viol_r, viols, self.limits.violation_bytes),
+                  _drain(viol_r, viols, self.limits.violation_bytes + len(_START_LINE)),
                   _drain(err_r, errs, 64 * 1024, tail=True)]
 
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
@@ -556,10 +561,18 @@ class Sandbox:
             d.join(timeout=5)
         cpu_used = (usage.ru_utime + usage.ru_stime) if usage is not None else 0.0
         viol = viols[0] if viols else b""
-        started = any(line.startswith(b'{"kind": "start"') for line in viol.splitlines())
-        viol = b"\n".join(line for line in viol.splitlines() if not line.startswith(b'{"kind": "start"'))
+        # The start line is the sandbox's, written before anything of the strategy's, and read past
+        # the cap on the strategy's record: under a cap smaller than the line, an imported strategy's
+        # own exit was reported as the sandbox stopping before the import (a fifteenth red team).
+        at = viol.find(_START_LINE)
+        started = at >= 0
+        truncated = len(viols) > 1 and viols[1] == b"1"
+        if started:
+            viol = viol[:at] + viol[at + len(_START_LINE):]
+        if len(viol) > self.limits.violation_bytes:
+            viol, truncated = viol[:self.limits.violation_bytes], True
         rec = self._record(run, t0, cpu_used, proc.returncode if proc.returncode is not None else -9,
-                           visible, before, viol, truncated=(len(viols) > 1 and viols[1] == b"1"))
+                           visible, before, viol, truncated=truncated)
         if timed_out:
             raise Timeout(f"strategy exceeded {_secs(self.limits.wall_s)}s wall clock")
         if any(f.startswith("<run directory exceeded") for f in rec.files_written):
@@ -594,14 +607,20 @@ class Sandbox:
                        else f"rc={rc}")
                 raise SandboxError(f"the sandbox stopped before the strategy was imported ({how}); these Limits "
                                    f"may be too tight for the launcher itself. The launcher's stderr ended: {tail}")
-            if sig == signal.SIGKILL and cpu_used >= hard:
-                raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, having ignored "
-                                       f"{self.limits.cpu_words()} ({cpu_used:.1f}s used)")
-            if self.isolation == "namespace" and rc == 1 and cpu_used >= hard:
+            # The kernel kills on CPU it samples in scheduler ticks, which can run a few milliseconds
+            # ahead of the exact figure wait4 returns: under load a fifteenth red team's kill at the
+            # hard limit read 4.997s of 5 and was filed as the strategy's own crash. And SIGXCPU at the
+            # soft limit goes unanswered when the strategy ignores it or holds the interpreter in one
+            # long call, where the handler cannot run -- not only when it ignores it.
+            near = hard - HARD_TICK
+            if sig == signal.SIGKILL and cpu_used >= near:
+                raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, the SIGXCPU of "
+                                       f"{self.limits.cpu_words()} having gone unanswered ({cpu_used:.3f}s used)")
+            if self.isolation == "namespace" and rc == 1 and cpu_used >= near:
                 # `unshare --fork` reports a SIGKILL as status 1, the status a strategy exiting with
                 # 1 also gets: a thirteenth red team's did so at 4.93s of its own CPU, which with the
                 # setup read past the 5s hard limit, and was told it had been killed there.
-                raise ResourceExceeded(f"ran past {self.limits.cpu_words()}, ignoring SIGXCPU, and ended with "
+                raise ResourceExceeded(f"ran past {self.limits.cpu_words()}, its SIGXCPU unanswered, and ended with "
                                        f"no output at {cpu_used:.1f}s of CPU as the process tree counts it: "
                                        f"killed at the hard limit of {hard}s, or exited with status 1 there -- "
                                        f"this tier reports both the same way")
@@ -639,10 +658,19 @@ class Sandbox:
                                     f"{self.limits.cpu_words()}")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
+            # Classified by the exception's type and errno, not by words in its message, which are the
+            # strategy's: a fifteenth red team's ValueError mentioning 'File too large' was reported
+            # as the file-size limit. A MemoryError is the limit's or the strategy's own -- the
+            # sandbox cannot tell which -- and the report says so, with the strategy's message.
             if etype == "MemoryError":
-                raise ResourceExceeded("MemoryError under the sandbox memory limit")
-            if "can't start new thread" in emsg or "File too large" in emsg or "EFBIG" in emsg:
-                raise ResourceExceeded(f"{etype}: {emsg}")
+                raise ResourceExceeded(f"MemoryError under a memory limit of {self.limits.memory_bytes} bytes: "
+                                       f"the limit, or a MemoryError the strategy raised itself -- the sandbox "
+                                       f"cannot tell which. Its message: {emsg}")
+            if err.get("errno") == errno.EFBIG:
+                raise ResourceExceeded(f"{etype}: {emsg} (errno EFBIG, under a file-size limit of "
+                                       f"{self.limits.fsize_bytes} bytes)")
+            if etype == "RuntimeError" and emsg.strip("'\"").startswith("can't start new thread"):
+                raise ResourceExceeded(f"{etype}: {emsg} (under a limit of {self.limits.nproc} processes)")
             raise StrategyError(f"{etype}: {emsg}")
 
         if self.isolation == "namespace":

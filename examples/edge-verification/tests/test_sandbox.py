@@ -1128,3 +1128,31 @@ def test_a_signal_the_strategy_sends_itself_gives_the_same_answer_every_run(tape
     """)
     with pytest.raises(ResourceExceeded):
         Sandbox.from_file(spam, work_root=tmp_path / "s", limits=Limits(cpu_s=1, wall_s=15))(tape)
+
+
+# -- round fifteen --------------------------------------------------------------------------
+
+def test_the_sandboxs_start_and_the_strategys_own_errors_are_told_apart(tape, tmp_path):
+    """Under a record cap smaller than the sandbox's own start line, an imported strategy's exit
+    was reported as the sandbox stopping before the import; a strategy's ValueError mentioning
+    'File too large' was reported as the file-size limit; and its own MemoryError as the memory
+    limit, with its message dropped."""
+    exit3 = strategy_file(tmp_path, "exit15", """
+        import os
+        def signals(bars):
+            os._exit(3)
+    """)
+    with pytest.raises(StrategyError, match="no output"):
+        Sandbox.from_file(exit3, work_root=tmp_path / "v", limits=Limits(violation_bytes=15))(tape)
+    words = strategy_file(tmp_path, "words15", """
+        def signals(bars):
+            raise ValueError("config File too large? no: the tape is short")
+    """)
+    with pytest.raises(StrategyError, match="ValueError"):
+        Sandbox.from_file(words, work_root=tmp_path / "w")(tape)
+    mem = strategy_file(tmp_path, "mem15", """
+        def signals(bars):
+            raise MemoryError("warm-up buffer not filled")
+    """)
+    with pytest.raises(ResourceExceeded, match="cannot tell which.*warm-up buffer not filled"):
+        Sandbox.from_file(mem, work_root=tmp_path / "m")(tape)

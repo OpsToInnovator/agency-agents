@@ -244,6 +244,35 @@ tick (it is now set on one of those two prices); and the probed bar, built on it
 crossed a change of tick on it (each of its prices is now set on its own level's grid, and the
 note's check of the bar as built counts what that undid).
 
+The fifteenth found where a grid by price level alone was not enough, and a genuine same-bar
+reader walked on each. A cent tape stored as float32 (20.05 read back as 20.049999237060547) sat
+on no grid at a double's precision and was rebuilt in arbitrary doubles; the grid is now found on
+the decimals a float32 tape was stored from, and rebuilt values are stored back at float32. A tick
+that changed in time at the same prices — 0.05 before a date, 0.01 after — and a 3-for-2 split
+with the history before it adjusted to four places each put one era's tick under the other's
+bars. The tape is now cut into eras wherever the coarsest grid its bars print on changes for
+good (binary segmentation, a cut kept only where the prices on each side sitting on their side's
+grid would be a one-in-a-million chance otherwise, and placed where the bars each side's grid
+explains are most); each era's grid is found on its own — an adjusted history as a decimal tick
+divided by a split's ratio — and a rebuilt bar is set on the grid of the era its timestamp falls
+in, joined with the grid of its price level. The sparse top of a spread-table tape just over a
+band edge took the finer tick below the edge (a coarser grid at the ends of the tape now needs
+one-in-ten odds, not one-in-a-hundred). The note now says that prices are set on the grid found in
+the tape itself, and that a read of whether a price follows a rule not found there — an
+adjustment by a factor other than a split's, a change of tick within twenty bars — can go
+unseen. The same round found six sentences false and fixed them: a beyond-reach bar measured off
+a grid described in on-grid words, a proof line "at the tape's own scale" whose high its level's
+tick had carried past the largest wick (such a price is now set the other way where that stays
+valid, and named in the proof line where it cannot), the float-spelling caveat blaming prices
+when only volumes were unspelled, a caller's sigma called a floor, a volume floor on a tape where
+no bar traded, and a strategy's own exit under a tiny record cap reported as the sandbox's
+failure. And two misfilings: a kill at the hard CPU limit that wait4 read a few milliseconds
+short of it under load was filed as the strategy's crash (a tick's margin is allowed now), and a
+strategy's own `MemoryError`, or a `ValueError` mentioning "File too large", was reported as the
+limit (a file-size or thread limit is now read from the exception's type and errno, and a
+`MemoryError` is reported as the limit's or the strategy's own, with its message, since the
+sandbox cannot tell which).
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
@@ -251,7 +280,10 @@ tape, where every tie the tape prints is owed against every level and each needs
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
 one-cent tick they are about twelve a bar, and a third of its bars still come up short: at two
 cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
-did not print, which is not counted. The report counts every such bar. The same round found that zero volume had
+did not print, which is not counted. The report counts every such bar. A tick that is coarse
+for its price level costs the same way: a stock just above a dollar on cents came up short at
+60 of 196 bars, a three-band spread table at 51 of 296, a tick that changed from 0.05 to 0.01
+at 24 of 296. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
 where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
