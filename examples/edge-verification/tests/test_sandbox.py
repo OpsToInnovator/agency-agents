@@ -399,6 +399,172 @@ def test_starting_a_process_is_a_contract_violation(tape, tmp_path):
         Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
 
 
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+@pytest.mark.parametrize("how,named", [
+    ("mp", "fork_exec"),
+    ("forkpty", "os.forkpty"),
+])
+def test_starting_a_process_by_any_stdlib_route_is_refused_and_named(how, named, iso, tape, tmp_path):
+    """A seventh red team: multiprocessing's spawn context starts a process through
+    _posixsubprocess.fork_exec, which raises no audit event, and os.forkpty raised one the
+    hook did not list. Both started a process with an empty record; in the plain tier a
+    forkpty child held the run open for its own lifetime."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    body = {"mp": """
+        import multiprocessing as mp
+        def _noop():
+            pass
+        def signals(bars):
+            try:
+                p = mp.get_context("spawn").Process(target=_noop)
+                p.start()
+                p.join()
+            except Exception:
+                pass
+            return [0] * len(bars)
+    """, "forkpty": """
+        import os, time
+        def signals(bars):
+            try:
+                pid, fd = os.forkpty()
+                if pid == 0:
+                    time.sleep(8)
+                    os._exit(0)
+            except Exception:
+                pass
+            return [0] * len(bars)
+    """}[how]
+    p = strategy_file(tmp_path, f"spawn_{how}", body)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    with pytest.raises(ContractViolation, match=named):
+        sb(tape)
+    assert sb.records[-1].duration_s < 6, "a spawned child held the run open"
+
+
+def test_from_file_leaves_no_copy_of_the_source_behind(tape, tmp_path):
+    """from_file copied the strategy into a temp directory of its own, then staged it again;
+    close() removed the stage and never the first copy, so every audit left the customer's
+    source in /tmp. The first copy is gone as soon as the stage exists."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir())
+    before = set(tmp.glob("edgecheck-strategy-*"))
+    sb = fixture_sandbox("clean_lagged", tmp_path)
+    assert set(tmp.glob("edgecheck-strategy-*")) == before
+    assert sb(tape) == importlib.import_module("edgecheck.fixtures.strategies.clean_lagged").signals(tape)
+    sb.close()
+    assert set(tmp.glob("edgecheck-strategy-*")) == before
+
+
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+@pytest.mark.parametrize("how", ["reimport", "ctypes"])
+def test_the_kernel_refuses_a_new_process_by_any_route(how, iso, tape, tmp_path):
+    """An eighth red team popped _posixsubprocess from sys.modules, imported a fresh copy with
+    the real fork_exec, and started a process with nothing recorded: no audit event fires for
+    any step of it. A seccomp filter installed before the strategy is imported now makes the
+    kernel refuse every new process -- by that route, and by ctypes, which was outside the
+    model until now."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    body = {"reimport": """
+        import importlib, sys, multiprocessing.util
+        def signals(bars):
+            sys.modules.pop("_posixsubprocess", None)
+            importlib.import_module("_posixsubprocess")
+            try:
+                multiprocessing.util.spawnv_passfds(b"/bin/sh", [b"/bin/sh", b"-c", b"echo ran > MARKER"], ())
+                started = True
+            except OSError:
+                started = False
+            return [1 if started else -1] * len(bars)
+    """, "ctypes": """
+        import ctypes, os
+        def signals(bars):
+            libc = ctypes.CDLL(None, use_errno=True)
+            pid = libc.fork()
+            if pid == 0:
+                os._exit(0)
+            return [1 if pid > 0 else -1] * len(bars)
+    """}[how]
+    p = strategy_file(tmp_path, f"spawn_{how}", body)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    assert sb(tape) == [-1] * len(tape), "a process was started"
+    assert sb.records[-1].spawn_lock
+    assert "MARKER" not in sb.records[-1].files_written
+
+
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+def test_the_spawn_lock_leaves_threads_alone(iso, tape, tmp_path):
+    """Threads are clones too. The filter lets a clone with CLONE_THREAD through, and answers
+    clone3 with ENOSYS so libc falls back to clone -- or every threaded strategy would die."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    p = strategy_file(tmp_path, "threaded", """
+        import threading
+        def signals(bars):
+            out = [0] * len(bars)
+            def work(lo, hi):
+                for i in range(max(lo, 1), hi):
+                    out[i] = 1 if bars[i - 1].close > bars[i - 1].open else -1
+            ts = [threading.Thread(target=work, args=(j * 40, (j + 1) * 40)) for j in range(3)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+            return out
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    expected = [0] + [1 if b.close > b.open else -1 for b in tape[:-1]]
+    assert sb(tape) == expected and sb.records[-1].spawn_lock
+
+
+def test_a_proof_is_not_withheld_because_the_gate_could_not_move_the_strategy(tmp_path):
+    """The gate replaced bars from 4 on with a fresh continuation and, when the output did not
+    move, blocked the probes with "nothing can be proved about it" -- about a strategy the
+    probes convicted. A strategy the continuation does not move is now probed for a proof
+    only: a proof is reported, a clean result withheld."""
+    from edgecheck.causality import continuation
+    from edgecheck.sandbox import GATE_BOUNDARY
+    tape = bars(120, gap_prob=0.3, late_prob=0.1)
+    varied = continuation(tape, GATE_BOUNDARY, seed=7)
+    up = lambda b: b.close > b.open
+    at = next(i for i in range(60, 110) if up(varied[i]) == up(tape[i]))
+    p = strategy_file(tmp_path, "one_bar", f"""
+        def signals(bars):
+            out = [0] * len(bars)
+            if len(bars) > {at}:
+                out[{at}] = 1 if bars[{at}].close > bars[{at}].open else -1
+            return out
+    """)
+    pc, report = prove(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape, probes="every_bar", seed=1)
+    assert not pc.input_dependent and pc.proof_only and not pc.provable
+    assert "PROOF ONLY" in pc.describe() and "nothing can be proved" not in pc.describe()
+    assert report is not None and report.leaks and report.worst_horizon == 0
+
+    q = strategy_file(tmp_path, "constant", """
+        def signals(bars):
+            return [1] * len(bars)
+    """)
+    pc, report = prove(Sandbox.from_file(q, work_root=tmp_path / "runs2"), tape, probes="every_bar", seed=1)
+    assert pc.proof_only and report is None
+
+
+def test_the_error_that_ended_a_run_survives_a_long_log(tape, tmp_path):
+    """A run that dies without writing a result is reported from the tail of its stderr.
+    Stderr kept its FIRST 64 KiB, so a long log pushed the real final error out of the
+    report. It keeps the last 64 KiB now."""
+    p = strategy_file(tmp_path, "chatty", """
+        import os, sys
+        def signals(bars):
+            for i in range(20000):
+                print(f"progress line {i:06d} " + "x" * 40, file=sys.stderr)
+            print("FATAL: the real cause is here", file=sys.stderr)
+            sys.stderr.flush()
+            os._exit(1)
+    """)
+    with pytest.raises(StrategyError, match="the real cause is here") as ei:
+        Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain")(tape)
+    assert "the strategy's own stderr ended" in str(ei.value)
+
+
 def test_a_multiline_exception_cannot_plant_a_reassuring_last_line(tape, tmp_path):
     p = strategy_file(tmp_path, "liar", """
         def signals(bars):
@@ -642,3 +808,165 @@ def test_a_supplied_work_root_is_left_in_place_on_close(tape, tmp_path):
         sb(tape)
         stage = sb.strategy_dir
     assert root.exists() and not stage.exists()
+
+
+def test_the_precheck_never_promises_what_a_failed_gate_cancelled():
+    """A ninth red team: a nondeterministic strategy the continuation did not move got "the
+    probes still run, for a proof only" printed above UNPROVABLE, and prove() ran no probe; a
+    strategy nondeterministic on both tapes got "while the real tape reproduced 3 times"."""
+    from edgecheck.sandbox import Precheck
+    base = dict(isolation="plain", visible=(), files_written=(), first_boundary=4)
+    flaky = Precheck(deterministic=False, deterministic_on_varied=False, input_dependent=False, **base)
+    text = flaky.describe()
+    assert not flaky.proof_only and "UNPROVABLE" in text
+    assert "for a proof only" not in text and "the probes do not run" in text
+    assert "while the real tape reproduced" not in text and "DIFFERENT output, as on the real tape" in text
+    twofaced = Precheck(deterministic=True, deterministic_on_varied=False, input_dependent=False, **base)
+    assert "while the real tape reproduced 3 times" in twofaced.describe()
+    unmoved = Precheck(deterministic=True, deterministic_on_varied=True, input_dependent=False, **base)
+    assert unmoved.proof_only and "the probes still run, for a proof only" in unmoved.describe()
+
+
+def test_the_hash_seed_line_does_not_promise_set_order_it_cannot_pin(tape, tmp_path):
+    """PYTHONHASHSEED pins the hash of strings and numbers only; a set of plain objects
+    iterates in address order, and addresses differ between runs."""
+    pc = precheck(fixture_sandbox("clean_lagged", tmp_path), tape)
+    line = next(l for l in pc.describe().splitlines() if l.startswith("hash seed"))
+    assert "hashed by identity still follows memory addresses" in line
+    assert "dict and set order cannot differ" not in line
+
+
+def test_the_limits_are_reported_as_they_were_set(tape, tmp_path):
+    """A 1.5s wall clock was reported as 2s and a 0.4s one as 0s; a result of exactly the cap
+    was refused as larger than it; a strategy that raised SIGXCPU itself after half its CPU
+    budget was told it had hit the limit."""
+    nap = strategy_file(tmp_path, "nap", """
+        import time
+        def signals(bars):
+            time.sleep(5)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(Timeout, match=r"exceeded 1\.5s wall clock"):
+        Sandbox.from_file(nap, work_root=tmp_path / "r1", limits=Limits(wall_s=1.5))(tape)
+
+    const = strategy_file(tmp_path, "const", """
+        def signals(bars):
+            return [0] * len(bars)
+    """)
+    probe = Sandbox.from_file(const, work_root=tmp_path / "r2")
+    probe(tape)
+    import json
+    size = len(json.dumps({"ok": True, "signals": [0] * len(tape), "files_written": [],
+                           "run_dir_over_limit": False, "spawn_lock": probe.records[-1].spawn_lock}).encode())
+    assert Sandbox.from_file(const, work_root=tmp_path / "r3", limits=Limits(result_bytes=size))(tape) == [0] * len(tape)
+    with pytest.raises(BadOutput, match="larger than"):
+        Sandbox.from_file(const, work_root=tmp_path / "r4", limits=Limits(result_bytes=size - 1))(tape)
+
+    forger = strategy_file(tmp_path, "xcpu", """
+        import os, signal, time
+        def signals(bars):
+            t = time.process_time()
+            while time.process_time() - t < 1.2:
+                pass
+            os.kill(os.getpid(), signal.SIGXCPU)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="claimed the CPU limit"):
+        Sandbox.from_file(forger, work_root=tmp_path / "r5", limits=Limits(cpu_s=2, wall_s=10))(tape)
+
+
+def test_a_self_raised_cpu_signal_short_of_the_limit_is_not_the_limit(tape, tmp_path):
+    """The kernel sends SIGXCPU only once the limit is reached. A strategy that raised it
+    itself at 1.8s of a 2s limit was told it had hit the limit."""
+    forger = strategy_file(tmp_path, "xcpu18", """
+        import os, signal, time
+        def signals(bars):
+            t = time.process_time()
+            while time.process_time() - t < 1.7:
+                pass
+            os.kill(os.getpid(), signal.SIGXCPU)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="claimed the CPU limit at"):
+        Sandbox.from_file(forger, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=10))(tape)
+
+
+def test_limits_are_validated_and_a_fractional_cpu_limit_works(tape, tmp_path):
+    """A fractional cpu_s reached setrlimit in the child's preexec hook, failed there as a bare
+    SubprocessError and leaked six pipe ends per call."""
+    with pytest.raises(ValueError):
+        Limits(cpu_s=0)
+    with pytest.raises(ValueError):
+        Limits(wall_s=-1)
+    before = len(os.listdir("/proc/self/fd"))
+    sb = fixture_sandbox("clean_lagged", tmp_path, limits=Limits(cpu_s=1.5))
+    for _ in range(3):
+        sb(tape)
+    assert len(os.listdir("/proc/self/fd")) <= before + 1
+
+
+# -- round twelve ---------------------------------------------------------------------------
+
+def test_limits_on_counts_and_sizes_are_whole_numbers():
+    """``violation_bytes=1e6`` killed the drain thread on a float slice, and the network record it
+    carried went with it: a strategy that dialled out came back with no violation on record. A
+    float memory or file limit failed in the child's preexec hook; a float entry count failed in
+    the child's own argument parsing. Each is refused where it is set."""
+    for name, value in (("violation_bytes", 1e6), ("memory_bytes", 2.5e9), ("nofile", 256.0),
+                        ("run_dir_entries", 20000.0), ("run_dir_bytes", 2.5e8), ("result_bytes", 1e6)):
+        with pytest.raises(ValueError, match=f"Limits.{name} must be a positive whole number"):
+            Limits(**{name: value})
+    for name, value in (("wall_s", float("inf")), ("cpu_s", float("nan"))):
+        with pytest.raises(ValueError, match=f"Limits.{name}"):
+            Limits(**{name: value})
+    assert Limits(cpu_s=1.5, wall_s=2.5).cpu_enforced == 2
+
+
+def test_a_drain_hands_over_what_it_read_whatever_its_cap():
+    from edgecheck.sandbox import _drain
+    r, w = os.pipe()
+    os.write(w, b"x" * 100)
+    os.close(w)
+    sink: list[bytes] = []
+    _drain(r, sink, 10.0).join(timeout=5)
+    assert sink == [b"x" * 10, b"1"]
+
+
+def _spin_to(seconds: float, then: str) -> str:
+    return f"""
+        import ctypes, os, resource, signal
+        def signals(bars):
+            x = 0
+            while True:
+                for _ in range(20000):
+                    x += 1
+                ru = resource.getrusage(resource.RUSAGE_SELF)
+                if ru.ru_utime + ru.ru_stime >= {seconds}:
+                    {then}
+    """
+
+
+def test_a_cpu_claim_is_checked_against_the_limit_the_kernel_enforces(tape, tmp_path):
+    """The kernel counts CPU in whole seconds, so a 1.5s limit fires at 2s, and the parent's count
+    includes the namespace setup. A strategy that raised SIGXCPU itself at 1.6s of a 1.5s limit,
+    or at 1.95s of 2s where the setup carried the parent's count past 2, was reported as having
+    hit the limit (a twelfth red team). The strategy's own CPU, reported with its claim, decides."""
+    for cpu_s, at in ((1.5, 1.6), (2, 1.95)):
+        p = strategy_file(tmp_path, f"xcpu{int(at * 100)}", _spin_to(at, "os.kill(os.getpid(), signal.SIGXCPU)"))
+        with pytest.raises(StrategyError, match="claimed the CPU limit at"):
+            Sandbox.from_file(p, work_root=tmp_path / f"r{int(at * 100)}", limits=Limits(cpu_s=cpu_s, wall_s=15))(tape)
+    spin = strategy_file(tmp_path, "spin15", """
+        def signals(bars):
+            while True:
+                pass
+    """)
+    with pytest.raises(ResourceExceeded, match="enforces in whole seconds, at 2s"):
+        Sandbox.from_file(spin, work_root=tmp_path / "rs", limits=Limits(cpu_s=1.5, wall_s=15))(tape)
+
+
+def test_a_crash_near_the_cpu_limit_is_a_crash(tape, tmp_path):
+    """A strategy that segfaulted at 1.95s of a 2s limit was reported as having used the limit:
+    no output, and the parent's count -- setup included -- read past it. What killed it decides."""
+    p = strategy_file(tmp_path, "segv", _spin_to(1.95, "ctypes.string_at(0)"))
+    with pytest.raises(StrategyError, match="killed by SIGSEGV"):
+        Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=15))(tape)

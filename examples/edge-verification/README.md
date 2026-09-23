@@ -7,11 +7,11 @@ change data it could not have seen. That distinction is the entire point. A patt
 is a conversation; a changed output is a fact.
 
 ```
-PROVEN: this strategy reads its own bar: something of the bar that had not happened at its
-open -- its close, high, low or volume; the evidence does not say which.
+PROVEN: this strategy reads something from its own bar on that had not happened at its
+open -- its own close, high, low or volume, or a later bar; the evidence does not say which.
 
-  signals[45] = 1 normally, -1 once bar 45 onward was varied within a percent of its
-  true value (perturbation probe, horizon 0)
+  signals[45] = 1 normally, -1 once bar 45 onward was varied at the tape's own scale
+  (perturbation probe, horizon 0)
 ```
 
 ## Why this needs the code
@@ -139,17 +139,96 @@ move was forced against the bar's own open, so the close never crossed the previ
 `volume > previous volume` walked at a fifth of bars for the same reason, and a breakout read
 (`high > previous high`, `low < previous low`) at a fifth for the coin toss of whether a
 donor's wick reached the previous extreme. Everything a strategy can compare an unknown
-field against is the bar's own open and the previous bar's fields, so the close is now pushed
-past all of them at once — above the open, the previous close and the previous high, or
-below the open, the previous close and the previous low — by a fresh move of the tape's own
-size measured from that level; the volume to the far side of the previous bar's by a ratio
-drawn from the tape's own bar-to-bar volume ratios; and the range to a higher low on the up
-draws and a lower high on the down draws. Where the open already sits beyond the previous
-extreme, that side is decided by a value the strategy may read, and nothing is claimed.
-Every-bar mode uses four draws by default. The report says how many of the eight sign
-combinations were tried at the bars that did not diverge, that probing of a bar stopped at
-its first divergence, and states the residual: a read of a magnitude rather than a
-direction, or against a level further back than the previous bar, can still go unseen. A
+field against is the bar's own open and the previous bar's open, close, high and low, so on
+the first two draws the close is pushed past as many of them as it can reach, one way and
+then the other, the volume to both sides of the previous bar's, and the range to a higher
+high and higher low, then a lower high and lower low.
+
+*How far* it may be pushed is what a seventh red team found. Round six measured the push
+from the far level, so at a bar that gapped 3% the probe's move was six times the largest
+the tape had made — and a strategy that read its own close on real-sized moves and followed
+the gap on huge ones waited every probe out, where round five's module had convicted it.
+Now every size forced into the probed bar is drawn from the tape's own: its move from the
+tape's moves, its wicks from its wicks, its volume ratio from its bar-to-bar ratios, each
+jittered off its exact value (a verbatim copy is a duplicate no real tape prints) and never
+past the largest; where no size lands in the interval a target needs, a point inside it
+short of the largest is used, and a tape that has made no size of some kind — flat prices,
+or a volume that never changes — gets a floor for it, which the report names.
+A level at least as far from the open as the largest move
+the tape has made is left alone, and the report counts the bars where that happened. The
+same round showed that all-up-then-all-down leaves every read of how two relations
+*combine* untouched — an inside bar, a failed breakout, a close between the open and the
+previous high — so the next two draws put the close in a band between the levels chosen at
+random, and the range once inside and once outside the previous bar's. And the range pin
+had landed exactly *on* the previous extreme, so `low <= previous low` never flipped; every
+target is now met strictly. Where the open already sits beyond the previous extreme, that
+side is decided by a value the strategy may read, and nothing is claimed.
+
+*What the note claims is checked, not planned.* An eighth red team showed round seven's
+range targets quietly overriding the planned wick skew — at a bar whose open sat just above
+the previous low, a higher low, a higher high and a longer lower wick cannot all hold — so
+"move, wick and volume each both ways" was false there, and a one-bar skew read walked in a
+quarter of audits. Each probed bar is now checked, as built, against every relation the note
+lists for it (limited to what the open leaves open and the tape's own sizes can reach); any
+the planned draws missed gets a repair draw of its own with nothing else forced, and a bar
+where even that fails is counted in the report.
+
+*The relations are enumerated, not collected.* Ten red teams found them one at a time — the
+close against the previous close, the volume against the previous volume, the high against
+the previous high, then a tenth found three more: the low against the previous close (a gap
+fill), a tie at an extreme the bar opened on, and the next bar's gap and lateness read at a
+single bar. They are all members of one set, and the set is now what is owed: the close
+both ways past its open; the close, the high and the low each both ways past each of the
+previous bar's open, close, high and low, and the high and the low level with one the bar
+opened on where the tape prints a bar with no wick; the volume both ways past the previous
+bar's, and to zero and away from it; the next bar's open both ways past this bar's open and
+close and each of the previous bar's levels, and the next bar early, on time and late
+against the tape's commonest step — each where the open leaves it open and the tape's own
+sizes can reach, each checked on the bar as built. An eleventh red team added the last of
+it: *ties*. On a tape printed on a tick, a close unchanged from the previous close, a doji,
+a high equal to the previous high, a volume repeated in lots, walked at every seed, because
+no draw ever landed exactly on a level. Each kind of tie the tape prints is now owed and
+set exactly; the probed bar and everything after it are rebuilt on the tape's own tick and
+lot (a price off the grid was itself a tell); and a repair draw pursues several targets at
+once where they force different parts of the bar. Nothing is ever accused on a tape it
+could not deliver: no clean strategy was convicted in any sweep.
+
+A twelfth red team turned the ties against the audit. Snapping to the tick put a far close
+exactly *on* the level it was meant to pass, and merged repairs carried a doji, a high tie and a
+low tie at once, so probed bars carried ties at three times the rate real bars did. An evader
+that answered as on real data whenever the bar showed a tie, and read its own close otherwise,
+walked at six seeds of ten. So a draw is now credited only with what it delivered on a bar
+carrying no tie the real bar did not print, other than the one being set; a draw that sets a
+tie merges with nothing; untargeted ties are stepped off; and a close is placed on the grid
+strictly inside its band, never on the level it passes. The same round added the last members
+of the set — the high or the low level with the bar's *own* open, and the next open set exactly
+on a level by a gap of the tape's own size from a close near it, where the tape always gaps —
+and found the grid itself misread: a tape stored as whole ticks times 0.01 prints
+100.19000000000001 and was taken for no grid, and a mid-price tape on x.xx5 was snapped to whole
+cents. The grid is now found with a tolerance and at its own offset, and every point set on it
+is the tape's own float for that point.
+
+The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
+four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
+is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
+tape, where every tie the tape prints is owed against every level and each needs a draw of its
+own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
+one-cent tick they are about twelve a bar, and a third of its bars still come up short: at two
+cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
+did not print, which is not counted. The report counts every such bar. The same round found that zero volume had
+never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
+this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
+where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
+
+Every-bar mode uses four draws by default. The report says what was pushed where at the
+bars that did not diverge, that probing of a bar stopped at its first divergence, how many
+bars had a level out of reach, and states the residual: a read of a magnitude rather than a
+direction, against a level further back than the previous bar, or of how two of these
+relations combine at a single bar, is tried only on the draws that happen to produce it and
+can go unseen; so is a read, at a bar that itself printed a tie, that changes with whether
+that tie is there. Made at every bar, as real code makes it, each such combination was
+convicted in every audit measured. With one draw the report says each bar was pushed one way only;
+with none, that nothing a bar had not yet printed was varied. A
 fourth red team's one-bar wick read was being missed in one audit out of eight while the
 report said "every bar was probed"; the wick was a random donor's, and only the move had
 been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than
@@ -268,11 +347,15 @@ watching the output. A strategy that brought its own prices is unmoved by anythi
 - **same tape twice → identical output**, else nondeterministic and no divergence could be
   attributed to the data;
 - **the bars from the first probe boundary on replaced with a fresh continuation → different
-  output**, else the output does not change when the bars we can vary change, and nothing can
-  be proved about it. (The first version tested a wholly different tape, which a strategy
-  depending on bar 0 alone — a bar no probe ever moves — passed.)
+  output**, else the output does not change when the bars we can vary change, and a clean
+  result would mean nothing. (The first version tested a wholly different tape, which a
+  strategy depending on bar 0 alone — a bar no probe ever moves — passed.)
 
-Either failing is reported `UNPROVABLE`, in those words.
+A nondeterministic strategy is reported `UNPROVABLE`, in those words. One the continuation
+could not move is still probed — `PROOF ONLY` — because the continuation varies what the
+probes vary without forcing the relations they force: an eighth red team's same-bar volume
+read was blocked here as unprovable while the probes convicted it. A proof is reported; a
+clean result on such a strategy is withheld.
 
 Two tiers, and the report says which ran:
 
@@ -282,7 +365,8 @@ Two tiers, and the report says which ran:
 | child's environment built from scratch — no inherited keys or proxies | yes | yes |
 | rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
 | wall-clock kill of the whole process group, always, after every run | yes | yes |
-| audit hook that **records** every socket use and spawn, then refuses it | yes | yes |
+| audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
+| the **kernel** refuses every new process — `execve`, `fork`, any clone that is not a thread — by any route, `ctypes` included (seccomp, x86-64 and arm64; the report says whether it was on) | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
@@ -329,7 +413,7 @@ Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What six red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What seven red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -367,12 +451,71 @@ is now pushed to both sides of the previous bar's level), a horizon-0 proof desc
 "read the close" whatever was read (the report names the four fields it might have been and
 says the evidence does not distinguish them), and a coverage note claiming four sign
 combinations at every bar while probing of a bar stops at its first divergence (it says so).
+In the seventh — two of the sixth's fixes had opened holes — a close forced past a far level
+by a move six times the tape's largest, which a strategy recognised and waited out (every
+forced size is now one the tape has printed), every draw all-up or all-down so an inside
+bar, a failed breakout or a close between two levels was never flipped (random bands; inside
+and outside ranges), a range pin landing exactly on the previous extreme (strict), a
+horizon-0 headline naming the bar's own fields for a strategy that read only the next bar's
+timestamp ("or a later bar"), two-draw text printed for one draw and for none, spawns through
+`multiprocessing` and `os.forkpty` that raised no audited event (refused and recorded),
+`from_file`'s first copy of the source left in `/tmp`, and a long stderr log pushing the
+error that ended a run out of the report (the tail is kept). In the eighth — two holes that
+the seventh's fixes had opened, and two older ones — range targets overriding the planned
+wick skew, so "each both ways" and, at eight draws, "every sign combination" were false at
+some bars (what each bar delivered is now checked and repaired), zero volume never pushed
+(zero is a level), a gate that blocked a strategy the probes convicted (proof only), and a
+fresh import of `_posixsubprocess` restoring the real `fork_exec` with no audit event for
+any step of it (the kernel now refuses the process itself). The ninth got nothing of either
+severity through — no genuine future read unproven without a caveat that covers it, no clean
+strategy convicted, the spawn lock held against every route tried — and found only sentences
+that were literally false: a precheck line promising probes that a failed determinism gate
+had cancelled, another saying the real tape reproduced when it had not, a hash-seed line
+ignoring sets of objects hashed by identity, "varied within the tape's own range" on every
+proof line, and smaller ones in the note. Each now says what happened. The tenth found three
+single relations nothing pushed — the next bar's gap and lateness at one bar, a gap fill, a
+tie at an extreme the bar opened on — which is what led to enumerating the whole set, and
+seven more sentences: reach measured against "the largest move the tape has made" on a tape
+that made none, a level counted as out of reach and crossed anyway (two thresholds, now
+one), "at the tape's own scale" under an explicit sigma or a floor, a fractional wall-clock
+limit rounded, a result of exactly the cap refused, a self-raised CPU signal at half the
+budget accepted as the limit, and a coverage of 0.1% printed as 0%. The eleventh found the
+rest of the set — ties, the next open against the previous bar, an early clock — and more:
+a crash on a tape with a zero price (guarded), the wick skew measured one way where a
+strategy measures it another (both now), a quiet tape rebuilt at a floor seven times its
+largest move (the floor is only for a tape with no moves), a given sigma called a floor, a
+self-raised CPU signal at 1.8s of 2s taken as the limit (only at the limit now), a
+fractional CPU limit that crashed the launch and leaked pipes (validated, cleaned up), and
+prices rebuilt off the tape's tick (on it now). The twelfth, besides the tie evader above,
+found crashes on honest tapes — a penny stock whose low snapped to zero, a bad print whose
+lower wick passed 100%, whole-contract volumes snapped to zero on a tape that never prints one,
+an infinite price (refused by name now, as is a NaN) — and sentences: a floor push nudged a
+tick and crossing levels the note called out of its reach, a one-tick push a hundred times the
+tape's largest move called "at the tape's own scale" (the proof line says what it was now), a
+tie list naming a doji on a tape where none was built, a volume floor described in words the
+lot rounding made false, and in the sandbox a forged CPU claim at 1.95s of 2s, a segfault at
+1.95s, and a forged claim at 1.6s of a 1.5s limit, all reported as the limit — the kernel
+enforces whole seconds and the parent's count includes the namespace setup. A float
+`violation_bytes` killed the drain thread and dropped the network record with it; counts and
+sizes must now be whole numbers.
 
-Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
-killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
-on exit codes: the child catches `SIGXCPU` and writes down why it is dying; the parent
-measures the run's real CPU through `getrusage`. And the child must not coerce output —
+Two things measured, not assumed. `unshare --fork` passes on the signal that killed its
+child by killing itself with it — except `SIGKILL`, which it reports as rc=1 — so a run that
+died without output is classified by that signal, and only a kill at the hard CPU limit or a
+`SIGXCPU` at the soft one is called the limit. The child catches `SIGXCPU` and writes down
+why it is dying, with its own CPU; the parent believes the claim only where that CPU, and its
+own count through `getrusage`, reach the limit the kernel enforces, in whole seconds. And the child must not coerce output —
 `int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
+
+**What the record cannot name.** The audit hook names every spawn it sees; the kernel refuses
+the ones it does not — a freshly imported `_posixsubprocess`, a `ctypes` call to `fork` — and
+such an attempt fails with `EPERM` inside the strategy without appearing in the record. No
+process is started either way.
+
+**What is not cleaned up.** An auditor that is killed or terminated mid-run — `SIGKILL`, or
+the `SIGTERM` a `timeout` sends — runs no finalizer, so its work root stays behind with the
+staged source and the tape; the library installs no signal handlers of its own. A write to
+`/dev/random` inside the namespace mixes into the host's entropy pool; it cannot lower it.
 
 **A limit no probe can remove.** If the customer supplied the tape, a strategy can recognise
 it by hash and leak only on that exact data. Black-box probing cannot catch that. The audit

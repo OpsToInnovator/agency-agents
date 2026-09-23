@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import resource
 import shutil
@@ -120,6 +121,32 @@ class Limits:
     # tmpfs of this size: the strategy gets ENOSPC, the host gets nothing.
     run_dir_bytes: int = 256 * 1024 ** 2
 
+    def __post_init__(self) -> None:
+        # Every limit is a positive amount. A fractional cpu_s used to reach setrlimit in the
+        # child's preexec hook, fail there as a bare SubprocessError, and leak six pipe ends.
+        # The two times may be fractional; every count and size is a whole number. A twelfth
+        # red team passed violation_bytes=1e6: the drain thread died on a float slice and the
+        # network record it carried was dropped -- a strategy that dialled out came back clean.
+        for name in ("cpu_s", "wall_s"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0 < value < math.inf):
+                raise ValueError(f"Limits.{name} must be a positive, finite number of seconds, not {value!r}")
+        for name in ("memory_bytes", "nproc", "fsize_bytes", "nofile", "result_bytes", "violation_bytes",
+                     "run_dir_entries", "run_dir_depth", "run_dir_bytes"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or not value > 0:
+                raise ValueError(f"Limits.{name} must be a positive whole number, not {value!r}")
+
+    @property
+    def cpu_enforced(self) -> int:
+        """The CPU limit the kernel actually enforces: it counts whole seconds."""
+        return math.ceil(self.cpu_s)
+
+    def cpu_words(self) -> str:
+        return (f"the {self.cpu_s:g}s CPU limit" if self.cpu_s == self.cpu_enforced else
+                f"the CPU limit of {self.cpu_s:g}s, which the kernel enforces in whole seconds, at "
+                f"{self.cpu_enforced}s")
+
 
 class SandboxError(Exception):
     """Base for everything the sandbox can refuse."""
@@ -160,6 +187,7 @@ class RunRecord:
     visible: tuple[str, ...]
     files_written: tuple[str, ...]
     violations: tuple[str, ...]
+    spawn_lock: bool = False      # the kernel refused new processes (seccomp), per the child
 
 
 _ISOLATION_CACHE: dict[str, Isolation] = {}
@@ -213,7 +241,8 @@ def _rlimit_installer(limits: Limits):
     def install() -> None:
         # Soft limit first: SIGXCPU, which the child catches to record the cause. Hard
         # limit a few seconds on: SIGKILL, for a strategy that ignores the first.
-        resource.setrlimit(resource.RLIMIT_CPU, (limits.cpu_s, limits.cpu_s + 3))
+        cpu = limits.cpu_enforced                     # the kernel counts whole seconds
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 3))
         resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
         resource.setrlimit(resource.RLIMIT_NPROC, (limits.nproc, limits.nproc))
         resource.setrlimit(resource.RLIMIT_FSIZE, (limits.fsize_bytes, limits.fsize_bytes))
@@ -269,31 +298,40 @@ exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd"
 '''
 
 
-def _drain(fd: int, sink: list[bytes], cap: int) -> threading.Thread:
+def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threading.Thread:
     """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
-    say whether more arrived. A result or a record larger than the cap is not evidence of
-    anything but a strategy trying to exhaust the auditor."""
+    say whether more than that arrived -- exactly ``cap`` is within it. A result or a record larger than the cap is not
+    evidence of anything but a strategy trying to exhaust the auditor. ``tail`` keeps the
+    LAST ``cap`` bytes instead of the first: for stderr, where the error that ended the run
+    is at the end, and a long log before it had pushed it out of the report."""
+    cap = int(cap)
+
     def go() -> None:
-        chunks: list[bytes] = []
-        kept = 0
-        overflow = False
+        buf = bytearray()
+        total = 0
         try:
             while True:
                 b = os.read(fd, 65536)
                 if not b:
                     break
-                if kept < cap:
-                    chunks.append(b[:cap - kept])
-                    kept += len(chunks[-1])
-                if kept >= cap and len(b) > 0 and (kept >= cap):
-                    overflow = overflow or (kept >= cap and (len(b"".join(chunks)) < kept + len(b) - (cap - kept)))
+                total += len(b)
+                if tail:
+                    buf += b
+                    if len(buf) > cap:
+                        del buf[:len(buf) - cap]
+                elif len(buf) < cap:
+                    buf += b[:cap - len(buf)]
         except OSError:
             pass
         finally:
-            os.close(fd)
-        data = b"".join(chunks)
-        sink.append(data)
-        sink.append(b"1" if overflow or len(data) >= cap else b"0")
+            # Whatever happened above, what was read is handed over: a drain that died took the
+            # network record with it once (a twelfth red team).
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            sink.append(bytes(buf))
+            sink.append(b"1" if total > cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -351,8 +389,16 @@ class Sandbox:
         """A single-file strategy: copied into its own directory, imported by its stem."""
         src = Path(path).resolve()
         d = Path(tempfile.mkdtemp(prefix="edgecheck-strategy-"))
-        shutil.copy2(src, d / src.name)
-        return cls(d, entry=src.stem, **kw)
+        try:
+            shutil.copy2(src, d / src.name)
+            sb = cls(d, entry=src.stem, **kw)
+        finally:
+            # The sandbox stages its own copy on construction and never reads this one
+            # again, and this one is the customer's source in a world-readable temp dir: it
+            # outlived close() until a seventh red team counted them.
+            shutil.rmtree(d, ignore_errors=True)
+        sb.source_dir = src
+        return sb
 
     # -- what exists inside, and nothing else -------------------------------------------
 
@@ -416,9 +462,17 @@ class Sandbox:
 
         t0 = time.monotonic()
         cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
-        proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
-                                start_new_session=True, preexec_fn=_rlimit_installer(self.limits))
+        try:
+            proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
+                                    start_new_session=True, preexec_fn=_rlimit_installer(self.limits))
+        except BaseException:
+            for fd in (out_r, out_w, viol_r, viol_w, err_r, err_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise
         for fd in (out_w, viol_w, err_w):
             os.close(fd)
         outs: list[bytes] = []
@@ -426,7 +480,7 @@ class Sandbox:
         errs: list[bytes] = []
         drains = [_drain(out_r, outs, self.limits.result_bytes),
                   _drain(viol_r, viols, self.limits.violation_bytes),
-                  _drain(err_r, errs, 64 * 1024)]
+                  _drain(err_r, errs, 64 * 1024, tail=True)]
 
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
         # pipe open long after the strategy returned. Then kill the whole group regardless,
@@ -445,7 +499,7 @@ class Sandbox:
                            visible, before, viols[0] if viols else b"",
                            truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
-            raise Timeout(f"strategy exceeded {self.limits.wall_s:.0f}s wall clock")
+            raise Timeout(f"strategy exceeded {self.limits.wall_s:g}s wall clock")
         if any(f.startswith("<run directory exceeded") for f in rec.files_written):
             raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
                                    f"or depth {self.limits.run_dir_depth}")
@@ -461,27 +515,52 @@ class Sandbox:
 
         raw = outs[0] if outs else b""
         if not raw:
-            # The exit code is not evidence here: `unshare --fork` reports 1 for a child the
-            # kernel killed. The CPU the run actually consumed, as accounted to us by the
-            # kernel on reaping, is.
+            # No output: the process died. What killed it is in the exit status -- a signal the
+            # plain tier reports as such and `unshare --fork` passes on, except SIGKILL, which it
+            # reports as exit status 1. Only a kill at the hard CPU limit (three seconds past the
+            # soft one, for a strategy that ignored SIGXCPU) or a SIGXCPU at the soft limit is the
+            # CPU limit; a twelfth red team's segfault at 1.95s of a 2s limit was reported as
+            # having used the limit, because the parent's count includes the namespace setup.
             tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
-            if cpu_used >= self.limits.cpu_s:
-                raise ResourceExceeded(f"used {cpu_used:.1f}s CPU against a {self.limits.cpu_s}s limit")
-            raise StrategyError(f"no output (rc={proc.returncode}, {cpu_used:.1f}s CPU): {tail}")
+            rc = proc.returncode
+            sig = -rc if rc is not None and rc < 0 else None
+            killed = sig == signal.SIGKILL or (self.isolation == "namespace" and rc == 1)
+            hard = self.limits.cpu_enforced + 3
+            if killed and cpu_used >= hard - 1e-2:
+                raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, having ignored "
+                                       f"{self.limits.cpu_words()} ({cpu_used:.1f}s used)")
+            if sig == signal.SIGXCPU and cpu_used >= self.limits.cpu_enforced - 1e-2:
+                raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({cpu_used:.1f}s used)")
+            how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
+                   else f"rc={rc}")
+            raise StrategyError(f"no output ({how}, {cpu_used:.1f}s CPU); "
+                                f"the strategy's own stderr ended: {tail}")
         try:
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("not an object")
         except (ValueError, RecursionError) as e:     # a deeply nested array recurses in the decoder
             raise StrategyError(f"malformed result from the strategy process: {type(e).__name__}") from None
+        self.records[-1] = rec = dataclasses.replace(rec, spawn_lock=payload.get("spawn_lock") is True)
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
-                # The child's word, checked against the kernel's: a claimed CPU-limit death
-                # with no CPU consumed is a forged claim, and is reported as one.
-                if cpu_used >= 0.5 * self.limits.cpu_s:
-                    raise ResourceExceeded(f"hit the {self.limits.cpu_s}s CPU limit ({cpu_used:.1f}s used)")
-                raise StrategyError(f"claimed the CPU limit after only {cpu_used:.2f}s of CPU")
+                # The child's word, checked against the kernel's. The kernel sends SIGXCPU once the
+                # process's OWN CPU reaches the limit it enforces -- whole seconds, so a 1.5s limit
+                # fires at 2s -- and the child reports that CPU with its claim. The parent's count
+                # covers the namespace setup too, so it is only a bound: a real hit reads at or
+                # past the enforced limit on both. A tenth red team raised the signal itself at
+                # 1.3s of 2s, an eleventh at 1.8s, a twelfth at 1.95s, where the setup carried
+                # the parent's count past the limit.
+                own = payload.get("cpu")
+                own = own if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own) else None
+                limit = self.limits.cpu_enforced
+                if own is not None and own >= limit - 1e-2 and cpu_used >= limit - 1e-2:
+                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} "
+                                           f"({math.floor(own * 100) / 100:.2f}s used by the strategy)")
+                shown = math.floor((own if own is not None else cpu_used) * 100) / 100
+                raise StrategyError(f"claimed the CPU limit at {shown:.2f}s of CPU, short of "
+                                    f"{self.limits.cpu_words()}")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
             if etype == "MemoryError":
@@ -632,10 +711,20 @@ class Precheck:
     files_written: tuple[str, ...]
     first_boundary: int
     hash_seed_pinned: bool = True
+    spawn_lock: bool = False
 
     @property
     def provable(self) -> bool:
         return self.deterministic and self.deterministic_on_varied and self.input_dependent
+
+    @property
+    def proof_only(self) -> bool:
+        """Reproducible, but unmoved by the gate's continuation. The continuation varies what
+        the probes vary without forcing the relations they force, so a probe may still move
+        the output -- an eighth red team's same-bar volume read was blocked here as unprovable
+        while the probes convicted it. The probes run; only a proof is reported, because a
+        clean result on a strategy the gate could not move would mean nothing."""
+        return self.deterministic and self.deterministic_on_varied and not self.input_dependent
 
     def describe(self) -> str:
         lines = [f"isolation: {self.isolation}" +
@@ -646,16 +735,29 @@ class Precheck:
                          "so state CAN carry; the namespace tier is what prevents it")
         lines.append("same tape, 3 times         -> " + ("identical output" if self.deterministic else
                      "DIFFERENT output: the strategy is nondeterministic, so no divergence could be attributed to the data"))
-        lines.append("same varied tape, 3 times  -> " + ("identical output" if self.deterministic_on_varied else
-                     "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
-                     "real data from varied data, or it is intermittently nondeterministic; neither can be audited"))
+        lines.append("same varied tape, 3 times  -> " + (
+            "identical output" if self.deterministic_on_varied else
+            "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
+            "real data from varied data, or it is intermittently nondeterministic; neither can be audited"
+            if self.deterministic else
+            "DIFFERENT output, as on the real tape"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
-                     "IDENTICAL output: the output does not change when the bars we can vary change, so nothing can be proved about it"))
+                     "IDENTICAL output: the output does not change when the bars we can vary change under a fresh "
+                     "continuation of the tape, so a clean result would mean nothing; " +
+                     ("the probes still run, for a proof only" if self.proof_only else
+                      "and with a gate above failed, the probes do not run")))
         if self.files_written:
             lines.append(f"files written by the strategy during a run: {', '.join(self.files_written)} "
                          f"-- this is what a feature cache looks like")
-        lines.append("hash seed pinned to 0 for every run, so dict and set order cannot differ between them")
-        lines.append("PROVABLE" if self.provable else "UNPROVABLE: no probe result would mean anything; fix the above first")
+        lines.append("hash seed pinned to 0 for every run, so the order of dicts and sets keyed on strings or "
+                     "numbers cannot differ between runs; a set of objects hashed by identity still follows "
+                     "memory addresses, which do differ, and shows up above as nondeterminism")
+        lines.append("new processes refused by the kernel (seccomp), by any route" if self.spawn_lock else
+                     "the kernel's spawn lock is not available here: only the audit hook refuses new processes, "
+                     "and only by the routes it sees")
+        lines.append("PROVABLE" if self.provable else
+                     "PROOF ONLY: the probes run, and only a proof would be reported" if self.proof_only else
+                     "UNPROVABLE: no probe result would mean anything; fix the above first")
         return "\n".join(lines)
 
 
@@ -685,12 +787,18 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
     written = tuple(sorted({f for r in sandbox.records[-6:] for f in r.files_written}))
     return Precheck(deterministic=(a[0] == a[1] == a[2]), deterministic_on_varied=(c[0] == c[1] == c[2]),
                     input_dependent=(a[0] != c[0]), isolation=sandbox.isolation,
-                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY)
+                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY,
+                    spawn_lock=sandbox.records[-1].spawn_lock)
 
 
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:
-    """Gates first, probes second, never the other way round."""
+    """Gates first, probes second, never the other way round. A strategy the gate's
+    continuation could not move is still probed, and a proof against it is still a proof;
+    a clean result on it is withheld."""
     pc = precheck(sandbox, tape)
-    if not pc.provable:
-        return pc, None
-    return pc, check_causality(sandbox, tape, **kw)
+    if pc.provable:
+        return pc, check_causality(sandbox, tape, **kw)
+    if pc.proof_only:
+        report = check_causality(sandbox, tape, **kw)
+        return pc, (report if report.leaks else None)
+    return pc, None
