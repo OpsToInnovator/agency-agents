@@ -181,12 +181,23 @@ single bar. They are all members of one set, and the set is now what is owed: th
 both ways past its open; the close, the high and the low each both ways past each of the
 previous bar's open, close, high and low, and the high and the low level with one the bar
 opened on where the tape prints a bar with no wick; the volume both ways past the previous
-bar's, and to zero and away from it; the next bar's open both ways past this bar's close
-and level with it, and the next bar on time and late — each where the open leaves it open
-and the tape's own sizes can reach, each checked on the bar as built. On the fixture tapes
-nothing goes undelivered. Repairs are about 5% of runs at four draws (the every-bar
-default) and at eight; at two draws they are a quarter to a third on a gappy tape, because
-its next bar can gap up, gap down or not gap and two draws cannot hold three states. The same round found that zero volume had
+bar's, and to zero and away from it; the next bar's open both ways past this bar's open and
+close and each of the previous bar's levels, and the next bar early, on time and late
+against the tape's commonest step — each where the open leaves it open and the tape's own
+sizes can reach, each checked on the bar as built. An eleventh red team added the last of
+it: *ties*. On a tape printed on a tick, a close unchanged from the previous close, a doji,
+a high equal to the previous high, a volume repeated in lots, walked at every seed, because
+no draw ever landed exactly on a level. Each kind of tie the tape prints is now owed and
+set exactly; the probed bar and everything after it are rebuilt on the tape's own tick and
+lot (a price off the grid was itself a tell); and a repair draw pursues several targets at
+once where they force different parts of the bar. Nothing is ever accused on a tape it
+could not deliver: no clean strategy was convicted in any sweep.
+
+The cost is honest and uneven. On float tapes repairs are about 5–7% of runs at four draws
+(the every-bar default); at two draws a quarter on a gappy tape, whose next bar has three
+gap states for two draws. On a tick-and-lot tape, where ties are owed against every level,
+repairs are about six draws a bar — roughly half the runs — and a few bars a tape still
+come up short after three attempts; the report counts them. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
 where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
@@ -449,7 +460,14 @@ seven more sentences: reach measured against "the largest move the tape has made
 that made none, a level counted as out of reach and crossed anyway (two thresholds, now
 one), "at the tape's own scale" under an explicit sigma or a floor, a fractional wall-clock
 limit rounded, a result of exactly the cap refused, a self-raised CPU signal at half the
-budget accepted as the limit, and a coverage of 0.1% printed as 0%.
+budget accepted as the limit, and a coverage of 0.1% printed as 0%. The eleventh found the
+rest of the set — ties, the next open against the previous bar, an early clock — and more:
+a crash on a tape with a zero price (guarded), the wick skew measured one way where a
+strategy measures it another (both now), a quiet tape rebuilt at a floor seven times its
+largest move (the floor is only for a tape with no moves), a given sigma called a floor, a
+self-raised CPU signal at 1.8s of 2s taken as the limit (only at the limit now), a
+fractional CPU limit that crashed the launch and leaked pipes (validated, cleaned up), and
+prices rebuilt off the tape's tick (on it now).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

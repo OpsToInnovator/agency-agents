@@ -873,3 +873,33 @@ def test_the_limits_are_reported_as_they_were_set(tape, tmp_path):
     """)
     with pytest.raises(StrategyError, match="claimed the CPU limit"):
         Sandbox.from_file(forger, work_root=tmp_path / "r5", limits=Limits(cpu_s=2, wall_s=10))(tape)
+
+
+def test_a_self_raised_cpu_signal_short_of_the_limit_is_not_the_limit(tape, tmp_path):
+    """The kernel sends SIGXCPU only once the limit is reached. A strategy that raised it
+    itself at 1.8s of a 2s limit was told it had hit the limit."""
+    forger = strategy_file(tmp_path, "xcpu18", """
+        import os, signal, time
+        def signals(bars):
+            t = time.process_time()
+            while time.process_time() - t < 1.7:
+                pass
+            os.kill(os.getpid(), signal.SIGXCPU)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="claimed the CPU limit at"):
+        Sandbox.from_file(forger, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=10))(tape)
+
+
+def test_limits_are_validated_and_a_fractional_cpu_limit_works(tape, tmp_path):
+    """A fractional cpu_s reached setrlimit in the child's preexec hook, failed there as a bare
+    SubprocessError and leaked six pipe ends per call."""
+    with pytest.raises(ValueError):
+        Limits(cpu_s=0)
+    with pytest.raises(ValueError):
+        Limits(wall_s=-1)
+    before = len(os.listdir("/proc/self/fd"))
+    sb = fixture_sandbox("clean_lagged", tmp_path, limits=Limits(cpu_s=1.5))
+    for _ in range(3):
+        sb(tape)
+    assert len(os.listdir("/proc/self/fd")) <= before + 1

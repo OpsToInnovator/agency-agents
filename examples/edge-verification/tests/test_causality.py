@@ -946,7 +946,9 @@ def test_a_tape_with_no_sizes_of_a_kind_says_its_pushes_used_a_floor():
     assert r.leaks, "the floor-sized push still has to catch a same-bar read"
     clean = check_causality(strat("clean_lagged").signals, flat, probes="every_bar", seed=1)
     assert set(clean.floors) == {"moves", "volume changes"}
-    assert "used a floor size, not one of its own" in clean.coverage_note()
+    note = clean.coverage_note()
+    assert "so the close was pushed by a floor size, not by a move of its own" in note
+    assert "so the volume was pushed by a floor ratio" in note
     real = check_causality(strat("clean_lagged").signals, bars(200), probes="every_bar", seed=1)
     assert real.floors == () and "floor size" not in real.coverage_note()
 
@@ -961,7 +963,9 @@ def test_a_zero_volume_push_comes_from_the_planned_draws(tape):
     zt = _zero_volume_tape(0.3)
     with_zero = check_causality(strat("clean_lagged").signals, zt, probes="every_bar", seed=2)
     assert with_zero.undelivered == ()
-    assert with_zero.repairs < 0.06 * with_zero.probes_run
+    # the same ceiling the fixture tapes are held to at four draws; the owed set grew in rounds
+    # ten and eleven, and what this test guards is that zero comes from a planned draw (above)
+    assert with_zero.repairs < 0.1 * with_zero.probes_run
 
 
 def test_the_one_draw_note_mentions_its_repairs_and_runs_are_named_as_runs(tape):
@@ -1044,7 +1048,7 @@ def test_every_relation_to_the_previous_bar_is_owed_where_it_can_be_made():
     for k in range(4, 200, 3):
         owed = _owed(tape, k, sz, draw_plans(1, k, 4), sg)
         fields_seen |= {(x[1], x[2]) for x in owed if x[0] == "rel"}
-        nxt = {("next_gap", 1), ("next_gap", -1), ("next_gap", 0), ("next_late", True), ("next_late", False)}
+        nxt = {("next_gap", 1), ("next_gap", -1), ("next_gap", 0), ("next_step", 0), ("next_step", 1)}
         if k + 1 < len(tape):
             assert nxt <= owed
         else:
@@ -1105,3 +1109,141 @@ def test_a_truncation_proof_without_perturbation_says_none_ran():
 def test_a_small_coverage_is_not_printed_as_zero():
     r = check_causality(strat("clean_lagged").signals, bars(1004), boundaries=[500], draws=2, seed=1)
     assert "(0.1%)" in r.coverage_note() and "(0%)" not in r.coverage_note()
+
+
+def _lot_tape():
+    """bars() with volumes printed in lots of 100, as many venues print them: volumes repeat."""
+    return [dataclasses.replace(b, volume=float(round(b.volume / 100) * 100))
+            for b in bars(200, seed=7, gap_prob=0.3, late_prob=0.1)]
+
+
+@pytest.mark.parametrize("what", ["unchanged_close", "doji", "double_top", "same_volume"])
+def test_a_read_of_a_tie_is_caught_where_the_tape_prints_ties(what):
+    """An eleventh red team: ties were never owed and never made, so on a tick tape "close
+    unchanged", "doji", "high equal to the previous high" and on a lot tape "volume unchanged"
+    walked at every seed. Ties of each kind the tape prints are now owed and set exactly."""
+    tape = _lot_tape() if what == "same_volume" else _tick_tape()
+    reads = {
+        "unchanged_close": (lambda b, p: b.close != p.close, lambda b, p: b.close != p.close and b.open != p.close),
+        "doji": (lambda b, p: b.close != b.open, lambda b, p: b.close != b.open),
+        "double_top": (lambda b, p: b.high != p.high, lambda b, p: b.high != p.high and b.open < p.high),
+        "same_volume": (lambda b, p: b.volume != p.volume, lambda b, p: b.volume != p.volume),
+    }
+    read, pick = reads[what]
+    at = next(k for k in range(12, 190) if pick(tape[k], tape[k - 1]))
+    strategy = _one_bar(at, lambda bs: 1 if read(bs[at], bs[at - 1]) else -1)
+    for seed in range(1, 9):
+        r = check_causality(strategy, tape, probes="every_bar", seed=seed)
+        assert r.leaks and any(p.evidence.index == at for p in r.proven), f"{what} missed at seed {seed}"
+
+
+def test_on_time_is_the_tapes_commonest_step_not_its_shortest():
+    """On a 60s clock with some 30s and some 120s bars, "on time" was the SHORTEST step, so a
+    regular bar was counted late and the late read walked half the time. The clock has three
+    states now: early, on time (the commonest step) and late."""
+    import random
+    base, rng = bars(200, seed=3, gap_prob=0.3), random.Random(5)
+    ts, tape = base[0].ts, [base[0]]
+    for b in base[1:]:
+        u = rng.random()
+        ts += 30.0 if u < 0.08 else 120.0 if u < 0.18 else 60.0
+        tape.append(dataclasses.replace(b, ts=ts))
+    at = next(k for k in range(10, 190) if tape[k + 1].ts - tape[k].ts == 60.0)
+    strategy = _one_bar(at, lambda bs: 1 if bs[at + 1].ts - bs[at].ts > 60 else -1)
+    for seed in range(1, 9):
+        r = check_causality(strategy, tape, probes="every_bar", seed=seed)
+        assert r.leaks and any(p.evidence.index == at for p in r.proven), f"missed at seed {seed}"
+    assert "early, on time and late" in r.coverage_note()
+
+
+def test_the_next_open_against_the_previous_bar_is_caught():
+    """The next bar's open was owed only against this bar's close. Against the previous bar's
+    high, a one-bar read walked in three to four audits of ten."""
+    tape = bars(200, seed=1, gap_prob=0.3, late_prob=0.1)
+    for at in (10, 17, 18, 19):
+        strategy = _one_bar(at, lambda bs, at=at: 1 if bs[at + 1].open > bs[at - 1].high else -1)
+        for seed in range(1, 11):
+            r = check_causality(strategy, tape, probes="every_bar", seed=seed)
+            assert r.leaks and any(p.evidence.index == at for p in r.proven), (at, seed)
+
+
+def test_a_probed_bar_on_a_grid_tape_stays_on_the_grid():
+    """Rebuilt prices off the tape's tick were a tell: an evader that answered as on real data
+    whenever a price left the grid walked at every seed. The tape is rebuilt on its own tick
+    and lot, and the evader is caught."""
+    from edgecheck.causality import _sizes, draw_plans
+    tape = _tick_tape()
+    sz = _sizes(tape)
+    assert sz.tick == 0.01 and sz.lot == 1.0
+    on = lambda x: abs(x * 100 - round(x * 100)) < 1e-6
+    for k in (30, 90, 150):
+        for i, plan in enumerate(draw_plans(3, k, 4, zero=sz.zero)):
+            v = _perturbed(tape, k, seed=3 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            assert all(on(x) for b in v for x in (b.open, b.high, b.low, b.close)), (k, i)
+            assert all(float(b.volume).is_integer() for b in v), (k, i)
+    at = next(k for k in range(15, 190) if tape[k].close > tape[k].open and tape[k - 1].close > tape[k - 1].open)
+
+    def evader(bs):
+        b = bs[at]
+        if not all(on(x) for x in (b.close, b.high, b.low)):
+            return 1
+        return 1 if b.close > b.open else -1
+
+    strategy = _one_bar(at, evader)
+    for seed in range(1, 9):
+        assert check_causality(strategy, tape, probes="every_bar", seed=seed).leaks, f"missed at seed {seed}"
+
+
+def test_a_tape_with_a_zero_price_does_not_crash_the_auditor():
+    """Round ten's builder divided by the previous low and by the open; a tape with a zero
+    price crashed check_causality with ZeroDivisionError -- no report at all."""
+    tape = bars(60, seed=7, gap_prob=0.3)
+    reads_close = lambda bs: [1 if b.close > b.open else -1 for b in bs]
+    zero_low = list(tape)
+    zero_low[30] = dataclasses.replace(tape[30], low=0.0)
+    assert check_causality(reads_close, zero_low, probes="every_bar", seed=1).leaks
+    zero_open = list(tape)
+    zero_open[30] = dataclasses.replace(tape[30], open=0.0, low=0.0)
+    assert check_causality(reads_close, zero_open, probes="every_bar", seed=1).leaks
+    zeros = [dataclasses.replace(b, open=0.0, high=0.0, low=0.0, close=0.0) for b in tape]
+    check_causality(reads_close, zeros, probes="every_bar", seed=1)
+
+
+def test_the_wick_skew_is_delivered_in_price_units_too():
+    """The skew was checked as a fraction of each body end; a strategy reading it in price
+    units saw it unflipped at about one bar-audit in two thousand, with the note claiming it
+    both ways. It counts only where it holds both ways of measuring."""
+    tape = bars(200, seed=3, gap_prob=0.3, late_prob=0.1)
+
+    def skew(bs):
+        out = [0] * len(bs)
+        for i in range(len(bs)):
+            b = bs[i]
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            out[i] = 1 if (b.high - top) > (bot - b.low) else -1
+        return out
+
+    for seed in (1, 3):
+        r = check_causality(skew, tape, probes="every_bar", seed=seed)
+        caught = {p.evidence.index for p in r.proven}
+        assert set(range(4, 200)) - caught - set(r.undelivered) == set(), seed
+
+
+def test_a_quiet_tape_is_varied_at_its_own_scale_and_says_so():
+    """A tape quieter than the old floor was rebuilt at the floor, seven times its largest
+    move, under proof lines saying "at the tape's own scale", and unforced closes crossed
+    levels the note said were out of reach. The scale is the tape's own unless it has none."""
+    from edgecheck.causality import _sizes, realized_sigma
+    quiet = bars(120, seed=7, vol=0.0001)
+    assert realized_sigma(quiet) < 0.001 and realized_sigma(quiet) < _sizes(quiet).moves[-1] * 2
+    r = check_causality(strat("leak_same_bar_close").signals, quiet, probes="every_bar", draws=2, seed=1)
+    assert r.leaks and "at the tape's own scale" in r.describe()
+
+
+def test_a_given_sigma_on_a_tape_with_no_moves_is_named():
+    flat = [dataclasses.replace(b, close=b.open, high=b.open * 1.001, low=b.open * 0.999)
+            for b in bars(80, seed=7, gap_prob=0.3)]
+    r = check_causality(lambda bs: [0] * len(bs), flat, probes="every_bar", seed=1, sigma=0.05)
+    note = r.coverage_note()
+    assert "pushed by the given sigma 0.05" in note and "a floor size" not in note
+    assert r.undelivered == ()

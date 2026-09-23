@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import resource
 import shutil
@@ -119,6 +120,15 @@ class Limits:
     # run directory bound from the host, so inside the namespace the run directory is a
     # tmpfs of this size: the strategy gets ENOSPC, the host gets nothing.
     run_dir_bytes: int = 256 * 1024 ** 2
+
+    def __post_init__(self) -> None:
+        # Every limit is a positive amount. A fractional cpu_s used to reach setrlimit in the
+        # child's preexec hook, fail there as a bare SubprocessError, and leak six pipe ends.
+        for name in ("cpu_s", "wall_s", "memory_bytes", "nproc", "fsize_bytes", "nofile", "result_bytes",
+                     "violation_bytes", "run_dir_entries", "run_dir_depth", "run_dir_bytes"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not value > 0:
+                raise ValueError(f"Limits.{name} must be a positive number, not {value!r}")
 
 
 class SandboxError(Exception):
@@ -214,7 +224,8 @@ def _rlimit_installer(limits: Limits):
     def install() -> None:
         # Soft limit first: SIGXCPU, which the child catches to record the cause. Hard
         # limit a few seconds on: SIGKILL, for a strategy that ignores the first.
-        resource.setrlimit(resource.RLIMIT_CPU, (limits.cpu_s, limits.cpu_s + 3))
+        cpu = math.ceil(limits.cpu_s)                 # the kernel counts whole seconds
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 3))
         resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
         resource.setrlimit(resource.RLIMIT_NPROC, (limits.nproc, limits.nproc))
         resource.setrlimit(resource.RLIMIT_FSIZE, (limits.fsize_bytes, limits.fsize_bytes))
@@ -427,9 +438,17 @@ class Sandbox:
 
         t0 = time.monotonic()
         cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
-        proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
-                                start_new_session=True, preexec_fn=_rlimit_installer(self.limits))
+        try:
+            proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
+                                    start_new_session=True, preexec_fn=_rlimit_installer(self.limits))
+        except BaseException:
+            for fd in (out_r, out_w, viol_r, viol_w, err_r, err_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise
         for fd in (out_w, viol_w, err_w):
             os.close(fd)
         outs: list[bytes] = []
@@ -492,12 +511,13 @@ class Sandbox:
             if payload.get("reason") == "cpu_limit":
                 # The child's word, checked against the kernel's: a claimed CPU-limit death
                 # with no CPU consumed is a forged claim, and is reported as one.
-                # Within accounting tolerance of the limit, not half of it: a tenth red team
-                # raised SIGXCPU itself after 1.3s of a 2s budget and was told it hit the limit.
-                if cpu_used >= 0.9 * self.limits.cpu_s:
-                    raise ResourceExceeded(f"hit the {self.limits.cpu_s:g}s CPU limit ({cpu_used:.1f}s used)")
-                raise StrategyError(f"claimed the CPU limit after only {cpu_used:.2f}s of a "
-                                    f"{self.limits.cpu_s:g}s limit")
+                # The kernel sends SIGXCPU only once the limit is reached, and the children's
+                # accounting covers the whole tree, so a real hit reads at or past the limit. A
+                # tenth red team raised the signal itself at 1.3s of 2s; an eleventh at 1.8s.
+                shown = math.floor(cpu_used * 100) / 100          # never rounded up to the limit
+                if cpu_used >= self.limits.cpu_s - 1e-3:
+                    raise ResourceExceeded(f"hit the {self.limits.cpu_s:g}s CPU limit ({shown:.2f}s used)")
+                raise StrategyError(f"claimed the CPU limit at {shown:.2f}s of a {self.limits.cpu_s:g}s limit")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
             if etype == "MemoryError":
