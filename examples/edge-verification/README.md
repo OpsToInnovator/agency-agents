@@ -171,9 +171,22 @@ the previous low, a higher low, a higher high and a longer lower wick cannot all
 quarter of audits. Each probed bar is now checked, as built, against every relation the note
 lists for it (limited to what the open leaves open and the tape's own sizes can reach); any
 the planned draws missed gets a repair draw of its own with nothing else forced, and a bar
-where even that fails is counted in the report. On the fixture tapes nothing goes
-undelivered, and repairs are a few percent of runs (2.4% at four draws and 3.6% at eight,
-measured over ten audits of each). The same round found that zero volume had
+where even that fails is counted in the report.
+
+*The relations are enumerated, not collected.* Ten red teams found them one at a time — the
+close against the previous close, the volume against the previous volume, the high against
+the previous high, then a tenth found three more: the low against the previous close (a gap
+fill), a tie at an extreme the bar opened on, and the next bar's gap and lateness read at a
+single bar. They are all members of one set, and the set is now what is owed: the close
+both ways past its open; the close, the high and the low each both ways past each of the
+previous bar's open, close, high and low, and the high and the low level with one the bar
+opened on where the tape prints a bar with no wick; the volume both ways past the previous
+bar's, and to zero and away from it; the next bar's open both ways past this bar's close
+and level with it, and the next bar on time and late — each where the open leaves it open
+and the tape's own sizes can reach, each checked on the bar as built. On the fixture tapes
+nothing goes undelivered. Repairs are about 5% of runs at four draws (the every-bar
+default) and at eight; at two draws they are a quarter to a third on a gappy tape, because
+its next bar can gap up, gap down or not gap and two draws cannot hold three states. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
 where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
@@ -429,7 +442,14 @@ strategy convicted, the spawn lock held against every route tried — and found 
 that were literally false: a precheck line promising probes that a failed determinism gate
 had cancelled, another saying the real tape reproduced when it had not, a hash-seed line
 ignoring sets of objects hashed by identity, "varied within the tape's own range" on every
-proof line, and smaller ones in the note. Each now says what happened.
+proof line, and smaller ones in the note. Each now says what happened. The tenth found three
+single relations nothing pushed — the next bar's gap and lateness at one bar, a gap fill, a
+tie at an extreme the bar opened on — which is what led to enumerating the whole set, and
+seven more sentences: reach measured against "the largest move the tape has made" on a tape
+that made none, a level counted as out of reach and crossed anyway (two thresholds, now
+one), "at the tape's own scale" under an explicit sigma or a floor, a fractional wall-clock
+limit rounded, a result of exactly the cap refused, a self-raised CPU signal at half the
+budget accepted as the limit, and a coverage of 0.1% printed as 0%.
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

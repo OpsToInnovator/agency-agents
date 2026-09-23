@@ -834,3 +834,42 @@ def test_the_hash_seed_line_does_not_promise_set_order_it_cannot_pin(tape, tmp_p
     line = next(l for l in pc.describe().splitlines() if l.startswith("hash seed"))
     assert "hashed by identity still follows memory addresses" in line
     assert "dict and set order cannot differ" not in line
+
+
+def test_the_limits_are_reported_as_they_were_set(tape, tmp_path):
+    """A 1.5s wall clock was reported as 2s and a 0.4s one as 0s; a result of exactly the cap
+    was refused as larger than it; a strategy that raised SIGXCPU itself after half its CPU
+    budget was told it had hit the limit."""
+    nap = strategy_file(tmp_path, "nap", """
+        import time
+        def signals(bars):
+            time.sleep(5)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(Timeout, match=r"exceeded 1\.5s wall clock"):
+        Sandbox.from_file(nap, work_root=tmp_path / "r1", limits=Limits(wall_s=1.5))(tape)
+
+    const = strategy_file(tmp_path, "const", """
+        def signals(bars):
+            return [0] * len(bars)
+    """)
+    probe = Sandbox.from_file(const, work_root=tmp_path / "r2")
+    probe(tape)
+    import json
+    size = len(json.dumps({"ok": True, "signals": [0] * len(tape), "files_written": [],
+                           "run_dir_over_limit": False, "spawn_lock": probe.records[-1].spawn_lock}).encode())
+    assert Sandbox.from_file(const, work_root=tmp_path / "r3", limits=Limits(result_bytes=size))(tape) == [0] * len(tape)
+    with pytest.raises(BadOutput, match="larger than"):
+        Sandbox.from_file(const, work_root=tmp_path / "r4", limits=Limits(result_bytes=size - 1))(tape)
+
+    forger = strategy_file(tmp_path, "xcpu", """
+        import os, signal, time
+        def signals(bars):
+            t = time.process_time()
+            while time.process_time() - t < 1.2:
+                pass
+            os.kill(os.getpid(), signal.SIGXCPU)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="claimed the CPU limit"):
+        Sandbox.from_file(forger, work_root=tmp_path / "r5", limits=Limits(cpu_s=2, wall_s=10))(tape)

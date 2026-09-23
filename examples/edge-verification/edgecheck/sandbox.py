@@ -272,7 +272,7 @@ exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd"
 
 def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threading.Thread:
     """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
-    say whether that many or more arrived. A result or a record larger than the cap is not
+    say whether more than that arrived -- exactly ``cap`` is within it. A result or a record larger than the cap is not
     evidence of anything but a strategy trying to exhaust the auditor. ``tail`` keeps the
     LAST ``cap`` bytes instead of the first: for stderr, where the error that ended the run
     is at the end, and a long log before it had pushed it out of the report."""
@@ -296,7 +296,7 @@ def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threa
         finally:
             os.close(fd)
         sink.append(bytes(buf))
-        sink.append(b"1" if total >= cap else b"0")
+        sink.append(b"1" if total > cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -456,7 +456,7 @@ class Sandbox:
                            visible, before, viols[0] if viols else b"",
                            truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
-            raise Timeout(f"strategy exceeded {self.limits.wall_s:.0f}s wall clock")
+            raise Timeout(f"strategy exceeded {self.limits.wall_s:g}s wall clock")
         if any(f.startswith("<run directory exceeded") for f in rec.files_written):
             raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
                                    f"or depth {self.limits.run_dir_depth}")
@@ -477,7 +477,7 @@ class Sandbox:
             # kernel on reaping, is.
             tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
             if cpu_used >= self.limits.cpu_s:
-                raise ResourceExceeded(f"used {cpu_used:.1f}s CPU against a {self.limits.cpu_s}s limit")
+                raise ResourceExceeded(f"used {cpu_used:.1f}s CPU against a {self.limits.cpu_s:g}s limit")
             raise StrategyError(f"no output (rc={proc.returncode}, {cpu_used:.1f}s CPU); "
                                 f"the strategy's own stderr ended: {tail}")
         try:
@@ -492,9 +492,12 @@ class Sandbox:
             if payload.get("reason") == "cpu_limit":
                 # The child's word, checked against the kernel's: a claimed CPU-limit death
                 # with no CPU consumed is a forged claim, and is reported as one.
-                if cpu_used >= 0.5 * self.limits.cpu_s:
-                    raise ResourceExceeded(f"hit the {self.limits.cpu_s}s CPU limit ({cpu_used:.1f}s used)")
-                raise StrategyError(f"claimed the CPU limit after only {cpu_used:.2f}s of CPU")
+                # Within accounting tolerance of the limit, not half of it: a tenth red team
+                # raised SIGXCPU itself after 1.3s of a 2s budget and was told it hit the limit.
+                if cpu_used >= 0.9 * self.limits.cpu_s:
+                    raise ResourceExceeded(f"hit the {self.limits.cpu_s:g}s CPU limit ({cpu_used:.1f}s used)")
+                raise StrategyError(f"claimed the CPU limit after only {cpu_used:.2f}s of a "
+                                    f"{self.limits.cpu_s:g}s limit")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
             if etype == "MemoryError":
