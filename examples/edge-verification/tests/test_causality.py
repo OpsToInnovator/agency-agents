@@ -2413,7 +2413,8 @@ def test_the_tail_clause_says_what_each_tape_got():
     assert "at the times of day" not in flat.coverage_note()
     wide = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1, sigma=0.05)
     assert ", of volatility, which is the given sigma's" in wide.coverage_note()
-    assert "of where the price is far ahead, which strays from the tape's own less than a walk of its own would" in wide.coverage_note()
+    assert "of where the price is far ahead, which the rebuild takes from the tape's own later moves, rescaled" in wide.coverage_note()
+    assert "of where the price is far ahead, which strays from the tape's own less than a walk of its own would" in flat.coverage_note()
     sess = check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100], draws=4, seed=1)
     assert "at the times of day and on the days it prints" in sess.coverage_note()
 
@@ -2558,3 +2559,75 @@ def test_the_calendar_is_found_once_per_audit_and_not_for_event_bars(monkeypatch
         ts += r.uniform(20, 400)
         events.append(dataclasses.replace(b, ts=ts))
     assert real(events) is None
+
+
+# ---------------------------------------------------------------- a nineteenth red team
+
+def test_a_still_stretch_stays_still_under_a_sigma_and_a_sigma_below_the_tick_is_refused():
+    """A nineteenth red team: scaled by the volatility around it, an untraded bar of a still stretch
+    had nothing to scale and was given a normal move of the caller's sigma -- an untraded bar that
+    moved, which the tape never prints; and a sigma below a $2 stock's one-cent tick rounded every
+    rebuilt move to nothing under a proof line that said 'moves of sigma 0.0005'."""
+    import random
+    from edgecheck.causality import _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    r, p, t, still = random.Random(71), 50.0, [], []
+    for i in range(400):
+        if i < 270:
+            o, h, lo, c = _walk_bar(r, p, 0.003)
+            t.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(r.randint(10, 90))))
+            p = c
+        else:
+            t.append(Bar(1.7e9 + 60 * i, p, p, p, p, 0.0))
+    sz = _sizes(t)
+    for k in (150, 200, 260):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(t, k, seed=1 ^ (k * 1_000_003 + i), sigma=0.004, plan=plan, sizes=sz)
+            still += [j for j in range(k + 1, len(v)) if v[j].volume == 0 and (v[j].close != v[j].open or v[j].high != v[j].low)]
+    assert not still, still[:5]
+
+    r, p, two = random.Random(11), 2.0, []
+    for i in range(300):
+        o = round(p, 2)
+        c = round(o * math.exp(r.gauss(0, 0.004)), 2)
+        two.append(Bar(1.7e9 + 60 * i, o, round(max(o, c) + r.choice((0, 0.01)), 2),
+                       round(min(o, c) - r.choice((0, 0.01)), 2), c, float(r.randint(1, 50) * 100)))
+        p = c
+    with pytest.raises(ValueError, match="below the tape's tick"):
+        check_causality(strat("clean_lagged").signals, two, boundaries=[100], draws=4, seed=1, sigma=0.0005)
+    for bad in (0.0, -0.01, float("nan")):
+        with pytest.raises(ValueError, match="sigma"):
+            check_causality(strat("clean_lagged").signals, two, boundaries=[100], draws=4, seed=1, sigma=bad)
+    ok = check_causality(strat("leak_same_bar_close").signals, two, boundaries=[100], draws=4, seed=1, sigma=0.02)
+    assert ok.leaks
+
+
+def test_the_next_open_stays_within_the_tapes_largest_gap():
+    """A nineteenth red team: the next bar's planned open was not held to the tape's largest gap, as
+    later bars' were, and went up to 1.19 times past it under 'the tape's own scale'."""
+    from edgecheck.causality import _past_clause, _sizes, draw_plans
+    for tape, where in ((_weekday_daily(300), [(171, 2), (179, 3), (247, 2), (284, 3), (285, 2)]),
+                        (bars(300, seed=3, gap_prob=0.5), [(167, 3), (173, 3), (189, 3)])):
+        sz = _sizes(tape)
+        for k, i in where:
+            notes: dict = {}
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=draw_plans(1, k, 4)[i],
+                           sizes=sz, notes=notes)
+            g = math.log(v[k + 1].open / v[k].close)
+            top = (sz.gaps_up if g > 0 else sz.gaps_dn)[-1]
+            assert abs(g) <= top * (1 + 1e-9) or "next open" in notes.get("past", ()), (k, i, abs(g) / top)
+    assert "the next bar's open set on the tick of its price level, past the largest gap" in _past_clause(("next open",))
+
+
+def test_two_changes_of_tick_are_not_joined_into_a_grid_that_snaps_backwards():
+    """A nineteenth red team: two changes of tick, each with only its two printed prices, joined by the
+    lcm of their float-noise widths into a step of 8e13, whose one reachable point a snap up returned
+    below its input -- a wick 1.03 times the largest the tape made."""
+    from edgecheck.causality import Grid, Grids, _joined, _snap
+    a = Grids([0.997, 1.005], [Grid(0.001, 0.0, {}), Grid(0.005, 0.0, {})]).at(0.9989, snap=True)
+    b = Grids([0.997, 1.0], [Grid(0.001, 0.0, {}), Grid(0.01, 0.0, {})]).at(0.9989, snap=True)
+    assert a.pair and b.pair
+    assert _joined(a, b) is a
+    assert _snap(0.9989, _joined(a, b), "up") >= 0.9989
+    wide = Grid(79999999999999.03, 0.997, {})
+    assert _snap(0.9989, wide, "up") >= 0.9989 and _snap(0.9989, wide, "down") <= 0.9989

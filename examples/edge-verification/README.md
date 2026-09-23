@@ -337,7 +337,8 @@ one rebuilt bar in three is now a single bar from near it, standing in for its r
 which the run passes by: at the same time of day, traded or not as that bar, close to its volume
 and from a stretch as volatile; no two donors ever follow each other twice, so no run repeats. The
 spread of a rebuilt tail's end around the real one went from 0.1–0.3 of a walk's spread over the
-same bars to 0.4–0.8, and the same reader was caught in 17 of 24 one-bar audits; the clustering
+same bars to 0.4–0.95, by tape, and the same reader was caught in 10 to 17 of 24 one-bar audits,
+by seed (14 on a GARCH tape); the clustering
 the runs keep stayed where it was (lag-one autocorrelation of log volume on a GARCH tape: real
 0.33, before 0.30, now 0.29–0.30). The note says what is left: the price far ahead strays from the
 tape's own less than a walk of its own would. A tail too short for runs, under eight bars, had been
@@ -349,17 +350,35 @@ crosses midnight UTC took its breaks at the wrong times; a rebuilt step is now k
 tape makes that step from that time of day and weekday. Under a caller's sigma, donor moves were
 scaled by the whole tape's volatility, so on a tape loud and then quiet the tail moved 0.0007 a
 bar under a sigma of 0.01; each is now scaled by the volatility around its donor. The calendar was found again for
-every rebuild, so an audit's cost grew with the square of the tape; it is now found once, and a
-tape of event bars, whose times keep no step, has none. Rebuilt gaps and volumes went up to 1.16
-times the largest the tape printed; they are capped at it, as moves and wicks were.
+every rebuild, at a cost that grew with the square of the tape; it is now found once per audit,
+and a tape of event bars, whose times keep no step, has none. Rebuilt gaps and volumes went up to
+1.16 times the largest the tape printed; they are capped at it, as moves and wicks were.
+
+The nineteenth found four holes in those changes. Scaled by the volatility around its donor, a bar
+from a still stretch had nothing to scale, and was given a normal move of the caller's sigma: an
+untraded bar that moved, which the tape never prints, and a strategy reading the next bar unless it
+saw one walked. A still stretch now stays still; only a tape with no moves at all is moved by the
+sigma alone. A sigma below the tape's tick at a $2 stock's price rounded every rebuilt move to
+nothing under a proof line that said "moves of sigma 0.0005", and a strategy keyed on the dojis
+walked: a sigma below the tick, as a share of the price, at any price the tape closed at is now
+refused, naming the bar and the least sigma that would do. The next bar's planned open was not held
+to the tape's largest gap, as the later bars' were, and went 1.19 times past it on a sub-dollar
+tape under "the tape's own scale": it is now, set the other way on the grid where that fits and
+named in the proof line where it does not. And two changes of tick, each with only its two printed
+prices, were joined by the least common multiple of their float-noise widths into a grid of one
+reachable point, which a snap up returned below its input: a wick 1.03 times the largest. Such
+grids are no longer joined, and a snap's tolerance is a billionth of the price where the step is
+wider. Under a caller's sigma the note now says the price far ahead is the tape's own later moves,
+rescaled, rather than comparing it with a walk: on a trending tape it strayed three times farther
+than a walk at that sigma.
 
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are about twelve a bar, and a third to two in five of its bars still come up
-short (43% on an eighteenth red team's): at two
+one-cent tick they are about twelve a bar, and a fifth to a half of its bars still come up short,
+by the tape (43–45% on the last two red teams'): at two
 cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
 did not print, which is not counted. The report counts every such bar. A tick that is coarse
 for its price level costs the same way: a stock just above a dollar on cents came up short at
@@ -367,7 +386,9 @@ for its price level costs the same way: a stock just above a dollar on cents cam
 at 24 of 296. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
-where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
+where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar. An
+every-bar audit rebuilds the tail at every bar, so its time grows with the square of the tape:
+about eight minutes at 2,000 daily bars on the machine measured.
 
 Every-bar mode uses four draws by default. The report says what was pushed where at the
 bars that did not diverge, that probing of a bar stopped at its first divergence, how many
