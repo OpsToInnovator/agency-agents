@@ -264,7 +264,8 @@ def main(argv: list[str]) -> int:
         err = getattr(e, "errno", None)
         body = dumps({"ok": False,
                       "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300],
-                                "errno": err if isinstance(err, int) and not isinstance(err, bool) else None},
+                                "errno": err if isinstance(err, int) and not isinstance(err, bool) else None,
+                                "memory": isinstance(e, MemoryError)},
                       "traceback": format_exc()[-4000:], "spawn_lock": spawn_lock})
     finish(body, 0)
 

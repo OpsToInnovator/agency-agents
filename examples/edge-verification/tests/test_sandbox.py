@@ -1143,7 +1143,7 @@ def test_the_sandboxs_start_and_the_strategys_own_errors_are_told_apart(tape, tm
             os._exit(3)
     """)
     with pytest.raises(StrategyError, match="no output"):
-        Sandbox.from_file(exit3, work_root=tmp_path / "v", limits=Limits(violation_bytes=15))(tape)
+        Sandbox.from_file(exit3, work_root=tmp_path / "v", limits=Limits(violation_bytes=64))(tape)
     words = strategy_file(tmp_path, "words15", """
         def signals(bars):
             raise ValueError("config File too large? no: the tape is short")
@@ -1156,3 +1156,41 @@ def test_the_sandboxs_start_and_the_strategys_own_errors_are_told_apart(tape, tm
     """)
     with pytest.raises(ResourceExceeded, match="cannot tell which.*warm-up buffer not filled"):
         Sandbox.from_file(mem, work_root=tmp_path / "m")(tape)
+
+
+# -- round sixteen --------------------------------------------------------------------------
+
+def test_the_sandbox_names_only_what_it_can_tell(tape, tmp_path):
+    """A network attempt under a record cap shorter than one line came back clean; a strategy's own
+    'can't start new thread' and its own EFBIG were reported as the limits, with no hedge; and a
+    MemoryError subclass (numpy's) under the memory limit was filed as the strategy's own error."""
+    with pytest.raises(ValueError, match="violation_bytes"):
+        Limits(violation_bytes=15)
+    net = strategy_file(tmp_path, "net16", """
+        import socket
+        def signals(bars):
+            try:
+                socket.create_connection(("203.0.113.5", 80), timeout=1)
+            except OSError:
+                pass
+            return [0] * len(bars)
+    """)
+    with pytest.raises(NetworkAttempt):
+        Sandbox.from_file(net, work_root=tmp_path / "n", limits=Limits(violation_bytes=64))(tape)
+    for name, raise_ in (("thr16", 'RuntimeError("can\'t start new thread: the pool is shut down")'),
+                         ("fbig16", 'OSError(errno.EFBIG, "feature cache would pass 1 MB")')):
+        own = strategy_file(tmp_path, name, f"""
+            import errno
+            def signals(bars):
+                raise {raise_}
+        """)
+        with pytest.raises(ResourceExceeded, match="or an error the strategy raised itself"):
+            Sandbox.from_file(own, work_root=tmp_path / name)(tape)
+    sub = strategy_file(tmp_path, "mem16", """
+        class ArrayMemoryError(MemoryError):
+            pass
+        def signals(bars):
+            raise ArrayMemoryError("unable to allocate")
+    """)
+    with pytest.raises(ResourceExceeded, match="under a memory limit"):
+        Sandbox.from_file(sub, work_root=tmp_path / "m")(tape)

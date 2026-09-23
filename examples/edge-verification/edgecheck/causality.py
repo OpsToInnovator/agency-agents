@@ -245,7 +245,8 @@ class Report:
                              "where its tick changed in time, split-adjusted where it sits on an adjusted tick, "
                              "and at float32 where it is stored so -- and a read of whether a price is one the "
                              "data source could print under a rule not found in the tape (an adjustment by a "
-                             "factor other than a split's, a change of tick within twenty bars) can go unseen")
+                             "factor other than the split ratios it tries, a change of tick lasting under twenty "
+                             "bars or at some price levels only) can go unseen")
         if self.draws == 1:
             combos = (f"one draw at each bar, pushing the close past its open and past the farthest of "
                       f"{levels} it could reach, the high and the low past the previous bar's, the "
@@ -881,9 +882,13 @@ class Eras(NamedTuple):
 
 
 def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int]:
-    """The bars at which the coarsest grid every bar's prices sit on changes for good, by binary
-    segmentation: a cut is kept only where the prices on each side sitting on their own side's
-    grid would be a one-in-a-million chance under the grid both sides share."""
+    """The bars at which the grid the tape prints on changes in time. Every bar is labelled with
+    the coarsest grid of any long run of bars on it -- a run of at least ``least`` bars whose prices
+    all sit on that grid, a stray bar or two off it allowed, and significant: its distinct prices all
+    on that grid would be a one-in-a-million chance under the grid its bars would otherwise have.
+    The eras are the stretches of one label. Binary segmentation missed an era in the middle (a tick
+    that went to 0.05 and back), and one stray cent print in a nickel era moved its cut to that print
+    (a sixteenth red team)."""
     flat = sorted({v for ps in per_bar for v in ps if v > 0 and math.isfinite(v)})
     n = len(per_bar)
     if n < 2 * least or len(flat) < 3:
@@ -891,80 +896,76 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
     base = _grid(flat) or _grid(flat, 0.9)
     if base is None:
         return []
-    steps = [st for st in _STEPS if st >= base.step * (1 - 1e-9) and abs(st / base.step - round(st / base.step)) < 1e-6]
+    steps = [st for st in _STEPS if st > base.step * (1 + 1e-9) and abs(st / base.step - round(st / base.step)) < 1e-6]
 
     def on(v: float, st: float) -> bool:
         m = round((v - base.off) / st)
         return abs(v - (base.off + m * st)) <= max(min(st * 1e-3, max(v, st) * 1e-10), math.ulp(v))
-    miss = []
-    for st in steps:
-        row = [0] * (n + 1)
-        for i, ps in enumerate(per_bar):
-            row[i + 1] = row[i] + (0 if all(on(v, st) for v in ps if v > 0 and math.isfinite(v)) else 1)
-        miss.append(row)
-
-    def coarsest(a: int, b: int) -> int | None:
-        return next((j for j in range(len(steps)) if miss[j][b] == miss[j][a]), None)
-    cuts: list[int] = []
-
-    def split(a: int, b: int) -> None:
-        whole = coarsest(a, b)
-        if whole is None or b - a < 2 * least:
-            return
-        left, right, seen = [0] * (b - a + 1), [0] * (b - a + 1), set()
-        for t in range(a, b):
-            seen.update(per_bar[t])
-            left[t - a + 1] = len(seen)
-        seen = set()
-        for t in range(b - 1, a - 1, -1):
-            seen.update(per_bar[t])
-            right[t - a] = len(seen)
-        # significant by the distinct prices on each side; placed where the bars each side's grid
-        # explains are most -- the distinct prices on a coarse tick run out long before its era does,
-        # and a cut placed by them alone landed forty bars early
-        best, score = None, 0.0
-        for t in range(a + least, b - least + 1):
-            lo, hi = coarsest(a, t), coarsest(t, b)
-            if lo is None or hi is None:
+    label = [base.step] * n
+    for st in reversed(steps):                       # finest first, so a coarser run relabels a finer one
+        good = [all(on(v, st) for v in ps if v > 0 and math.isfinite(v)) for ps in per_bar]
+        runs: list[list[int]] = []
+        i = 0
+        while i < n:
+            if not good[i]:
+                i += 1
                 continue
-            gl, gh = math.log(steps[lo] / steps[whole]), math.log(steps[hi] / steps[whole])
-            if left[t - a] * gl + right[t - a] * gh <= math.log(1e6):
+            j = i
+            while j < n and good[j]:
+                j += 1
+            if runs and i - runs[-1][1] <= 2:
+                a, b = runs[-1][0], j            # a stray bar or two off the grid inside a run
+                if sum(1 for t in range(a, b) if not good[t]) <= max(1, (b - a) // 50):
+                    runs[-1][1] = j
+                    i = j
+                    continue
+            runs.append([i, j])
+            i = j
+        for a, b in runs:
+            if b - a < least:
                 continue
-            sc = (t - a) * gl + (b - t) * gh
-            if sc > score:
-                best, score = t, sc
-        if best is not None:
-            split(a, best)
-            cuts.append(best)
-            split(best, b)
-    split(0, n)
-    return sorted(cuts)
+            ref = max(label[a:b])
+            if st <= ref * (1 + 1e-9):
+                continue
+            distinct = {v for t in range(a, b) if good[t] for v in per_bar[t] if v > 0 and math.isfinite(v)}
+            if len(distinct) * math.log(st / ref) > math.log(1e6):
+                for t in range(a, b):
+                    label[t] = st
+    return [t for t in range(1, n) if label[t] != label[t - 1]]
 
 
 # A split's adjustment: prices before a 3-for-2 split divided by 1.5 and written to four places sit
 # on no decimal grid coarser than 0.0001, of which one point in 67 is an adjusted cent. The ratios
-# of p-for-q splits and reverse splits up to ten.
-_RATIOS = sorted({float(Fraction(a, b)) for a in range(1, 11) for b in range(1, 11)
-                  if math.gcd(a, b) == 1 and a != b} | {20.0, 0.05})
+# of p-for-q splits and reverse splits up to ten, the stock dividends booked as splits (11-for-10,
+# 21-for-20), and the larger reverse splits. 1 first: a tick rounded to fewer places than it needs
+# (1/32 written to four places) sits on no decimal grid either (a sixteenth red team).
+_RATIOS = [1.0] + sorted({float(Fraction(a, b)) for a in range(1, 11) for b in range(1, 11)
+                          if math.gcd(a, b) == 1 and a != b}
+                         | {1.1, 1.05, 1 / 1.1, 1 / 1.05, 12.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 100.0,
+                            1 / 12, 1 / 15, 1 / 20, 1 / 25, 1 / 30, 1 / 40, 1 / 50, 1 / 100})
 
 
 def _scaled(values: Sequence[float], grid: Grid | None) -> Grid | None:
-    """A decimal grid the values sit on once multiplied by a split's ratio, written to the places
-    the tape writes -- coarser than ``grid`` and not itself a decimal grid -- or None."""
+    """A grid the values sit on, written to the places the tape writes, coarser than ``grid``: a
+    tick the tape rounds (1/32 to four places), or a decimal tick divided by a split's ratio -- or
+    None. Its step must be at least three of the tape's last places: finer than that, the rounding
+    itself lets structured prices fit a grid they were never on, and an 11-for-10 history was fit to
+    a tick of 1/5600 (a sixteenth red team)."""
     if grid is None or grid.digits is None or grid.scale != 1.0:
         return None
     vals = sorted({v for v in values if v > 0 and math.isfinite(v)})
     if len(vals) < 6:
         return None
-    best = None
+    unit = 10.0 ** -grid.digits
+    best, best_eff = None, 0.0
     for r in _RATIOS:
         for base in _STEPS:
             eff = base / r
-            if eff <= grid.step * 1.5:
+            if eff <= max(grid.step * 1.5, 3 * unit) or eff <= best_eff * (1 + 1e-9):
                 break
-            if best is not None and eff <= best.step / best.scale:
-                break
-            if any(abs(eff / st - 1) < 1e-9 for st in _STEPS) or len(vals) * math.log(eff / grid.step) <= math.log(1e6):
+            if r != 1.0 and any(abs(eff / st - 1) < 1e-9 for st in _STEPS):
+                continue                       # a decimal tick: tried unscaled, at r == 1
+            if len(vals) * math.log(eff / unit) <= math.log(1e6):
                 continue
             points: dict[int, float] = {}
             for v in vals:
@@ -973,7 +974,7 @@ def _scaled(values: Sequence[float], grid: Grid | None) -> Grid | None:
                     break
                 points.setdefault(k, v)
             else:
-                best = Grid(base, 0.0, points, grid.digits, True, scale=r)
+                best, best_eff = Grid(base, 0.0, points, grid.digits, True, scale=r), eff
                 break
     return best
 
@@ -1296,6 +1297,11 @@ def _validate(tape: Sequence[Any]) -> None:
             if not ok:
                 raise ValueError(f"bar {i} has a {name} of {v!r}; every timestamp, price and volume "
                                  f"must be a finite number")
+        # Every volume relation, floor and zero rule reads volume as traded size. A signed volume --
+        # net delta, say -- was probed upward only and told no bar traded (a sixteenth red team).
+        if b.volume < 0:
+            raise ValueError(f"bar {i} has a volume of {b.volume!r}; a volume is a traded size, zero or more "
+                             f"(a signed volume such as net delta is not one)")
 
 
 def _close_near(level: float, o: float, up: float | None, dn: float | None, sizes: Sizes,
@@ -2017,6 +2023,10 @@ def _next_bar(plan: Plan, sizes: Sizes, rng: random.Random, closed: float | None
     return opened, step
 
 
+def _notes_off_scale(notes: dict | None) -> bool:
+    return bool(notes and notes.get("off_scale"))
+
+
 def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | None,
                signs: tuple[int, int, int] = (0, 0, 0), plan: Plan | None = None,
                sizes: Sizes | None = None, avoid: frozenset | None = None,
@@ -2073,18 +2083,23 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
             c2 = _on_level(levels, first[0], "down" if c > first[0] else "up")
             c = c2 if c2 > 0 and not too_far_move(c2) else c
         top, bot = max(c, o), min(c, o)
+
+        def up_wick(x: float) -> bool:
+            return top_wick is not None and x / top - 1 > top_wick
+
+        def down_wick(x: float) -> bool:
+            return top_wick is not None and x > 0 and 1 - x / bot > top_wick
+        # the wicks judged from the body as built: a close set down on its level's tick lowers the top
+        # the high hangs from, and a sixteenth red team's high, within the largest wick before the
+        # close moved, was past it after, under 'the tape's own scale'
         h = max(_on_level(levels, first[1], "up"), top)
-        if top_wick is not None and h / top - 1 > top_wick >= first[1] / top - 1:
-            h2 = _on_level(levels, first[1], "down")
-            h = h2 if h2 >= top else h
+        if up_wick(h):
+            h = next((y for y in (_on_level(levels, first[1], "down"), top) if top <= y and not up_wick(y)), h)
         lw = min(_on_level(levels, first[2], "down"), bot)
-        if top_wick is not None and lw > 0 and 1 - lw / bot > top_wick >= 1 - first[2] / bot:
-            l2 = _on_level(levels, first[2], "up")
-            lw = l2 if l2 <= bot else lw
-        past = [name for name, far_ in (("close", too_far_move(c) and not too_far_move(first[0])),
-                                         ("high", top_wick is not None and h / top - 1 > top_wick >= first[1] / top - 1),
-                                         ("low", top_wick is not None and lw > 0 and 1 - lw / bot > top_wick >= 1 - first[2] / bot))
-                if far_]
+        if down_wick(lw):
+            lw = next((y for y in (_on_level(levels, first[2], "up"), bot) if 0 < y <= bot and not down_wick(y)), lw)
+        past = [name for name, far_ in (("close", too_far_move(c) and not _notes_off_scale(notes)),
+                                         ("high", up_wick(h)), ("low", down_wick(lw))) if far_]
         if past and notes is not None:
             notes["past"] = tuple(past)
         first = (c, h, lw, first[3])

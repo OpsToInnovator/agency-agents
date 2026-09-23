@@ -273,6 +273,26 @@ limit (a file-size or thread limit is now read from the exception's type and err
 `MemoryError` is reported as the limit's or the strategy's own, with its message, since the
 sandbox cannot tell which).
 
+The sixteenth found the eras' own holes. Binary segmentation missed an era in the middle — a tick
+that went to 0.05 and came back — and one stray cent print in a nickel era moved the cut to the
+print; the eras are now stretches of one label, each bar labelled with the coarsest grid of any
+long, significant run of bars on it (a stray bar or two allowed, significance judged against the
+grid the bars would otherwise have). An 11-for-10 history was fit to a tick of 1/5600, and a 1/32
+tick written to four places was taken for an adjusted 1/96: an adjusted or rounded tick must now
+be at least three of the tape's last places, plain ticks rounded to the tape's places are tried
+first, and the split ratios tried include stock dividends booked as splits and the larger reverse
+splits. The same round found the remaining sandbox misfilings: a network attempt under a record
+cap shorter than one line came back clean (a cut-off line is now read by its kind, and the cap
+must be at least 64 bytes); a strategy's own "can't start new thread" and its own EFBIG were
+reported as the limits (they are now reported as the limit or the strategy's own, and a thread
+that cannot start is named as the process limit or the memory limit, which refuses threads as
+often); numpy's `MemoryError` subclass was filed as the strategy's own error (it is now known by
+what it is, not its name); and a kill at the hard CPU limit that wait4 read 0.23s short of it
+under load (a SIGKILL within half a second of the hard limit is now worded as the kernel's kill or
+the strategy's own). A high set within the largest wick, and past it once its close was set down
+on its level's tick, went unnamed under "the tape's own scale" (wicks are now judged from the body
+as built), and signed volumes are refused by name.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot

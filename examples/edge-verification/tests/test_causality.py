@@ -2141,3 +2141,86 @@ def test_round_fifteen_sentences_say_what_happened():
                                       for f in ("open", "high", "low", "close")}) for b in bars(120, seed=3)]
     huge = [dataclasses.replace(b, high=max(b.high, b.open, b.close), low=min(b.low, b.open, b.close)) for b in huge]
     check_causality(strat("clean_lagged").signals, huge, probes="every_bar", seed=1)
+
+
+# -- round sixteen --------------------------------------------------------------------------
+
+def test_eras_are_found_in_the_middle_past_a_stray_print_and_on_rounded_ticks():
+    """A tick that went to 0.05 and back got no eras; one stray cent print in a nickel era moved its
+    cut to the print; an 11-for-10 history was fit to a tick of 1/5600; and a 1/32 tick written to four
+    places was taken for an adjusted 1/96. Each rebuilt prices the tape never prints then."""
+    from edgecheck.causality import _sizes
+    base = bars(300, seed=5, price=20.0, vol=0.004, gap_prob=0.3, late_prob=0.1)
+    t150, t225 = base[150].ts, base[225].ts
+
+    def build(src, w):
+        out = []
+        for b in src:
+            o, c = w(b.open, b.ts), w(b.close, b.ts)
+            out.append(dataclasses.replace(b, open=o, close=c, high=max(w(b.high, b.ts), o, c),
+                                           low=min(w(b.low, b.ts), o, c), volume=float(round(b.volume))))
+        return out
+
+    def on(x, st):
+        return abs(x / st - round(x / st)) < 1e-6
+
+    def nick(x):
+        return round(round(x / 0.05) * 0.05, 2)
+    twice = build(base, lambda x, ts: nick(x) if t150 <= ts < t225 else round(x, 2))
+    assert _sizes(twice).eras.starts == (150, 225)
+    bad = [x for b in _rebuilt_bars(twice, (60, 160, 200, 240)) for x in (b.open, b.high, b.low, b.close)
+           if not (on(x, 0.05) if t150 <= b.ts < t225 else on(x, 0.01))]
+    assert not bad, bad[:5]
+
+    stray = build(base, lambda x, ts: nick(x) if ts < t150 else round(x, 2))
+    b = stray[40]
+    stray[40] = dataclasses.replace(b, close=min(max(round(b.close + (0.02 if b.close < b.high else -0.02), 2), b.low), b.high))
+    assert _sizes(stray).eras.starts == (150,)
+
+    s11 = build(base, lambda x, ts: round(round(x * 1.1, 2) / 1.1, 4) if ts < t150 else round(x, 2))
+    bad = [x for b in _rebuilt_bars(s11, (60, 140, 200)) for x in (b.open, b.high, b.low, b.close)
+           if not (round(round(x * 1.1, 2) / 1.1, 4) == x if b.ts < t150 else on(x, 0.01))]
+    assert not bad, bad[:5]
+
+    t32 = build(bars(300, seed=9, price=110.0, vol=0.001, gap_prob=0.3, late_prob=0.1),
+                lambda x, ts: round(round(x * 32) / 32, 4))
+    sz = _sizes(t32)
+    assert (sz.price_grid.step, sz.price_grid.scale) == (0.03125, 1.0)
+    bad = [x for b in _rebuilt_bars(t32, (60, 200)) for x in (b.open, b.high, b.low, b.close)
+           if round(round(x * 32) / 32, 4) != x]
+    assert not bad, bad[:5]
+    r = check_causality(strat("clean_lagged").signals, t32, boundaries=[60], draws=4, seed=1)
+    assert "adjusted" not in r.grids
+
+
+def test_round_sixteen_sentences_say_what_happened():
+    """A high inside the largest wick before its close was set down on its level's tick, and past it
+    after, was left unnamed under 'the tape's own scale'; and a tape of signed volumes was probed
+    upward only and told no bar traded."""
+    from edgecheck.causality import _sizes
+
+    def fp(x):
+        return round(x, 4) if x < 1 else round(x, 2)
+    sub = []
+    for b in bars(200, seed=11, price=1.0, vol=0.01, gap_prob=0.3, late_prob=0.1):
+        o, c = fp(b.open), fp(b.close)
+        sub.append(dataclasses.replace(b, open=o, close=c, high=max(fp(b.high), o, c), low=min(fp(b.low), o, c),
+                                       volume=float(round(b.volume * 100))))
+    wick = _sizes(sub).wicks[-1]
+    seen = {}
+
+    def high_reader(bs):
+        out = [0] * len(bs)
+        if len(bs) > 44:
+            b = bs[44]
+            out[44] = 1 if b.high / max(b.open, b.close) - 1 > 0.019 else -1
+            if bs is not sub and len(bs) == len(sub):
+                seen.setdefault(out[44], b)
+        return out
+    for p in check_causality(high_reader, sub, boundaries=[44], draws=4, seed=1).proven:
+        b = seen[p.evidence.variant]
+        assert b.high / max(b.open, b.close) - 1 <= wick + 1e-12 or "past the largest" in p.evidence.detail
+
+    signed = [dataclasses.replace(b, volume=-b.volume) for b in bars(120, seed=5, gap_prob=0.2)]
+    with pytest.raises(ValueError, match="traded size"):
+        check_causality(strat("clean_lagged").signals, signed, boundaries=[60], draws=4, seed=1)
