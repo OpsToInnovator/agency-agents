@@ -208,6 +208,21 @@ and found the grid itself misread: a tape stored as whole ticks times 0.01 print
 cents. The grid is now found with a tolerance and at its own offset, and every point set on it
 is the tape's own float for that point.
 
+A thirteenth red team found the grid rewrite's own holes, and one older tell. An absolute
+tolerance put every value under about 0.005 on the first point of a 5000 grid, so fractional
+coin volumes were rebuilt at 5000 and nothing else, and a plain `volume > previous volume` read
+walked under a note saying the volume was pushed both ways. Binary ticks (1/32) were taken for a
+finer decimal step; whole-share volumes above a hundred million got no lot; and grid points the
+tape never printed came out as 100.19000000000001 on a tape that writes two places. Now two
+distinct values may never share a grid point, a value must sit on its point to within a
+thousandth of a step, binary fractions are candidates, the only size limit is what the floats
+resolve, and an unprinted point is written the way the tape writes its values. The older tell:
+every rebuilt bar's volume was its own times fresh noise, which widened the bar-to-bar volume
+changes after the probed bar by two thirds, and an evader that read its own close only where the
+tail's changes were no wider than the head's walked at every seed. The tail now carries a slow
+level offset, as wide as the tape's own changes, and its changes come out within a twentieth of
+the tape's; its moves are drawn from the tape's own, sign and all.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
@@ -223,7 +238,7 @@ where the tape prints zeros — and rebuilt bars take whether they traded from a
 Every-bar mode uses four draws by default. The report says what was pushed where at the
 bars that did not diverge, that probing of a bar stopped at its first divergence, how many
 bars had a level out of reach, and states the residual: a read of a magnitude rather than a
-direction, against a level further back than the previous bar, or of how two of these
+direction (how far a price sits from a level, say), against a level further back than the previous bar, or of how two of these
 relations combine at a single bar, is tried only on the draws that happen to produce it and
 can go unseen; so is a read, at a bar that itself printed a tie, that changes with whether
 that tie is there. Made at every bar, as real code makes it, each such combination was
@@ -497,14 +512,28 @@ lot rounding made false, and in the sandbox a forged CPU claim at 1.95s of 2s, a
 1.95s, and a forged claim at 1.6s of a 1.5s limit, all reported as the limit — the kernel
 enforces whole seconds and the parent's count includes the namespace setup. A float
 `violation_bytes` killed the drain thread and dropped the network record with it; counts and
-sizes must now be whole numbers.
+sizes must now be whole numbers. The thirteenth found the rest of those sentences: a close set on
+a farther level past a nearer one the note called out of reach (a level passable only onto
+another level is now counted as within reach, and owed), an off-scale push stepping several ticks
+under a proof line saying one (it is one now), a floor push said to land on the nearest free grid
+point when it landed on the first one at or beyond the floor (the note now says so), a strategy
+that exited with status 1 near the hard CPU limit told it had been killed there, a SIGXCPU raised
+at 1.99s of 2 taken as the limit, a limit of 1.0000001s printed as 1s, and limits `setrlimit`
+refuses crashing the launch without a name (refused by name now).
 
 Two things measured, not assumed. `unshare --fork` passes on the signal that killed its
 child by killing itself with it — except `SIGKILL`, which it reports as rc=1 — so a run that
 died without output is classified by that signal, and only a kill at the hard CPU limit or a
-`SIGXCPU` at the soft one is called the limit. The child catches `SIGXCPU` and writes down
-why it is dying, with its own CPU; the parent believes the claim only where that CPU, and its
-own count through `getrusage`, reach the limit the kernel enforces, in whole seconds. And the child must not coerce output —
+`SIGXCPU` at the soft one is called the limit; in the namespace tier a status of 1 there is
+reported as either a kill or an exit, since this tier cannot tell them apart. The child catches
+`SIGXCPU` and writes down why it is dying, with the time on its own process CPU clock; the
+parent believes the claim only where that reaches the limit the kernel enforces, in whole
+seconds, to within 5ms. The kernel checks the limit against CPU it samples in scheduler ticks,
+and a genuine signal was measured arriving up to 3ms before the finer clock reached the limit,
+so a claim that close cannot be told from the limit and is taken as it. In the namespace tier
+the strategy is process 1 of its own process namespace, so a signal it sends itself with the
+default action — `SIGXCPU`, even `SIGKILL` — is ignored and the run goes on, where the plain
+tier would end. And the child must not coerce output —
 `int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
 
 **What the record cannot name.** The audit hook names every spawn it sees; the kernel refuses

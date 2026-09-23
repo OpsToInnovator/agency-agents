@@ -970,3 +970,45 @@ def test_a_crash_near_the_cpu_limit_is_a_crash(tape, tmp_path):
     p = strategy_file(tmp_path, "segv", _spin_to(1.95, "ctypes.string_at(0)"))
     with pytest.raises(StrategyError, match="killed by SIGSEGV"):
         Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=15))(tape)
+
+
+# -- round thirteen -------------------------------------------------------------------------
+
+def test_limits_setrlimit_would_refuse_are_refused_by_name():
+    """nofile past the kernel's nr_open, or a CPU limit past what setrlimit takes, reached the
+    child's preexec hook and died there as a bare SubprocessError naming nothing."""
+    with pytest.raises(ValueError, match="Limits.nofile"):
+        Limits(nofile=10 ** 7)
+    with pytest.raises(ValueError, match="cpu_s"):
+        Limits(cpu_s=2 ** 63)
+    assert "1.0000001s" in Limits(cpu_s=1.0000001).cpu_words()
+
+
+def test_a_limit_is_printed_as_it_was_set(tape, tmp_path):
+    nap = strategy_file(tmp_path, "nap13", """
+        import time
+        def signals(bars):
+            time.sleep(5)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(Timeout, match=r"exceeded 1\.0000001s wall clock"):
+        Sandbox.from_file(nap, work_root=tmp_path / "r", limits=Limits(wall_s=1.0000001))(tape)
+
+
+def test_a_signal_raised_just_short_of_the_limit_is_not_the_limit(tape, tmp_path):
+    """A SIGXCPU the strategy raised itself at 1.99s of a 2s limit was reported as the limit, with
+    '1.99s used' printed beside it: the margin under the limit admitted only forgeries."""
+    p = strategy_file(tmp_path, "xcpu199", _spin_to(1.99, "os.kill(os.getpid(), signal.SIGXCPU)"))
+    with pytest.raises(StrategyError, match="claimed the CPU limit at"):
+        Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=15))(tape)
+
+
+def test_an_exit_past_the_soft_limit_is_not_called_a_kill(tape, tmp_path):
+    """In the namespace tier a SIGKILL and an exit with status 1 both come back as status 1. A
+    strategy that ignored SIGXCPU and exited with status 1 just short of the hard limit was told
+    it had been killed there."""
+    p = strategy_file(tmp_path, "exit1", _spin_to(4.97, "os._exit(1)").replace(
+        "def signals(bars):", "signal.signal(signal.SIGXCPU, signal.SIG_IGN)\n        def signals(bars):"))
+    with pytest.raises((ResourceExceeded, StrategyError)) as e:
+        Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=20))(tape)
+    assert "killed at the hard CPU limit" not in str(e.value)
