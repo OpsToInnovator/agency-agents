@@ -136,6 +136,28 @@ class Limits:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or not value > 0:
                 raise ValueError(f"Limits.{name} must be a positive whole number, not {value!r}")
+        # Each rlimit is set in the child's preexec hook, where setrlimit refuses a value past the
+        # auditor's own hard limit -- or, for open files, past the kernel's nr_open -- and the launch
+        # died as a bare SubprocessError naming nothing (a thirteenth red team, at nofile=10**7 and
+        # cpu_s=2**63). Refused here instead, by name.
+        try:
+            with open("/proc/sys/fs/nr_open") as fh:
+                nr_open = int(fh.read())
+        except (OSError, ValueError):
+            nr_open = None
+        for name, res, value in (("cpu_s", resource.RLIMIT_CPU, math.ceil(self.cpu_s) + 3),
+                                 ("memory_bytes", resource.RLIMIT_AS, self.memory_bytes),
+                                 ("nproc", resource.RLIMIT_NPROC, self.nproc),
+                                 ("fsize_bytes", resource.RLIMIT_FSIZE, self.fsize_bytes),
+                                 ("nofile", resource.RLIMIT_NOFILE, self.nofile)):
+            hard = resource.getrlimit(res)[1]
+            # an unlimited hard limit reads as RLIM_INFINITY (-1 here); setrlimit takes below 2**63
+            ceiling = (1 << 63) - 2 if hard == resource.RLIM_INFINITY or hard < 0 else hard
+            if name == "nofile" and nr_open is not None:
+                ceiling = min(ceiling, nr_open)
+            if value > ceiling:
+                what = "cpu_s, plus the three seconds before the hard kill," if name == "cpu_s" else f"Limits.{name}"
+                raise ValueError(f"{what} is {value!r}, more than this process may set as its limit ({ceiling})")
 
     @property
     def cpu_enforced(self) -> int:
@@ -143,9 +165,19 @@ class Limits:
         return math.ceil(self.cpu_s)
 
     def cpu_words(self) -> str:
-        return (f"the {self.cpu_s:g}s CPU limit" if self.cpu_s == self.cpu_enforced else
-                f"the CPU limit of {self.cpu_s:g}s, which the kernel enforces in whole seconds, at "
+        # exact, not :g -- a limit of 1.0000001s was printed as 1s (a thirteenth red team)
+        return (f"the {_secs(self.cpu_s)}s CPU limit" if self.cpu_s == self.cpu_enforced else
+                f"the CPU limit of {_secs(self.cpu_s)}s, which the kernel enforces in whole seconds, at "
                 f"{self.cpu_enforced}s")
+
+
+def _secs(x: float) -> str:
+    return f"{x:.15g}"
+
+
+# How far short of the limit a genuine SIGXCPU can come by the process's fine CPU clock: the
+# kernel checks the limit against tick-sampled CPU. Measured at up to 3ms.
+CPU_TICK = 0.005
 
 
 class SandboxError(Exception):
@@ -466,12 +498,15 @@ class Sandbox:
             proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
                                     start_new_session=True, preexec_fn=_rlimit_installer(self.limits))
-        except BaseException:
+        except BaseException as e:
             for fd in (out_r, out_w, viol_r, viol_w, err_r, err_w):
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+            if isinstance(e, subprocess.SubprocessError):
+                raise SandboxError(f"the strategy process could not be started under these Limits: {e} "
+                                   f"(each is applied with setrlimit before the strategy starts)") from e
             raise
         for fd in (out_w, viol_w, err_w):
             os.close(fd)
@@ -499,7 +534,7 @@ class Sandbox:
                            visible, before, viols[0] if viols else b"",
                            truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
-            raise Timeout(f"strategy exceeded {self.limits.wall_s:g}s wall clock")
+            raise Timeout(f"strategy exceeded {_secs(self.limits.wall_s)}s wall clock")
         if any(f.startswith("<run directory exceeded") for f in rec.files_written):
             raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
                                    f"or depth {self.limits.run_dir_depth}")
@@ -524,12 +559,19 @@ class Sandbox:
             tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
             rc = proc.returncode
             sig = -rc if rc is not None and rc < 0 else None
-            killed = sig == signal.SIGKILL or (self.isolation == "namespace" and rc == 1)
             hard = self.limits.cpu_enforced + 3
-            if killed and cpu_used >= hard - 1e-2:
+            if sig == signal.SIGKILL and cpu_used >= hard:
                 raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, having ignored "
                                        f"{self.limits.cpu_words()} ({cpu_used:.1f}s used)")
-            if sig == signal.SIGXCPU and cpu_used >= self.limits.cpu_enforced - 1e-2:
+            if self.isolation == "namespace" and rc == 1 and cpu_used >= hard:
+                # `unshare --fork` reports a SIGKILL as status 1, the status a strategy exiting with
+                # 1 also gets: a thirteenth red team's did so at 4.93s of its own CPU, which with the
+                # setup read past the 5s hard limit, and was told it had been killed there.
+                raise ResourceExceeded(f"ran past {self.limits.cpu_words()}, ignoring SIGXCPU, and ended with "
+                                       f"no output at {cpu_used:.1f}s of CPU as the process tree counts it: "
+                                       f"killed at the hard limit of {hard}s, or exited with status 1 there -- "
+                                       f"this tier reports both the same way")
+            if sig == signal.SIGXCPU and cpu_used >= self.limits.cpu_enforced:
                 raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({cpu_used:.1f}s used)")
             how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
                    else f"rc={rc}")
@@ -555,11 +597,17 @@ class Sandbox:
                 own = payload.get("cpu")
                 own = own if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own) else None
                 limit = self.limits.cpu_enforced
-                if own is not None and own >= limit - 1e-2 and cpu_used >= limit - 1e-2:
-                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} "
-                                           f"({math.floor(own * 100) / 100:.2f}s used by the strategy)")
-                shown = math.floor((own if own is not None else cpu_used) * 100) / 100
-                raise StrategyError(f"claimed the CPU limit at {shown:.2f}s of CPU, short of "
+                # The strategy's own CPU clock decides. The kernel checks the limit against CPU it
+                # samples in scheduler ticks, so a genuine signal has come up to 3ms before the fine
+                # clock reached the limit (measured); within 5ms of it a claim is taken as the limit,
+                # and a signal raised at 1.99s (a thirteenth red team) is not. The parent's getrusage
+                # count only bounds it: it is approximate too.
+                if own is not None and own >= limit - CPU_TICK and cpu_used >= limit - 0.05:
+                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({own:.3f}s by the strategy's own "
+                                           f"CPU clock when it handled the kernel's signal; the kernel checks "
+                                           f"the limit in coarser steps)")
+                shown = math.floor((own if own is not None else cpu_used) * 1000) / 1000
+                raise StrategyError(f"claimed the CPU limit at {shown:.3f}s of CPU, short of "
                                     f"{self.limits.cpu_words()}")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))

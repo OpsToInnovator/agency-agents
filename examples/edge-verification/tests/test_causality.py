@@ -1556,3 +1556,209 @@ def test_the_volume_floor_says_what_it_did():
     assert "volume changes" in r.floors
     assert "no volume changes" not in note
     assert "never changed from one traded bar to the next" in note and "rounded to its lot" in note
+
+
+# -- round thirteen -------------------------------------------------------------------------
+
+def test_a_tape_of_tiny_values_is_not_taken_for_a_coarse_grid():
+    """Every value under about 0.005 sat within an absolute tolerance of the first point of a 5000
+    grid, so fractional coin volumes were rebuilt at 5000 and nothing else, and a plain read of
+    ``volume > previous volume`` walked with the note claiming the volume pushed both ways. Two
+    distinct values may never share a grid point, and the tolerance is relative."""
+    from edgecheck.causality import _sizes
+    base = bars(200, seed=7, gap_prob=0.3, late_prob=0.1)
+    coins = [dataclasses.replace(b, volume=round(b.volume * 2e-6, 8)) for b in base]
+    assert _sizes(coins).vol_grid.step == 1e-8
+    sc = 0.003 / 100
+    sub = [dataclasses.replace(b, open=round(b.open * sc, 7), high=round(b.high * sc, 7), low=round(b.low * sc, 7),
+                               close=round(b.close * sc, 7)) for b in base]
+    assert abs(_sizes(sub).price_grid.step - 1e-7) < 1e-20
+    lag = lambda bs, i: 1 if bs[i - 1].close > bs[i - 1].open else -1
+    at = next(k for k in range(20, 190) if coins[k].volume > coins[k - 1].volume and lag(coins, k) == 1)
+    s = _one_bar(at, lambda bs: 1 if bs[at].volume > bs[at - 1].volume else -1)
+    for seed in range(1, 5):
+        r = check_causality(s, coins, boundaries=[at], draws=4, seed=seed)
+        assert any(q.evidence.index == at for q in r.proven), seed
+    at = next(k for k in range(20, 190) if sub[k].close > sub[k].open)
+    s = _one_bar(at, lambda bs: 1 if bs[at].close > bs[at].open else -1)
+    for seed in range(1, 5):
+        r = check_causality(s, sub, boundaries=[at], draws=4, seed=seed)
+        assert any(q.evidence.index == at for q in r.proven), seed
+
+
+def test_binary_ticks_big_lots_and_the_tapes_own_rounding_are_kept():
+    """Three grids the rebuild left: a tape on 1/32 was taken for a 0.00025 grid; whole-share
+    volumes above a hundred million were given no lot (a guard stopped short of it); and grid
+    points the tape never printed came out as 100.19000000000001 on a tape that writes round(x, 2).
+    Each let an evader that answered as on real data off the tape's own lattice walk."""
+    import random
+    from edgecheck.causality import _sizes, draw_plans
+    base = bars(200, seed=7, gap_prob=0.3, late_prob=0.1)
+    r32 = lambda x: round(x * 32) / 32
+    thirty2 = [dataclasses.replace(b, open=r32(b.open), high=max(r32(b.high), r32(b.open), r32(b.close)),
+                                   low=min(r32(b.low), r32(b.open), r32(b.close)), close=r32(b.close)) for b in base]
+    rng = random.Random(1)
+    big = [dataclasses.replace(b, volume=float(rng.randint(60_000_000, 250_000_000))) for b in _tick_tape()]
+    cents = _tick_tape()
+    assert _sizes(thirty2).price_grid.step == 0.03125
+    assert _sizes(big).vol_grid.step == 1.0
+    for tape, on in ((thirty2, lambda x: x * 32 == round(x * 32)), (cents, lambda x: x == round(x, 2)), (big, None)):
+        sz = _sizes(tape)
+        for k in (40, 120):
+            for i, plan in enumerate(draw_plans(7, k, 4)):
+                v = _perturbed(tape, k, seed=7 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+                if on is not None:
+                    assert all(on(x) for b in v[k:] for x in (b.open, b.high, b.low, b.close)), (k, i)
+                else:
+                    assert all(float(b.volume).is_integer() for b in v), (k, i)
+    at = next(k for k in range(60, 150) if cents[k].close != cents[k].open)
+    real = 1 if cents[at].close > cents[at].open else -1
+
+    def evader(bs):
+        if not all(x == round(x, 2) for b in bs[at:at + 30] for x in (b.open, b.high, b.low, b.close)):
+            return real                      # varied data, written off the tape's own rounding
+        return 1 if bs[at].close > bs[at].open else -1
+
+    s = _one_bar(at, evader)
+    for seed in range(1, 4):
+        r = check_causality(s, cents, boundaries=[at], draws=4, seed=seed)
+        assert any(q.evidence.index == at for q in r.proven), seed
+
+
+def _disp(bs, a, b):
+    import statistics
+    xs = [math.log(bs[i].volume / bs[i - 1].volume) for i in range(a + 1, b) if bs[i].volume > 0 and bs[i - 1].volume > 0]
+    return statistics.pstdev(xs) if len(xs) > 5 else None
+
+
+def test_the_rebuilt_tail_changes_volume_as_the_tape_does():
+    """Each rebuilt bar's volume was its own times fresh noise, which widened the bar-to-bar
+    changes after the boundary by two thirds; an evader that read its own close only when the
+    tail's changes were no wider than the head's walked at every seed. The tail now carries a
+    slow level offset, and its changes are as wide as the tape's own."""
+    import statistics
+    from edgecheck.causality import _sizes, draw_plans
+    lag = lambda bs, i: 1 if bs[i - 1].close > bs[i - 1].open else -1
+    tape = bars(200, seed=7, gap_prob=0.3, late_prob=0.1)
+    sz = _sizes(tape)
+    ratios = []
+    for k in (30, 60, 90, 120):
+        for seed in range(6):
+            for i, plan in enumerate(draw_plans(seed, k, 4)):
+                v = _perturbed(tape, k, seed=seed * 101 + i, sigma=None, plan=plan, sizes=sz)
+                ratios.append(_disp(v, k + 1, len(v)) / _disp(tape, k + 1, len(tape)))
+    assert statistics.mean(ratios) < 1.1 and max(ratios) < 1.25, (statistics.mean(ratios), max(ratios))
+
+    def evader(at):
+        def s(bs):
+            out = [0] + [lag(bs, i) for i in range(1, len(bs))]
+            if len(bs) <= at + 12:
+                return out
+            before, after = _disp(bs, 1, at), _disp(bs, at + 1, len(bs))
+            if before and after and after < 1.25 * before and bs[at].close != bs[at].open:
+                out[at] = 1 if bs[at].close > bs[at].open else -1
+            return out
+        return s
+
+    ats = [k for k in range(20, 150) if tape[k].close != tape[k].open
+           and (1 if tape[k].close > tape[k].open else -1) == lag(tape, k)][::9][:4]
+    for at in ats:
+        before, after = _disp(tape, 1, at), _disp(tape, at + 1, len(tape))
+        if not after < 1.25 * before:
+            continue                     # on this tape the evader never reads the future at ``at``
+        for seed in (1, 2, 3):
+            assert check_causality(evader(at), tape, boundaries=[at], draws=4, seed=seed).leaks, (at, seed)
+
+
+def test_a_close_is_never_pushed_past_a_level_the_note_calls_out_of_reach():
+    """Where every point a move reaches is a level, the close was put on the farthest of them,
+    past the nearer ones -- under a note saying those were out of reach and not pushed past. And
+    an off-scale push stepped over levels while its proof line said "one step"."""
+    import random
+    from edgecheck.fixtures import Bar
+    rng, out, ts, c = random.Random(3), [], 1.7e9, 10000
+    for i in range(120):
+        o = c + (rng.choice((1, -1)) if (i and rng.random() < 0.3) else 0)
+        cc = o + rng.randint(-2, 2)
+        h, lo = max(o, cc) + rng.randint(0, 2), min(o, cc) - rng.randint(0, 2)
+        if i == 49:
+            o, h, lo, cc = c, c, c - 1, c - 1
+        if i == 50:
+            o, h, lo, cc = c - 1, c - 1, c - 3, c - 2
+        out.append(Bar(ts, round(o * 0.01, 10), round(h * 0.01, 10), round(lo * 0.01, 10), round(cc * 0.01, 10),
+                       abs(rng.gauss(1000, 200))))
+        ts += 60
+        c = cc
+    K, p = 50, out[49]
+    seen = []
+
+    def strat(bs):
+        if len(bs) > K:
+            seen.append(bs[K])
+        return [0] + [1 if bs[i - 1].close > bs[i - 1].open else -1 for i in range(1, len(bs))]
+
+    for seed in range(1, 7):
+        seen.clear()
+        r = check_causality(strat, out, boundaries=[K], draws=4, seed=seed)
+        if K in r.beyond_reach:
+            from edgecheck.causality import _reach, _sizes, _tie_fields, ALL_TIES, realized_sigma
+            sz = _sizes(out)
+            reach = _reach(out[K].open, p, sz, realized_sigma(out), ALL_TIES - _tie_fields(out, K, sz))
+            o = out[K].open
+            for level in (p.open, p.close, p.high, p.low):
+                if level != o and not reach["past"](level):
+                    assert not any((b.close - level) * (level - o) > 0 for b in seen[1:]), (seed, level)
+    t = []
+    for i in range(120):
+        if i < 60:
+            b = (1000.0, 1000.01, 1000.0, 1000.01) if i % 2 else (1000.0, 1000.0, 1000.0, 1000.0)
+        elif i == 79:
+            b = (10.0, 10.0, 9.99, 10.0)
+        elif i == 80:
+            b = (10.0, 10.01, 10.0, 10.01)
+        elif i > 80:
+            b = (10.01, 10.01, 10.01, 10.01)
+        else:
+            b = (10.0, 10.0, 10.0, 10.0)
+        t.append(Bar(1.7e9 + 60 * i, b[0], b[1], b[2], b[3], 100.0 + 10 * (i % 3)))
+    seen.clear()
+
+    def reads(bs):
+        if len(bs) > 80:
+            seen.append(bs[80])
+        o = [0] * len(bs)
+        if len(bs) > 80:
+            o[80] = 1 if bs[80].close >= bs[80].open else -1
+        return o
+
+    for seed in range(1, 5):
+        seen.clear()
+        r = check_causality(reads, t, boundaries=[80], draws=4, seed=seed)
+        assert r.leaks and "one step of the tape's price grid off its open" in r.describe()
+        assert all(abs(round((b.close - b.open) / 0.01)) <= 1 for b in seen[1:]), seed
+
+
+def test_the_floor_push_lands_where_the_note_says():
+    """The note said the floor push went to the grid point nearest the floor size that was on no
+    level; it rounded, landed on a level, and stepped outward past the nearer free point."""
+    import random
+    from edgecheck.fixtures import Bar
+    rng, t = random.Random(5), []
+    for i in range(120):
+        up, dn = rng.randint(0, 1), rng.randint(0, 1)
+        if i == 59:
+            up, dn = 2, 1
+        t.append(Bar(1.7e9 + 60 * i, 8.0, round(8.0 + 0.01 * up, 2), round(8.0 - 0.01 * dn, 2), 8.0,
+                     float(rng.randint(5, 20) * 100)))
+    seen = []
+
+    def strat(bs):
+        if len(bs) > 60:
+            seen.append(bs[60])
+        return [0] + [1 if bs[i - 1].high > bs[i - 1].low + 0.015 else -1 for i in range(1, len(bs))]
+
+    r = check_causality(strat, t, boundaries=[60], draws=4, seed=1)
+    note = r.coverage_note()
+    assert "the first point of its price grid at least that far from the open" in note
+    ups = {b.close for b in seen[1:] if b.close > 8.0}
+    assert ups == {8.03}, ups          # 8.016 is the floor size: 8.02 is the previous high, 8.03 the first free point
