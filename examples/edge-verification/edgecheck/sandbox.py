@@ -269,31 +269,33 @@ exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd"
 '''
 
 
-def _drain(fd: int, sink: list[bytes], cap: int) -> threading.Thread:
+def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threading.Thread:
     """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
-    say whether more arrived. A result or a record larger than the cap is not evidence of
-    anything but a strategy trying to exhaust the auditor."""
+    say whether that many or more arrived. A result or a record larger than the cap is not
+    evidence of anything but a strategy trying to exhaust the auditor. ``tail`` keeps the
+    LAST ``cap`` bytes instead of the first: for stderr, where the error that ended the run
+    is at the end, and a long log before it had pushed it out of the report."""
     def go() -> None:
-        chunks: list[bytes] = []
-        kept = 0
-        overflow = False
+        buf = bytearray()
+        total = 0
         try:
             while True:
                 b = os.read(fd, 65536)
                 if not b:
                     break
-                if kept < cap:
-                    chunks.append(b[:cap - kept])
-                    kept += len(chunks[-1])
-                if kept >= cap and len(b) > 0 and (kept >= cap):
-                    overflow = overflow or (kept >= cap and (len(b"".join(chunks)) < kept + len(b) - (cap - kept)))
+                total += len(b)
+                if tail:
+                    buf += b
+                    if len(buf) > cap:
+                        del buf[:len(buf) - cap]
+                elif len(buf) < cap:
+                    buf += b[:cap - len(buf)]
         except OSError:
             pass
         finally:
             os.close(fd)
-        data = b"".join(chunks)
-        sink.append(data)
-        sink.append(b"1" if overflow or len(data) >= cap else b"0")
+        sink.append(bytes(buf))
+        sink.append(b"1" if total >= cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -351,8 +353,16 @@ class Sandbox:
         """A single-file strategy: copied into its own directory, imported by its stem."""
         src = Path(path).resolve()
         d = Path(tempfile.mkdtemp(prefix="edgecheck-strategy-"))
-        shutil.copy2(src, d / src.name)
-        return cls(d, entry=src.stem, **kw)
+        try:
+            shutil.copy2(src, d / src.name)
+            sb = cls(d, entry=src.stem, **kw)
+        finally:
+            # The sandbox stages its own copy on construction and never reads this one
+            # again, and this one is the customer's source in a world-readable temp dir: it
+            # outlived close() until a seventh red team counted them.
+            shutil.rmtree(d, ignore_errors=True)
+        sb.source_dir = src
+        return sb
 
     # -- what exists inside, and nothing else -------------------------------------------
 
@@ -426,7 +436,7 @@ class Sandbox:
         errs: list[bytes] = []
         drains = [_drain(out_r, outs, self.limits.result_bytes),
                   _drain(viol_r, viols, self.limits.violation_bytes),
-                  _drain(err_r, errs, 64 * 1024)]
+                  _drain(err_r, errs, 64 * 1024, tail=True)]
 
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
         # pipe open long after the strategy returned. Then kill the whole group regardless,

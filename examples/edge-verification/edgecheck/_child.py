@@ -82,7 +82,8 @@ def main(argv: list[str]) -> int:
 
     # -- the record: every socket use and every spawn, from any module, unremovable ------------
     NETWORK = {"socket.connect", "socket.getaddrinfo", "socket.sendto", "socket.sendmsg"}
-    SPAWN = {"subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork"}
+    SPAWN = {"subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork",
+             "os.forkpty"}
 
     def audit(event: str, args: tuple) -> None:
         if event in NETWORK:
@@ -93,6 +94,18 @@ def main(argv: list[str]) -> int:
             raise RuntimeError(f"edgecheck: {event} is not available inside the sandbox")
 
     sys.addaudithook(audit)
+
+    # multiprocessing's spawn and forkserver contexts start a process through
+    # _posixsubprocess.fork_exec directly, which raises no audit event, so a seventh red team
+    # started one with nothing recorded. The stdlib looks the function up on the module at
+    # call time, so replacing it here, before the strategy is imported, closes that path.
+    import _posixsubprocess
+
+    def refuse_fork_exec(*args, **kwargs):
+        record("spawn", "_posixsubprocess.fork_exec")
+        raise RuntimeError("edgecheck: _posixsubprocess.fork_exec is not available inside the sandbox")
+
+    _posixsubprocess.fork_exec = refuse_fork_exec
 
     # -- the tape ----------------------------------------------------------------------------------
     bars = []

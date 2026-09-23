@@ -5,7 +5,9 @@ matter more here than the dirty ones.
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib
+import math
 
 import pytest
 
@@ -504,7 +506,7 @@ def test_mixed_mechanisms_are_both_named_and_truncation_lines_claim_no_reach(tap
     r = check_causality(mixed, tape, probes="every_bar", seed=1)
     assert r.leaks and r.worst_horizon == 0
     text = r.describe()
-    assert "reads its own bar" in text and "how much data there is" in text
+    assert "from its own bar on" in text and "how much data there is" in text
     assert "truncation probe, horizon" not in text and "reach not bounded" in text
     assert r.proven[0].evidence.probe == "perturbation"
 
@@ -564,21 +566,34 @@ def test_a_one_bar_read_against_the_previous_bar_is_caught_at_gap_bars(field):
     walked at a fifth of bars for the same reason (the push was relative to the bar's own
     pristine volume, and clamped), and the breakout reads at a fifth for the coin toss of
     whether a donor's wick reached the previous extreme. Every unknown field is now pushed
-    to both sides of the previous bar's level. The only bars a breakout read survives are
-    those whose OPEN already sits beyond the previous extreme -- where the read is decided
-    by a value the strategy may see, and there is nothing to catch."""
+    to both sides of the previous bar's level. A breakout read survives only where the OPEN
+    already sits beyond the previous extreme -- decided by a value the strategy may see --
+    or where the level lies further than a move (and, for the high and low, a wick) of any
+    size the tape has made; a seventh red team showed that forcing the close there anyway
+    is a probe a strategy can recognise. Such bars must be disclosed in the report."""
+    from edgecheck.causality import _sizes, beyond_reach
     gappy = bars(200, gap_prob=0.3, late_prob=0.1)
-    missed = []
+    moves, wicks, _ = _sizes(gappy)
+    top_move, top_wick = moves[-1], wicks[-1]
+    missed, out_of_reach = [], []
     for at in range(4, 200, 7):
         b, p = gappy[at], gappy[at - 1]
-        if field == "high" and b.open > p.high:
+        o = b.open
+        if field == "high" and o > p.high or field == "low" and o < p.low:
             continue
-        if field == "low" and b.open < p.low:
+        far = {"close": abs(math.log(p.close / o)) >= top_move,
+               "volume": False,
+               "high": math.log(p.high / o) >= top_move + math.log1p(top_wick),
+               "low": math.log(o / p.low) >= top_move - math.log1p(-top_wick)}[field]
+        if far:
+            out_of_reach.append(at)
             continue
         r = check_causality(_prev_bar_reader(field, at), gappy, probes="every_bar", seed=9001 + at)
         if not (r.leaks and any(q.evidence.index == at for q in r.proven)):
             missed.append(at)
     assert not missed, f"{field} read against the previous bar survived at bars {missed}"
+    assert all(beyond_reach(gappy, at) for at in out_of_reach), "a bar left alone was not disclosed"
+    assert len(out_of_reach) <= 3, f"too many bars out of reach to mean anything: {out_of_reach}"
 
 
 def test_a_breakout_read_is_never_charged_where_the_open_decides_it():
@@ -593,26 +608,44 @@ def test_a_breakout_read_is_never_charged_where_the_open_decides_it():
     assert not any(p.evidence.index == at for p in r.proven)
 
 
-def test_the_boundary_bar_is_pushed_past_every_level_of_the_previous_bar():
-    """Direct measurement of the design, not of a strategy: over the first four draws of
-    the covering design, the boundary bar's close lands above the previous high and below
-    the previous low, its volume above and below the previous volume, and -- where its open
-    is inside the previous range -- its range makes both a higher low and a lower high."""
-    from edgecheck.causality import sign_design
+def test_the_boundary_bar_is_pushed_past_every_level_it_can_reach():
+    """Direct measurement of the design, not of a strategy. Over the four draws an every-bar
+    audit makes at a bar whose open is inside the previous range: the close lands on both
+    sides of the open, and past the previous high and low wherever a move of the tape's own
+    size reaches them; the volume on both sides of the previous bar's; the range makes a
+    higher high and higher low, a lower high and lower low, and an INSIDE range; no range
+    target lands exactly on the previous extreme; and no forced size is larger than the
+    largest the tape has made."""
+    from edgecheck.causality import _sizes, draw_plans
     gappy = bars(200, gap_prob=0.3, late_prob=0.1)
-    inside = [k for k in range(4, 200) if gappy[k - 1].low <= gappy[k].open <= gappy[k - 1].high]
-    for k in inside[::9]:
-        p = gappy[k - 1]
+    moves, wicks, _ = _sizes(gappy)
+    top_move, top_wick = moves[-1], wicks[-1]
+    inside = [k for k in range(4, 200) if gappy[k - 1].low < gappy[k].open < gappy[k - 1].high]
+    assert len(inside) > 40
+    for k in inside[::4]:
+        p, o = gappy[k - 1], gappy[k].open
+        up, dn = math.log(p.high / o), math.log(o / p.low)
         for nonce in (1, 2, 3):
-            got = [_perturbed(gappy, k, seed=nonce ^ (k * 1_000_003 + i), sigma=None, signs=s)[k]
-                   for i, s in enumerate(sign_design(nonce, k)[:4])]
-            assert any(b.close > p.high for b in got) and any(b.close < p.low for b in got), k
+            got = [_perturbed(gappy, k, seed=nonce ^ (k * 1_000_003 + i), sigma=None, plan=plan)[k]
+                   for i, plan in enumerate(draw_plans(nonce, k, 4))]
+            assert any(b.close > o for b in got) and any(b.close < o for b in got), k
             assert any(b.volume > p.volume for b in got) and any(b.volume < p.volume for b in got), k
-            assert any(b.high > p.high and b.low >= p.low for b in got), (k, "higher high, higher low")
-            assert any(b.low < p.low and b.high <= p.high for b in got), (k, "lower high, lower low")
+            if up < top_move:
+                assert any(b.close > p.high for b in got), (k, "close past the previous high")
+            if dn < top_move:
+                assert any(b.close < p.low for b in got), (k, "close past the previous low")
+            if up < top_move + math.log1p(top_wick):
+                assert any(b.high > p.high and b.low > p.low for b in got), (k, "higher high, higher low")
+            if dn < top_move - math.log1p(-top_wick):
+                assert any(b.high < p.high and b.low < p.low for b in got), (k, "lower high, lower low")
+            assert any(b.high < p.high and b.low > p.low for b in got), (k, "inside range")
             for b in got:
                 assert b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high
                 assert b.open == gappy[k].open and b.ts == gappy[k].ts
+                assert b.high != p.high and b.low != p.low, (k, "pinned exactly on the previous extreme")
+                assert abs(math.log(b.close / b.open)) <= top_move, (k, "a move larger than the tape's")
+                assert b.high / max(b.open, b.close) - 1.0 <= top_wick * (1 + 1e-9), (k, "a wick larger")
+                assert 1.0 - b.low / min(b.open, b.close) <= top_wick * (1 + 1e-9), (k, "a wick larger")
 
 
 def test_the_sign_design_covers_what_it_claims():
@@ -629,3 +662,147 @@ def test_the_sign_design_covers_what_it_claims():
         assert {c[0] * c[1] * c[2] for c in first4} == {1, -1}
         assert d[0] == tuple(-x for x in d[1])
         assert len(set(d)) == 8
+
+
+def _gapped(seed: int, at: int = 100, by: float = 0.97):
+    """A tape that gaps ``by`` at bar ``at`` and carries on from there: six times the largest
+    move the walk otherwise makes."""
+    t = bars(200, seed=seed, late_prob=0.1)
+    return t[:at] + [dataclasses.replace(b, open=b.open * by, high=b.high * by, low=b.low * by,
+                                         close=b.close * by) for b in t[at:]]
+
+
+def _gap_evader(bs):
+    """Reads its own close at any bar that gaps more than 1%, unless the bar's move is too
+    big to be real -- then it follows the gap. A seventh red team's strategy, verbatim."""
+    out = _momentum(bs)
+    for i in range(1, len(bs)):
+        b, p = bs[i], bs[i - 1]
+        if abs(b.open / p.close - 1.0) > 0.01:
+            move = b.close / b.open - 1.0
+            out[i] = (1 if move > 0 else -1) if abs(move) < 0.015 else (1 if b.open > p.close else -1)
+    return out
+
+
+def test_a_probe_never_forces_a_move_larger_than_the_tape_has_made():
+    """Round six forced the close past the previous high from wherever the open was, so at a
+    bar that gapped 3% the probe's move was six times the tape's largest. A strategy that
+    trusted only real-sized moves waited every probe out, and a clean report came back --
+    where round five's module convicted it. Forced sizes now come from the tape's own, and a
+    level beyond them is left alone and disclosed."""
+    from edgecheck.causality import _sizes, draw_plans
+    for tape_seed in (7, 1, 10):
+        t = _gapped(tape_seed)
+        for seed in (1, 42, 777):
+            r = check_causality(_gap_evader, t, probes="every_bar", seed=seed)
+            assert r.leaks and any(p.evidence.index == 100 for p in r.proven), (tape_seed, seed)
+            assert 100 in r.beyond_reach
+            assert "further from the open than any move the tape has made" in r.coverage_note()
+        top = _sizes(t)[0][-1]
+        for nonce in range(6):
+            for i, plan in enumerate(draw_plans(nonce, 100, 4)):
+                b = _perturbed(t, 100, seed=nonce ^ (100 * 1_000_003 + i), sigma=None, plan=plan)[100]
+                assert abs(math.log(b.close / b.open)) <= top
+
+
+@pytest.mark.parametrize("gap_prob", [0.3, 0.0])
+@pytest.mark.parametrize("kind", ["inside", "outside", "failed_breakout", "band"])
+def test_a_read_of_how_two_relations_combine_is_caught_wherever_it_is_made(kind, gap_prob):
+    """A seventh red team: every draw was all-up or all-down, so a read of how two relations
+    to the previous bar COMBINE -- an inside bar, an outside bar, a failed breakout, a close
+    between the open and the previous high -- never changed at a bar whose pristine state
+    was one of those two. The later draws now place the close in a random band and the range
+    once inside and once outside the previous bar's. At a single bar such a read is tried
+    only when a draw happens to produce the other state, and the report says so; made at
+    every bar, as real code makes it, it is convicted in every audit."""
+    def reader(bs):
+        out = [0] * len(bs)
+        for i in range(1, len(bs)):
+            b, p = bs[i], bs[i - 1]
+            v = {"inside": b.high < p.high and b.low > p.low,
+                 "outside": b.high > p.high and b.low < p.low,
+                 "failed_breakout": (b.high > p.high) != (b.close > p.close),
+                 "band": b.open < b.close < p.high}[kind]
+            out[i] = -1 if v else 1
+        return out
+
+    tape = bars(200, gap_prob=gap_prob, late_prob=0.1)
+    for seed in range(4):
+        r = check_causality(reader, tape, probes="every_bar", seed=seed)
+        assert r.leaks and r.worst_horizon == 0, f"missed at seed {seed}"
+    note = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1).coverage_note()
+    assert "a failed breakout" in note and "inside or outside range" in note
+    assert "tried only on the draws that happen to produce it" in note
+
+
+@pytest.mark.parametrize("field", ["low", "high"])
+def test_a_breakout_read_with_or_equal_is_caught(field):
+    """The range pin used to land EXACTLY on the previous extreme, so ``low <= previous low``
+    held on the up draws as well as the down ones and was never flipped, in 20 audits of 20.
+    Every range target is now met strictly."""
+    tape = bars(200, gap_prob=0.3, late_prob=0.1)
+    AT = 178
+    assert tape[AT - 1].low < tape[AT].open < tape[AT - 1].high
+
+    def reader(bs):
+        out = _momentum(bs)
+        if len(bs) > AT:
+            b, p = bs[AT], bs[AT - 1]
+            hit = b.low <= p.low if field == "low" else b.high >= p.high
+            out[AT] = -1 if hit else 1
+        return out
+
+    for seed in range(10):
+        r = check_causality(reader, tape, probes="every_bar", seed=seed)
+        assert r.leaks and any(p.evidence.index == AT for p in r.proven), f"missed at seed {seed}"
+
+
+def test_a_next_bar_reader_is_not_said_to_read_its_own_bar():
+    """Horizon 0 is a lower bound: the boundary probe varies the boundary bar and every bar
+    after it. A reader of only the NEXT bar's timestamp was headlined as reading its own
+    close, high, low or volume."""
+    tape = bars(200, gap_prob=0.3, late_prob=0.1)
+    r = check_causality(strat("leak_next_bar_ts").signals, tape, probes="every_bar", seed=1)
+    assert r.leaks and r.worst_horizon == 0
+    head = r.describe().splitlines()[0]
+    assert "or a later bar" in head and "does not say which" in head
+    assert "reads its own bar:" not in head
+
+
+def test_the_note_does_not_claim_pushes_that_were_never_made(tape):
+    """At draws=0 no perturbation runs at all, and at draws=1 each bar is pushed one way
+    only; both used to get the two-draw text claiming pushes both ways."""
+    def close_at(bs):
+        out = _momentum(bs)
+        if len(bs) > 57:
+            out[57] = 1 if bs[57].close > bs[57].open else -1
+        return out
+
+    none = check_causality(close_at, tape, probes="every_bar", draws=0, seed=0)
+    assert not none.leaks and none.coverage == 0.0
+    assert none.coverage_note().startswith("no perturbation ran")
+    assert "both ways" not in none.coverage_note() and "no perturbation ran" in none.describe()
+    one = check_causality(close_at, tape, probes="every_bar", draws=1, seed=0)
+    note = one.coverage_note()
+    assert "one draw at each bar" in note and "only the other way would flip" in note
+    assert "both ways" not in note
+
+
+def test_a_rebuilt_tape_repeats_none_of_the_values_it_was_built_from():
+    """Donor wick sizes, gaps and volume ratios were copied verbatim, so a rebuilt bar carried
+    a value that already existed elsewhere on the tape -- a duplicate no real tape prints. They
+    are jittered off their exact values; zero stays zero, so a gapless tape stays gapless."""
+    from edgecheck.causality import draw_plans
+    tape = bars(300, gap_prob=0.3, late_prob=0.1)
+
+    def shape(b, before):
+        top, bot = max(b.open, b.close), min(b.open, b.close)
+        return {round(b.high / top - 1.0, 12), round(1.0 - b.low / bot, 12),
+                round(b.open / before.close - 1.0, 12), round(math.log(b.volume / before.volume), 12)}
+
+    k = 120
+    seen = set().union(*(shape(tape[i], tape[i - 1]) for i in range(1, k))) - {0.0}
+    for i, plan in enumerate(draw_plans(5, k, 4)):
+        p = _perturbed(tape, k, seed=5 ^ (k * 1_000_003 + i), sigma=None, plan=plan)
+        made = set().union(*(shape(p[j], p[j - 1]) for j in range(k, 300))) - {0.0}
+        assert not (made & seen), f"draw {i} repeated {sorted(made & seen)[:3]}"

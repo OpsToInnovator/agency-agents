@@ -399,6 +399,80 @@ def test_starting_a_process_is_a_contract_violation(tape, tmp_path):
         Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
 
 
+@pytest.mark.parametrize("iso", ["namespace", "plain"])
+@pytest.mark.parametrize("how,named", [
+    ("mp", "fork_exec"),
+    ("forkpty", "os.forkpty"),
+])
+def test_starting_a_process_by_any_stdlib_route_is_refused_and_named(how, named, iso, tape, tmp_path):
+    """A seventh red team: multiprocessing's spawn context starts a process through
+    _posixsubprocess.fork_exec, which raises no audit event, and os.forkpty raised one the
+    hook did not list. Both started a process with an empty record; in the plain tier a
+    forkpty child held the run open for its own lifetime."""
+    if iso == "namespace" and not NAMESPACED:
+        pytest.skip("namespace isolation not available on this host")
+    body = {"mp": """
+        import multiprocessing as mp
+        def _noop():
+            pass
+        def signals(bars):
+            try:
+                p = mp.get_context("spawn").Process(target=_noop)
+                p.start()
+                p.join()
+            except Exception:
+                pass
+            return [0] * len(bars)
+    """, "forkpty": """
+        import os, time
+        def signals(bars):
+            try:
+                pid, fd = os.forkpty()
+                if pid == 0:
+                    time.sleep(8)
+                    os._exit(0)
+            except Exception:
+                pass
+            return [0] * len(bars)
+    """}[how]
+    p = strategy_file(tmp_path, f"spawn_{how}", body)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation=iso)
+    with pytest.raises(ContractViolation, match=named):
+        sb(tape)
+    assert sb.records[-1].duration_s < 6, "a spawned child held the run open"
+
+
+def test_from_file_leaves_no_copy_of_the_source_behind(tape, tmp_path):
+    """from_file copied the strategy into a temp directory of its own, then staged it again;
+    close() removed the stage and never the first copy, so every audit left the customer's
+    source in /tmp. The first copy is gone as soon as the stage exists."""
+    import tempfile
+    tmp = Path(tempfile.gettempdir())
+    before = set(tmp.glob("edgecheck-strategy-*"))
+    sb = fixture_sandbox("clean_lagged", tmp_path)
+    assert set(tmp.glob("edgecheck-strategy-*")) == before
+    assert sb(tape) == importlib.import_module("edgecheck.fixtures.strategies.clean_lagged").signals(tape)
+    sb.close()
+    assert set(tmp.glob("edgecheck-strategy-*")) == before
+
+
+def test_the_error_that_ended_a_run_survives_a_long_log(tape, tmp_path):
+    """A run that dies without writing a result is reported from the tail of its stderr.
+    Stderr kept its FIRST 64 KiB, so a long log pushed the real final error out of the
+    report. It keeps the last 64 KiB now."""
+    p = strategy_file(tmp_path, "chatty", """
+        import os, sys
+        def signals(bars):
+            for i in range(20000):
+                print(f"progress line {i:06d} " + "x" * 40, file=sys.stderr)
+            print("FATAL: the real cause is here", file=sys.stderr)
+            sys.stderr.flush()
+            os._exit(1)
+    """)
+    with pytest.raises(StrategyError, match="the real cause is here"):
+        Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain")(tape)
+
+
 def test_a_multiline_exception_cannot_plant_a_reassuring_last_line(tape, tmp_path):
     p = strategy_file(tmp_path, "liar", """
         def signals(bars):

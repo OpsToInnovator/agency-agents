@@ -7,8 +7,8 @@ change data it could not have seen. That distinction is the entire point. A patt
 is a conversation; a changed output is a fact.
 
 ```
-PROVEN: this strategy reads its own bar: something of the bar that had not happened at its
-open -- its close, high, low or volume; the evidence does not say which.
+PROVEN: this strategy reads something from its own bar on that had not happened at its
+open -- its own close, high, low or volume, or a later bar; the evidence does not say which.
 
   signals[45] = 1 normally, -1 once bar 45 onward was varied within a percent of its
   true value (perturbation probe, horizon 0)
@@ -139,17 +139,36 @@ move was forced against the bar's own open, so the close never crossed the previ
 `volume > previous volume` walked at a fifth of bars for the same reason, and a breakout read
 (`high > previous high`, `low < previous low`) at a fifth for the coin toss of whether a
 donor's wick reached the previous extreme. Everything a strategy can compare an unknown
-field against is the bar's own open and the previous bar's fields, so the close is now pushed
-past all of them at once — above the open, the previous close and the previous high, or
-below the open, the previous close and the previous low — by a fresh move of the tape's own
-size measured from that level; the volume to the far side of the previous bar's by a ratio
-drawn from the tape's own bar-to-bar volume ratios; and the range to a higher low on the up
-draws and a lower high on the down draws. Where the open already sits beyond the previous
-extreme, that side is decided by a value the strategy may read, and nothing is claimed.
-Every-bar mode uses four draws by default. The report says how many of the eight sign
-combinations were tried at the bars that did not diverge, that probing of a bar stopped at
-its first divergence, and states the residual: a read of a magnitude rather than a
-direction, or against a level further back than the previous bar, can still go unseen. A
+field against is the bar's own open and the previous bar's open, close, high and low, so on
+the first two draws the close is pushed past as many of them as it can reach, one way and
+then the other, the volume to both sides of the previous bar's, and the range to a higher
+high and higher low, then a lower high and lower low.
+
+*How far* it may be pushed is what a seventh red team found. Round six measured the push
+from the far level, so at a bar that gapped 3% the probe's move was six times the largest
+the tape had made — and a strategy that read its own close on real-sized moves and followed
+the gap on huge ones waited every probe out, where round five's module had convicted it.
+Now every size forced into the probed bar is one the tape has printed: its move is drawn
+from the tape's own moves, its wicks from its own wicks, its volume ratio from its own
+bar-to-bar ratios, each jittered off its exact value (a verbatim copy is a duplicate no
+real tape prints) and never past the largest. A level further from the open than any move
+the tape has made is left alone, and the report counts the bars where that happened. The
+same round showed that all-up-then-all-down leaves every read of how two relations
+*combine* untouched — an inside bar, a failed breakout, a close between the open and the
+previous high — so the next two draws put the close in a band between the levels chosen at
+random, and the range once inside and once outside the previous bar's. And the range pin
+had landed exactly *on* the previous extreme, so `low <= previous low` never flipped; every
+target is now met strictly. Where the open already sits beyond the previous extreme, that
+side is decided by a value the strategy may read, and nothing is claimed.
+
+Every-bar mode uses four draws by default. The report says what was pushed where at the
+bars that did not diverge, that probing of a bar stopped at its first divergence, how many
+bars had a level out of reach, and states the residual: a read of a magnitude rather than a
+direction, against a level further back than the previous bar, or of how two of these
+relations combine at a single bar, is tried only on the draws that happen to produce it and
+can go unseen. Made at every bar, as real code makes it, each such combination was convicted
+in every audit measured. With one draw the report says each bar was pushed one way only;
+with none, that nothing a bar had not yet printed was varied. A
 fourth red team's one-bar wick read was being missed in one audit out of eight while the
 report said "every bar was probed"; the wick was a random donor's, and only the move had
 been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than
@@ -282,7 +301,7 @@ Two tiers, and the report says which ran:
 | child's environment built from scratch — no inherited keys or proxies | yes | yes |
 | rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
 | wall-clock kill of the whole process group, always, after every run | yes | yes |
-| audit hook that **records** every socket use and spawn, then refuses it | yes | yes |
+| audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
@@ -329,7 +348,7 @@ Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What six red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What seven red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -367,12 +386,27 @@ is now pushed to both sides of the previous bar's level), a horizon-0 proof desc
 "read the close" whatever was read (the report names the four fields it might have been and
 says the evidence does not distinguish them), and a coverage note claiming four sign
 combinations at every bar while probing of a bar stops at its first divergence (it says so).
+In the seventh — two of the sixth's fixes had opened holes — a close forced past a far level
+by a move six times the tape's largest, which a strategy recognised and waited out (every
+forced size is now one the tape has printed), every draw all-up or all-down so an inside
+bar, a failed breakout or a close between two levels was never flipped (random bands; inside
+and outside ranges), a range pin landing exactly on the previous extreme (strict), a
+horizon-0 headline naming the bar's own fields for a strategy that read only the next bar's
+timestamp ("or a later bar"), two-draw text printed for one draw and for none, spawns through
+`multiprocessing` and `os.forkpty` that raised no audited event (refused and recorded),
+`from_file`'s first copy of the source left in `/tmp`, and a long stderr log pushing the
+error that ended a run out of the report (the tail is kept).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
 on exit codes: the child catches `SIGXCPU` and writes down why it is dying; the parent
 measures the run's real CPU through `getrusage`. And the child must not coerce output —
 `int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
+
+**What is not cleaned up.** An auditor that is killed or terminated mid-run — `SIGKILL`, or
+the `SIGTERM` a `timeout` sends — runs no finalizer, so its work root stays behind with the
+staged source and the tape; the library installs no signal handlers of its own. A write to
+`/dev/random` inside the namespace mixes into the host's entropy pool; it cannot lower it.
 
 **A limit no probe can remove.** If the customer supplied the tape, a strategy can recognise
 it by hash and leak only on that exact data. Black-box probing cannot catch that. The audit
