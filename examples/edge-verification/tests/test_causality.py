@@ -2224,3 +2224,75 @@ def test_round_sixteen_sentences_say_what_happened():
     signed = [dataclasses.replace(b, volume=-b.volume) for b in bars(120, seed=5, gap_prob=0.2)]
     with pytest.raises(ValueError, match="traded size"):
         check_causality(strat("clean_lagged").signals, signed, boundaries=[60], draws=4, seed=1)
+
+
+def _session_tape(days=6, seed=4, per=78):
+    """5-minute bars 09:30-15:55 over six days, overnight gaps, a U-shaped day of volume."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, p, out = random.Random(seed), 50.0, []
+    day0 = 1_700_006_400.0 - (1_700_006_400.0 % 86400)
+    for d in range(days):
+        for j in range(per):
+            ts = day0 + d * 86400 + 9.5 * 3600 + j * 300
+            o = round(p * math.exp(r.gauss(0, 0.01)), 2) if j == 0 and d else p
+            c = round(o * math.exp(r.gauss(0, 0.0015)), 2)
+            h = round(max(o, c) * (1 + abs(r.gauss(0, 0.0008))), 2)
+            lo = round(min(o, c) * (1 - abs(r.gauss(0, 0.0008))), 2)
+            u = 1 + 3 * ((j - per / 2) / (per / 2)) ** 2
+            out.append(Bar(ts, o, max(h, o, c), min(lo, o, c), c, float(max(100, round(2000 * u * math.exp(r.gauss(0, 0.3)) / 100) * 100))))
+            p = c
+    return out
+
+
+def test_the_rebuilt_tail_keeps_the_tapes_clock_level_and_coupling():
+    """Donor runs started anywhere on the tape put more than half a rebuilt tail's bars outside a
+    09:30-15:55 session; gave a tail on a tape whose volume rose twentyfold the whole tape's level,
+    with a jump at every join; and under a caller's sigma drew moves that had lost their coupling
+    with volume. A sixteenth red team measured each on the rebuilt tail against the real one."""
+    import random
+    import statistics
+    from edgecheck.causality import _sizes, draw_plans
+    tape = _session_tape()
+    sz = _sizes(tape)
+    printed = {b.ts % 86400 for b in tape}
+    days = {int(b.ts // 86400 + 3) % 7 for b in tape}
+    off = 0
+    for k in (100, 249, 380):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            for b in _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)[k + 2:]:
+                off += (b.ts % 86400) not in printed or int(b.ts // 86400 + 3) % 7 not in days
+    assert off == 0, off
+
+    r, rows, ts = random.Random(1), [], 1.7e9
+    p = 100.0
+    from edgecheck.fixtures import Bar
+    for i in range(400):
+        o, c = p, p * math.exp(r.gauss(0, 0.002))
+        rows.append(Bar(ts, o, max(o, c) * 1.001, min(o, c) * 0.999, c, float(round(1000 * math.exp(3.0 * i / 400 + r.gauss(0, 0.3))))))
+        p, ts = c, ts + 60
+    sz = _sizes(rows)
+    gaps = []
+    for k in (150, 250):
+        real = statistics.fmean(math.log(b.volume) for b in rows[k + 2:k + 40])
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(rows, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            gaps.append(abs(statistics.fmean(math.log(b.volume) for b in v[k + 2:k + 40]) - real))
+    assert statistics.fmean(gaps) < 0.35, gaps
+
+    coupled = _coupled_tape(400)
+    sz = _sizes(coupled)
+    sg = realized_sigma(coupled)
+    cors = []
+    for k in (100, 200, 300):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(coupled, k, seed=1 ^ (k * 1_000_003 + i), sigma=sg, plan=plan, sizes=sz)
+            cors.append(_mvcorr(v[k + 2:]))
+    assert statistics.fmean(cors) > 0.5 * _mvcorr(coupled), (statistics.fmean(cors), _mvcorr(coupled))
+
+
+def test_a_tape_with_no_trades_names_no_floor_in_its_proof_line():
+    """No bar traded, so no volume was pushed and no floor size used; the proof line said one was."""
+    idle = [dataclasses.replace(b, volume=0.0) for b in bars(120, seed=2)]
+    r = check_causality(strat("leak_same_bar_close").signals, idle, boundaries=[60], draws=4, seed=1)
+    assert r.proven and all("floor size" not in p.evidence.detail for p in r.proven), [p.evidence.detail for p in r.proven]

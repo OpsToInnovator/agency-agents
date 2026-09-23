@@ -291,7 +291,25 @@ what it is, not its name); and a kill at the hard CPU limit that wait4 read 0.23
 under load (a SIGKILL within half a second of the hard limit is now worded as the kernel's kill or
 the strategy's own). A high set within the largest wick, and past it once its close was set down
 on its level's tick, went unnamed under "the tape's own scale" (wicks are now judged from the body
-as built), and signed volumes are refused by name.
+as built), and signed volumes are refused by name. A proof line on a tape where no bar traded
+named a floor size nothing used, and an honest 32-worker thread pool could not start under the
+default 2 GiB address-space limit, glibc reserving a 64 MiB malloc arena per thread (the child now
+runs with `MALLOC_ARENA_MAX=2`).
+
+Measured directly — two-sample tests of the rebuilt tail against the real one, over many
+boundaries and seeds — the same round found the tail's own seams. Donor runs started anywhere on
+the tape kept their own clock and level: on a 09:30–15:55 session tape more than half the rebuilt
+tail's bars fell at times of day the tape never prints; on a tape whose volume rose twentyfold,
+or whose volatility woke up partway, the tail took the whole tape's level, with a jump at every
+join; and under a caller's sigma the moves, drawn as normals, lost their clustering and their
+coupling with volume. Runs now start near the bar being rebuilt, from the tape after the probed
+bar, and on a tape that keeps a calendar at the same time of day; a rebuilt timestamp that
+crosses a day, or lands off the calendar, moves to the next time and day of the week the tape
+prints at; and under a caller's sigma each bar keeps its donor's move, scaled to that width. The
+share of tail bars off the session went from 0.58 to 0, the volume seam and the move/volume
+coupling tells from nearly every rebuild to almost none. The cost is stated in the note: a tail
+that keeps the tape's level where it stands varies that level less, so a read of the level of
+volume or volatility further ahead, or of a later bar's exact date, can go unseen.
 
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open

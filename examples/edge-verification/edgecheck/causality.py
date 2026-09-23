@@ -226,7 +226,13 @@ class Report:
                    "did not print, other than one being set")
         grid = self._grid_clause()
         tie_residual = ("; at a bar that itself printed a tie, a read that changes with whether that tie is "
-                        "there is tried only on the draws that happen to keep it")
+                        "there is tried only on the draws that happen to keep it"
+                        # a sixteenth red team: donors from anywhere gave the tail the whole tape's level
+                        # and clock; from near the bar, they keep its level -- and so vary it less
+                        "; later bars are rebuilt from the tape's own bars near them, at the times of day and "
+                        "on the days of the week it prints, so a read of the level of volume or volatility "
+                        "further ahead, which stays near the tape's own there, or of a later bar's exact date "
+                        "(a holiday, an early close), can go unseen")
         # a fourteenth red team: mid prices printed as 49.974999999999994 and 49.975 alike; a fifteenth's
         # tape had plain prices and two feeds' volumes, and was told its prices were the ones
         unspelled = [f for f, flag in (("prices", "unspelled"), ("volumes", "unspelled volumes")) if flag in self.grids]
@@ -431,31 +437,117 @@ def _jitter(x: float, rng: random.Random) -> float:
     return x * math.exp(rng.gauss(0.0, JITTER)) if x else x
 
 
-def _donor_path(n: int, boundary: int, rng: random.Random) -> list[int]:
-    """For each bar from ``boundary`` to the end, the bar of the tape it is rebuilt from: runs of
-    16 to 48 consecutive bars, each run from a random place (wrapping at the end), never the bar's
-    own place. A rebuilt bar takes its gap, time step, move, wicks and volume together from one
-    real bar, and a run keeps real bars in their order -- so what goes with what on the tape (a
-    wide move with a heavy volume, a quiet stretch after a quiet bar, a run of untraded bars) goes
-    together in the rebuild. Drawing each of those from its own random donor, or laying fresh
-    noise on each bar's own volume, left a statistic a thirteenth and a fourteenth red team could
-    compute on the rebuilt tail and never on a real one: the width of volume changes, their
-    autocorrelation, the coupling of volume and move."""
-    path: list[int] = []
-    last = n - 1
-    while len(path) < n - boundary:
-        at = boundary + len(path)
-        start = rng.randint(1, max(1, last))
-        if start == at and last > 1:
-            start = 1 + start % last
-        for j in range(rng.randint(16, 48)):
-            path.append(1 + (start - 1 + j) % last if last >= 1 else 0)
-            if len(path) == n - boundary:
-                break
-    return path
+class _Calendar(NamedTuple):
+    """The times a tape prints at, where it does not print around the clock: the times of day -- and,
+    over a week or more, the days of the week -- it has a bar at. A rebuilt tail whose clock came
+    from donor runs started anywhere put more than half its bars outside a 09:30-15:55 session, at
+    times of day the tape never printed (a sixteenth red team)."""
+
+    step: float
+    days: dict            # weekday (or None) -> the sorted times of day printed that day
+    weekly: bool
+
+    def key(self, t: float) -> tuple:
+        return (int(t // 86400 + 3) % 7 if self.weekly else None, t % 86400)
+
+    def prints(self, t: float) -> bool:
+        wd, tod = self.key(t)
+        tods = self.days.get(wd)
+        if not tods:
+            return False
+        j = bisect.bisect_left(tods, tod - 1e-6)
+        return j < len(tods) and abs(tods[j] - tod) <= 1e-6
+
+    def after(self, t: float) -> float:
+        """The first time after ``t`` the tape prints at."""
+        day = math.floor(t / 86400) * 86400
+        for k in range(15):
+            d0 = day + k * 86400
+            tods = self.days.get(int(d0 // 86400 + 3) % 7 if self.weekly else None)
+            if tods:
+                j = bisect.bisect_right(tods, t - d0 + 1e-6)
+                if j < len(tods):
+                    return d0 + tods[j]
+        return t + self.step
 
 
-def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequence[int],
+def _calendar(tape: Sequence[Any]) -> _Calendar | None:
+    """The tape's calendar, where it keeps one: it spans two days or more and prints at under nine
+    in ten of the times of day its step allows, or -- over a week or more -- on fewer than seven days
+    of the week. None for a tape that prints around the clock."""
+    ts = [b.ts for b in tape]
+    if len(ts) < 3 or ts[-1] - ts[0] < 2 * 86400:
+        return None
+    steps = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+    if not steps:
+        return None
+    step = max(set(steps), key=steps.count)
+    weekly = ts[-1] - ts[0] >= 7 * 86400
+    days: dict = {}
+    for t in ts:
+        days.setdefault(int(t // 86400 + 3) % 7 if weekly else None, set()).add(t % 86400)
+    tods = set().union(*days.values())
+    slots = max(1, round(86400 / step)) if step < 86400 else 1
+    if len(tods) >= 0.9 * slots and (not weekly or len(days) == 7):
+        return None
+    return _Calendar(step, {k: sorted(v) for k, v in days.items()}, weekly)
+
+
+class _Donors:
+    """For each rebuilt bar, the bar of the tape it is rebuilt from: runs of 16 to 48 consecutive
+    bars, never the bar's own place. A rebuilt bar takes its gap, time step, move, wicks and volume
+    together from one real bar, and a run keeps real bars in their order -- so what goes with what on
+    the tape (a wide move with a heavy volume, a quiet stretch after a quiet bar, a run of untraded
+    bars) goes together in the rebuild. Drawing each of those from its own random donor left a
+    statistic a thirteenth and a fourteenth red team could compute on the rebuilt tail and never on a
+    real one.
+
+    Each run starts near the bar being rebuilt, from the part of the tape after the probed bar where
+    it has enough of it, and -- on a tape with a calendar -- preferably at the same time of day and
+    day of the week. Runs started anywhere on the tape gave the tail the whole tape's level of volume
+    and volatility, not the level where it stands, with a jump at every join, and the head's own runs
+    are ones a strategy has seen (a sixteenth red team)."""
+
+    def __init__(self, tape: Sequence[Any], boundary: int, rng: random.Random,
+                 calendar: _Calendar | None = None) -> None:
+        self.tape, self.rng, self.cal = tape, rng, calendar
+        n = len(tape)
+        self.lo = boundary + 1 if n - boundary - 1 >= 8 else 1
+        # far enough to reach the same time of day a few sessions away
+        per_day = max(len(v) for v in calendar.days.values()) if calendar and calendar.step < 86400 else 1
+        self.reach = int(max(64, 3 * per_day + 8))
+        self.chosen: dict[int, int] = {}
+        self.run, self.d = 0, None
+
+    def at(self, i: int, prev_ts: float) -> int:
+        if i in self.chosen:
+            return self.chosen[i]
+        n = len(self.tape)
+        d = self.d + 1 if self.run > 0 and self.d is not None and self.d + 1 < n and self.d + 1 != i else None
+        if d is None:
+            d = self._start(i, prev_ts)
+            self.run = self.rng.randint(16, 48)
+        self.run -= 1
+        self.d = self.chosen[i] = d
+        return d
+
+    def _start(self, i: int, prev_ts: float) -> int:
+        n = len(self.tape)
+        lo, hi = max(self.lo, i - self.reach), min(n - 1, i + self.reach)
+        cands = [d for d in range(max(1, lo), hi + 1) if d != i]
+        if not cands:
+            cands = [d for d in range(max(1, self.lo), n) if d != i] or [max(1, min(n - 1, i - 1))]
+        scale = self.reach / 3
+        # the same time of day, whatever the day: the calendar keeps the day of the week right, and
+        # the donor's run carries the day's own shape (a heavy open and close) from where it stands
+        if self.cal is not None:
+            want = prev_ts % 86400
+            same = [d for d in cands if abs(self.tape[d - 1].ts % 86400 - want) < 1e-6]
+            cands = same or cands
+        return self.rng.choices(cands, [math.exp(-abs(d - i) / scale) for d in cands])[0]
+
+
+def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _Donors,
               sigma: float | None = None,
               first: tuple[float, float, float, float] | None = None,
               after: tuple = (None, None),
@@ -471,7 +563,7 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequ
     strategy deciding on them was clean on every run. Everything unknowable at bar i's open
     must vary at bar i. Everything unknowable about later bars must vary there too.
 
-    So each rebuilt bar is another real bar of the tape -- ``path`` names which (``_donor_path``)
+    So each rebuilt bar is another real bar of the tape -- ``donors`` names which (``_Donors``)
     -- continued from wherever the rebuild has got to: its gap to the previous close, its time
     step, its move, its wicks and its volume, the sizes jittered off their exact values so no
     rebuilt value duplicates one already on the tape. Under a caller's sigma the move is a
@@ -486,6 +578,7 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequ
     """
     by_bar, vgrid = grid
     pgrid = by_bar
+    tape_sigma = realized_sigma(tape) if sigma is not None else 0.0
 
     def on(x: float, how: str) -> float:
         return _snap(x, _grid_at(pgrid, x, rng, snap=True), how)
@@ -513,7 +606,7 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequ
             out[i] = _replace(b, close=closed, high=high, low=low, volume=volume)
             prev_close, prev_ts = closed, b.ts
             continue
-        d = path[i - boundary]
+        d = donors.at(i, prev_ts)
         donor, before = tape[d], tape[d - 1] if d >= 1 else tape[d]
         if i == boundary:
             opened, ts = b.open, b.ts
@@ -522,6 +615,11 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequ
             exact_open, forced_step = after if i == boundary + 1 else (None, None)
             ts = prev_ts + (forced_step if forced_step is not None
                             else (donor.ts - before.ts if d >= 1 else _step_of(tape, donor)))
+            cal = donors.cal
+            if cal is not None and (math.floor(ts / 86400) != math.floor(prev_ts / 86400) or not cal.prints(ts)):
+                # across a day, or off the tape's calendar: the next time it prints at -- a donor's
+                # overnight or weekend gap belongs to its own day of the week, not the rebuilt bar's
+                ts = cal.after(prev_ts) if not cal.prints(ts) or ts - prev_ts > cal.step * 1.5 else ts
             pgrid = by_bar(ts) if callable(by_bar) else by_bar
             if exact_open is not None:
                 # the next open, set on the grid of its own level and era; what that undoes of the
@@ -536,10 +634,13 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, path: Sequ
                     # an ungapped open carries the last close -- across a split, onto a grid the new
                     # era never prints on; set on its own era's grid
                     opened = _on_level(pgrid, opened, "round")
+        own = _jitter(math.log(donor.close / donor.open), rng) if donor.open > 0 and donor.close > 0 else 0.0
         if sigma is not None:
-            move = rng.gauss(0.0, sigma)
+            # the donor's own move, at the caller's width: a normal draw of its own lost the moves'
+            # clustering and their coupling with volume and wicks (a sixteenth red team)
+            move = own * sigma / tape_sigma if tape_sigma > 0 else rng.gauss(0.0, sigma)
         else:
-            move = _jitter(math.log(donor.close / donor.open), rng) if donor.open > 0 and donor.close > 0 else 0.0
+            move = own
         closed = positive(opened * math.exp(move), opened)
         hi, lo = max(opened, closed), min(opened, closed)
         d_top, d_bot = max(donor.open, donor.close), min(donor.open, donor.close)
@@ -1269,7 +1370,8 @@ def _detail(sigma: float | None, floors: Sequence[str], off_scale: bool = False,
     A caller's sigma is the size a tape with no moves is pushed by, not a floor (a fifteenth red
     team's line said both). ``past`` names prices that setting on their price level's tick carried
     past the largest move or wick the tape has made."""
-    floors = [f for f in floors if not (f == "moves" and sigma is not None)]
+    # 'no trades' pushed nothing, so no floor size was used (a sixteenth red team's line said one was)
+    floors = [f for f in floors if f != "no trades" and not (f == "moves" and sigma is not None)]
     if sigma is None and not floors and not off_scale and not past:
         return "varied at the tape's own scale"
     by_sigma = ((", the bar itself by sizes the tape has made and later bars with moves of sigma "
@@ -2103,10 +2205,10 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
         if past and notes is not None:
             notes["past"] = tuple(past)
         first = (c, h, lw, first[3])
-    path = _donor_path(len(tape), boundary, rng)
+    donors = _Donors(tape, boundary, rng, _calendar(tape))
     after = _next_bar(plan, sizes, rng, first[0] if first else None, refs, tape, avoid,
-                      path[1] if len(path) > 1 else None)
-    return _rethread(tape, boundary, rng, path, sigma, first=first, after=after,
+                      donors.at(boundary + 1, tape[boundary].ts) if boundary + 1 < len(tape) else None)
+    return _rethread(tape, boundary, rng, donors, sigma, first=first, after=after,
                      grid=(_prices_by_bar(whole), sizes.vol_grid), no_zero=not sizes.zero, widths=whole.widths)
 
 
@@ -2587,7 +2689,7 @@ def continuation(tape: Sequence[Any], boundary: int, *, seed: int) -> list[Any]:
     """
     rng = random.Random(seed)
     sizes = _sizes(tape)
-    return _rethread(tape, boundary, rng, _donor_path(len(tape), boundary, rng),
+    return _rethread(tape, boundary, rng, _Donors(tape, boundary, rng, _calendar(tape)),
                      grid=(_prices_by_bar(sizes), sizes.vol_grid), no_zero=not sizes.zero, widths=sizes.widths)
 
 

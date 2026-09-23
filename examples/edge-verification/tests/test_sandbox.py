@@ -1194,3 +1194,21 @@ def test_the_sandbox_names_only_what_it_can_tell(tape, tmp_path):
     """)
     with pytest.raises(ResourceExceeded, match="under a memory limit"):
         Sandbox.from_file(sub, work_root=tmp_path / "m")(tape)
+
+
+def test_an_honest_thread_pool_runs_under_the_default_limits(tape, tmp_path):
+    """glibc reserved a 64 MiB arena of address space per thread, and a 32-worker pool could not
+    start under the default 2 GiB limit -- honest code broken by the sandbox."""
+    pool = strategy_file(tmp_path, "pool16", """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        def signals(bars):
+            gate = threading.Barrier(32, timeout=10)      # all 32 alive at once
+            def score(w):
+                gate.wait()
+                return sum(b.close for b in bars[-w:]) / w
+            with ThreadPoolExecutor(max_workers=32) as ex:
+                list(ex.map(score, range(1, 33)))
+            return [0] * len(bars)
+    """)
+    assert Sandbox.from_file(pool, work_root=tmp_path / "p")(tape) == [0] * len(tape)

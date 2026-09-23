@@ -270,6 +270,10 @@ def _scrubbed_env() -> dict[str, str]:
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
+        # glibc reserves a 64 MiB malloc arena of address space per thread, so under the default
+        # 2 GiB address-space limit an honest 32-worker thread pool could not start (a sixteenth red
+        # team); two arenas are shared by all threads instead
+        "MALLOC_ARENA_MAX": "2",
         "LANG": "C.UTF-8",
         "HOME": "/tmp",
     }
