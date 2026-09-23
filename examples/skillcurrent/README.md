@@ -317,11 +317,13 @@ skillcurrent/
   web/assets/      og.png and self-hosted fonts (SIL OFL, licence in fonts/OFL.txt)
 deploy/            Caddyfile, docker-compose.yml, systemd unit, backup script
 docs/beta/         beta terms, call scripts, email templates
+docs/business/     brief for legal review
 marketing/ads/     ad creatives (rendered from HTML) and channel copy
 tests/             pytest: parser, checks, service rules, releases, installer, importer, server, CLI,
                    public mode, beta measurement; tests/browser/ drives the beta form in Chromium
 BETA.md            guide for pilot teams          LAUNCH.md   plan for running the beta
 SECURITY.md        reporting a vulnerability       CONTRIBUTING.md
+BUSINESS.md        business model: offer, pricing hypotheses, validation, unit economics
 ```
 
 ## Tests

@@ -132,8 +132,9 @@ sign-up inside that, even when the answer is "not yet".
 > Thank you for the last [n] weeks. Here's what your reports showed:
 > [one or two sentences, their numbers only].
 >
-> SkillCurrent stays on your machines and keeps working. [What happens
-> after the beta, as the terms say.]
+> SkillCurrent stays on your machines and keeps working, and its source
+> stays open. If we introduce a paid plan, you'll hear first, and your team
+> gets it free for 12 months after it launches.
 >
 > I'll keep your sign-up, reports and our notes until [date], as the terms
 > say. If you'd like them deleted now, reply "delete" and I'll confirm

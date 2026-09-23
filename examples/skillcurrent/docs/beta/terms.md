@@ -80,10 +80,10 @@ anything, now or later.
 Either of us can stop at any time, for any reason, by email. `BETA.md`
 explains how to remove everything from your machines.
 
-After the beta: [[what happens next, stated plainly. For example: "The
-software stays available under its licence. If we later offer a paid
-version, pilot teams will be told first and are under no obligation to take
-it."]]
+After the beta: SkillCurrent's source stays available under its
+open-source licence, and nothing you use during the beta will stop working.
+If we introduce a paid plan, pilot teams will be told first and get it free
+for 12 months after it launches. You are under no obligation to take it.
 
 ## Changes
 
