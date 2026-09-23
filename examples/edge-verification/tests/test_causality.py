@@ -2363,7 +2363,8 @@ def test_the_rebuilt_tail_uses_each_bar_once_keeps_each_days_hours_and_what_foll
     coupled = _coupled_tape(400)
     don = _Donors(coupled, 200, random.Random(1))
     used = [don.at(i, coupled[i - 1].ts) for i in range(200, 400)]
-    assert len(set(used)) >= len(used) - 1, len(used) - len(set(used))
+    pairs = list(zip(used, used[1:]))
+    assert len(set(pairs)) == len(pairs), len(pairs) - len(set(pairs))      # no run repeats
 
     dst = _weekday_sessions(10, 24, lambda d: (14.5 if d < 5 else 13.5) * 3600)
     sz = _sizes(dst)
@@ -2408,9 +2409,152 @@ def test_the_tail_clause_says_what_each_tape_got():
     """The note said later bars kept the tape's times of day on a tape with no calendar, and that the
     tail's volatility stayed near the tape's own under a caller's sigma ten times it."""
     flat = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1)
-    assert "their times stepping as those bars' own do" in flat.coverage_note()
+    assert "their times, after the next bar's, stepping as those bars' own do" in flat.coverage_note()
     assert "at the times of day" not in flat.coverage_note()
     wide = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1, sigma=0.05)
-    assert "or of volatility, which is the given sigma's" in wide.coverage_note()
+    assert ", of volatility, which is the given sigma's" in wide.coverage_note()
+    assert "of where the price is far ahead, which strays from the tape's own less than a walk of its own would" in wide.coverage_note()
     sess = check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100], draws=4, seed=1)
     assert "at the times of day and on the days it prints" in sess.coverage_note()
+
+
+# ---------------------------------------------------------------- an eighteenth red team
+
+def _suspended_daily(n=140, seed=8):
+    """Weekday bars at 07:00 UTC, with trading suspended for 45 days in the middle."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, out, p, d = random.Random(seed), [], 12.0, 0
+    while len(out) < n:
+        t = _MON0 + d * 86400
+        if int(t // 86400 + 3) % 7 < 5 and not 100 <= d < 145:
+            o, h, lo, c = _walk_bar(r, p, 0.015, tick=0.01, gap=0.004)
+            out.append(Bar(t + 7 * 3600, o, h, lo, c, float(r.randint(10, 90) * 100)))
+            p = c
+        d += 1
+    return out
+
+
+def _midnight_sessions(sessions=10, seed=31):
+    """5-minute bars 22:00-03:55 UTC, Sunday night to Friday morning: a session across midnight."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, out, p, t, d = random.Random(seed), [], 1.1, _MON0 - 86400, 0
+    while d < sessions:
+        if int(t // 86400 + 3) % 7 in (6, 0, 1, 2, 3):
+            for j in range(72):
+                o, h, lo, c = _walk_bar(r, p, 0.0006, tick=0.00001, gap=0.0015 if j == 0 and out else 0.0)
+                u = 1 + 3 * ((j - 36) / 36) ** 2
+                out.append(Bar(t + 22 * 3600 + j * 300, o, h, lo, c, float(max(1, round(50 * u * math.exp(r.gauss(0, 0.3)))))))
+                p = c
+            d += 1
+        t += 86400
+    return out
+
+
+def test_a_tail_crosses_a_long_halt_keeps_the_tapes_steps_and_is_as_wide_as_sigma():
+    """An eighteenth red team: past a 45-day suspension the tail stepped blindly through weekends; a
+    session across midnight UTC took its donors' breaks where the tape has none; on a tape loud and
+    then quiet, a tail under a caller's sigma of 0.01 moved 0.0007 a bar."""
+    import random
+    import statistics
+    from edgecheck.causality import _calendar, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    halted = _suspended_daily()
+    sz = _sizes(halted)
+    off = []
+    for k in (40, 55, 60, 66):
+        for i, plan in enumerate(draw_plans(1, k, 4)[:3]):
+            v = _perturbed(halted, k, seed=31 * i + k, sigma=None, plan=plan, sizes=sz)
+            off += [b.ts for b in v[k + 1:] if int(b.ts // 86400 + 3) % 7 >= 5 or b.ts % 86400 != 7 * 3600]
+    assert not off, off[:5]
+
+    night = _midnight_sessions()
+    cal = _calendar(night)
+    sz = _sizes(night)
+    strange = []
+    for k in (560, 600, 640, 680):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(night, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            for j in range(k + 2, len(v)):
+                made = cal.steps_after.get(cal.key(v[j - 1].ts))
+                if made is not None and v[j].ts - v[j - 1].ts not in made:
+                    strange.append((k, j, v[j].ts - v[j - 1].ts))
+    assert not strange, strange[:5]
+
+    r, loud, p = random.Random(11), [], 100.0
+    for i in range(400):
+        sd = 0.02 if i < 200 else 0.001
+        o = round(p, 2)
+        c = round(o * math.exp(r.gauss(0, sd)), 2)
+        loud.append(Bar(1.7e9 + 60 * i, o, max(round(max(o, c) * (1 + abs(r.gauss(0, sd / 2))), 2), o, c),
+                        min(round(min(o, c) * (1 - abs(r.gauss(0, sd / 2))), 2), o, c), c, float(r.randint(1, 60) * 100)))
+        p = c
+    sz = _sizes(loud)
+    widths = []
+    for i in range(6):
+        v = _perturbed(loud, 300, seed=100 + i, sigma=0.01, plan=draw_plans(i, 300, 4)[i % 4], sizes=sz)
+        widths.append(math.sqrt(statistics.fmean(math.log(b.close / b.open) ** 2 for b in v[301:])))
+    assert all(0.006 < w < 0.016 for w in widths), widths
+
+
+def test_a_tails_end_is_not_the_tapes_and_a_short_tail_copies_no_run():
+    """An eighteenth red team: a tail made of every later bar once ended where the real tape did, so
+    a strategy reading the direction to the last bar was never caught; a tail too short for runs was
+    rebuilt from runs of the bars before the probed one, copied as they stood."""
+    import random
+    import statistics
+    from edgecheck.causality import _Donors, _sizes, draw_plans
+    tape = bars(400, seed=6, gap_prob=0.3, late_prob=0.1)
+    n, sz = len(tape), _sizes(tape)
+    sd = statistics.pstdev(math.log(tape[i].close / tape[i - 1].close) for i in range(1, n))
+    shifts = []
+    for k in (40, 114, 188, 262):
+        real = math.log(tape[-1].close / tape[k].open)
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            shifts.append((math.log(v[-1].close / v[k].open) - real) / (sd * math.sqrt(n - 1 - k)))
+    assert statistics.pstdev(shifts) > 0.35, statistics.pstdev(shifts)
+
+    runs = 0
+    for seed in range(12):
+        don = _Donors(tape, n - 6, random.Random(seed))
+        got = [don.at(i, tape[i - 1].ts) for i in range(n - 6, n)]
+        runs += sum(b == a + 1 for a, b in zip(got, got[1:]))
+    assert runs <= 3, runs
+
+
+def test_rebuilt_gaps_and_volumes_stay_within_the_tapes_largest():
+    """An eighteenth red team: jittered off a donor at the tape's largest, a rebuilt gap or volume
+    went up to 1.16 times the largest the tape had printed -- under a note that said the tape's own."""
+    from edgecheck.causality import _sizes, draw_plans
+    tape = bars(300, seed=3, gap_prob=0.5)
+    sz = _sizes(tape)
+    over = []
+    for k in (60, 120, 180):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            for j in range(k + 2, len(v)):
+                g = math.log(v[j].open / v[j - 1].close)
+                if g > sz.gaps_up[-1] * (1 + 1e-9) or -g > sz.gaps_dn[-1] * (1 + 1e-9) or v[j].volume > sz.volumes[-1]:
+                    over.append((k, j, g, v[j].volume))
+    assert not over, over[:5]
+
+
+def test_the_calendar_is_found_once_per_audit_and_not_for_event_bars(monkeypatch):
+    """An eighteenth red team: found again for every rebuild, the calendar made an audit's cost grow
+    with the square of the tape. And a tape whose times keep no step (event bars) has none."""
+    import random
+    import edgecheck.causality as C
+    from edgecheck.fixtures import Bar
+    calls = []
+    real = C._calendar
+    monkeypatch.setattr(C, "_calendar", lambda t: calls.append(1) or real(t))
+    check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100, 200], draws=4, seed=1)
+    assert len(calls) <= 2, len(calls)
+
+    r, ts, events = random.Random(1), 1.7e9, []
+    for b in bars(2500, seed=1):
+        ts += r.uniform(20, 400)
+        events.append(dataclasses.replace(b, ts=ts))
+    assert real(events) is None

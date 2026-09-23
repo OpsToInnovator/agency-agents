@@ -330,12 +330,36 @@ coupling tells from nearly every rebuild to almost none. The cost is stated in t
 that keeps the tape's level where it stands varies that level less, so a read of the level of
 volume or volatility further ahead, or of a later bar's exact date, can go unseen.
 
+The eighteenth found what round seventeen's tail opened. Made of every later bar once, in runs,
+a rebuilt tail was the real tail reshuffled and ended where the real tape did, so a strategy that
+read the direction from its bar to the tape's last bar was caught in none of twelve audits. About
+one rebuilt bar in three is now a single bar from near it, standing in for its run's next bar,
+which the run passes by: at the same time of day, traded or not as that bar, close to its volume
+and from a stretch as volatile; no two donors ever follow each other twice, so no run repeats. The
+spread of a rebuilt tail's end around the real one went from 0.1–0.3 of a walk's spread over the
+same bars to 0.4–0.8, and the same reader was caught in 17 of 24 one-bar audits; the clustering
+the runs keep stayed where it was (lag-one autocorrelation of log volume on a GARCH tape: real
+0.33, before 0.30, now 0.29–0.30). The note says what is left: the price far ahead strays from the
+tape's own less than a walk of its own would. A tail too short for runs, under eight bars, had been
+rebuilt from runs of the bars before the probed one, copies of what the strategy had already seen;
+it is now made of single bars only. The calendar looked twenty days ahead for the next day and
+past a longer halt stepped blindly through weekends; it now takes the next day from the tape's own
+days. A step a donor made across its own night was judged by the UTC date, so a session that
+crosses midnight UTC took its breaks at the wrong times; a rebuilt step is now kept only where the
+tape makes that step from that time of day and weekday. Under a caller's sigma, donor moves were
+scaled by the whole tape's volatility, so on a tape loud and then quiet the tail moved 0.0007 a
+bar under a sigma of 0.01; each is now scaled by the volatility around its donor. The calendar was found again for
+every rebuild, so an audit's cost grew with the square of the tape; it is now found once, and a
+tape of event bars, whose times keep no step, has none. Rebuilt gaps and volumes went up to 1.16
+times the largest the tape printed; they are capped at it, as moves and wicks were.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are about twelve a bar, and a third of its bars still come up short: at two
+one-cent tick they are about twelve a bar, and a third to two in five of its bars still come up
+short (43% on an eighteenth red team's): at two
 cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
 did not print, which is not counted. The report counts every such bar. A tick that is coarse
 for its price level costs the same way: a stock just above a dollar on cents came up short at
@@ -490,7 +514,7 @@ Two tiers, and the report says which ran:
 | child's environment built from scratch — no inherited keys or proxies | yes | yes |
 | rlimits: CPU, memory, file size, open files, no core | yes | yes |
 | a process limit over the run's own tasks (added to what the user already runs; the kernel exempts a root auditor from it, and threads are then bounded by the memory limit alone) | yes | yes |
-| wall-clock kill after every run: the whole process group, and in the namespace tier the whole namespace with its launcher (`unshare --kill-child`), so a strategy that leaves its group dies too | yes | group only |
+| wall-clock kill after every run: the whole process group, and in the namespace tier the whole namespace with its launcher, so a strategy that leaves its group dies too (`unshare --kill-child`; on a host whose `unshare` lacks it, the group only, as in the plain tier) | yes | group only |
 | audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
 | the **kernel** refuses every new process — `execve`, `fork`, any clone that is not a thread — by any route, `ctypes` included (seccomp, x86-64 and arm64; the report says whether it was on) | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
