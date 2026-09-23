@@ -42,7 +42,7 @@ async function waitForServer(url, ms = 10000) {
 
 function assert(cond, msg) { if (!cond) throw new Error('assertion failed: ' + msg); }
 
-const server = spawn(python, ['-m', 'skillcurrent', 'serve', '--port', String(port)], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+const server = spawn(python, ['-m', 'skillcurrent', 'serve', '--port', String(port), '--quiet', '--contact', 'beta@example.com', '--site-url', 'https://beta.example.com'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
 let browser;
 let failed = false;
 try {
@@ -54,17 +54,28 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) errors.push(m.text()); });
-  // Hermetic: the page links Google Fonts; abort anything off-origin so the test runs offline and identically everywhere.
-  await page.route('**/*', (route) => (route.request().url().startsWith(`http://127.0.0.1:${port}/`) ? route.continue() : route.abort()));
+  // The page promises no third-party requests: record any, and abort them so the test is hermetic.
+  const offOrigin = [];
+  await page.route('**/*', (route) => {
+    const u = route.request().url();
+    if (u.startsWith(`http://127.0.0.1:${port}/`)) return route.continue();
+    offOrigin.push(u);
+    return route.abort();
+  });
 
-  await page.goto(`http://127.0.0.1:${port}/beta`);
+  // Arrive from a tagged ad link; the tag must travel with the sign-up.
+  await page.goto(`http://127.0.0.1:${port}/beta?c=drift&utm_source=hn&utm_term=ignored`);
   await page.waitForSelector('#beta-form');
+  await page.evaluate(() => document.fonts.ready);
+  assert(await page.evaluate(() => document.fonts.check('16px Fraunces') && document.fonts.check('16px "IBM Plex Sans"')), 'self-hosted fonts loaded');
+  assert((await page.getAttribute('.contact-link', 'href')) === 'mailto:beta@example.com', 'contact address rendered');
 
   // Validation path: a bad email never leaves the browser.
   await page.fill('#email', 'not-an-email');
   await page.click('#submit');
-  await page.waitForSelector('#status:not([hidden])');
+  await page.waitForSelector('#status.warn');
   assert((await page.textContent('#status')).includes('work email'), 'bad email shows the email warning');
+  assert((await page.getAttribute('#email', 'aria-invalid')) === 'true', 'invalid field is marked for assistive tech');
   assert(cli('--team', 'acme', '--as', 'ana', '--json', 'beta').trim() === '[]', 'nothing stored after a rejected email');
 
   // Happy path: the entry reaches the database through POST /api/beta.
@@ -84,15 +95,18 @@ try {
   assert(rows[0].team_size === '5-15', 'team size stored');
   assert(JSON.stringify(rows[0].tools) === JSON.stringify(['claude-code', 'codex']), 'tools stored');
   assert(rows[0].note === 'we copy files today', 'note stored');
+  assert(rows[0].source === `127.0.0.1:${port}?c=drift&utm_source=hn`, 'campaign tag stored, unknown parameters dropped: ' + rows[0].source);
   assert(errors.length === 0, 'no browser errors: ' + errors.join(' | '));
+  assert(offOrigin.length === 0, 'no third-party requests: ' + offOrigin.join(' | '));
 
-  // Static host path: with no endpoint answering, the form shows the entry to send by hand.
-  await page.evaluate(() => { document.getElementById('beta-form').dataset.endpoint = '/no-such-endpoint'; });
+  // Outage path: if the sign-up service does not answer, the visitor gets a prefilled email instead.
+  await page.route('**/api/beta', (route) => route.abort());
   await page.fill('#email', 'second@example.com');
   await page.selectOption('#team_size', '1-4');
   await page.click('#submit');
   await page.waitForFunction(() => document.querySelector('#status.bad') !== null, null, { timeout: 5000 });
-  assert((await page.textContent('#status')).includes('second@example.com'), 'fallback shows the entry to copy');
+  assert((await page.textContent('#status')).includes('second@example.com'), 'fallback shows the entry');
+  assert((await page.getAttribute('#status a', 'href')).startsWith('mailto:beta@example.com?subject='), 'fallback offers a prefilled email');
 
   console.log('landing form: ok');
 } catch (err) {

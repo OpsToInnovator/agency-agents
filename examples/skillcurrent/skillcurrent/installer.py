@@ -48,9 +48,11 @@ TARGETS: dict[str, Target] = {
     for t in (
         Target("claude-code", "Claude Code (global)", "~/.claude/skills", "global"),
         Target("claude-code-project", "Claude Code (this project)", ".claude/skills", "project"),
-        Target("antigravity", "Antigravity / Gemini (global)", "~/.gemini/config/skills", "global"),
-        Target("antigravity-project", "Antigravity / Gemini (this project)", ".agents/skills", "project"),
-        Target("codex", "Codex (global)", "~/.codex/skills", "global"),
+        Target("antigravity", "Antigravity (global)", "~/.gemini/config/skills", "global"),
+        Target("antigravity-project", "Antigravity and others (this project's .agents/skills)", ".agents/skills", "project"),
+        # Codex documents ~/.agents/skills for user skills (~/.codex/skills is its deprecated location).
+        # Gemini CLI and Cursor document that they read it too.
+        Target("codex", "Codex, Gemini CLI, Cursor (global ~/.agents/skills)", "~/.agents/skills", "global"),
         Target("osaurus", "Osaurus (global)", "~/.osaurus/skills", "global"),
         Target("custom", "Custom directory (--dir)", "", "custom"),
     )
@@ -92,15 +94,19 @@ class Installer:
     def path_for(self, slug: str, target_id: str) -> Path:
         return self._dir(target_id) / slug / SKILL_FILE
 
-    def install(self, slug: str, target_id: str = DEFAULT_TARGET, ref: str | None = None, channel: str = DEFAULT_CHANNEL) -> dict:
-        """Write the skill's release on ``channel`` (or an explicit ``ref``) to the target and record it."""
+    def install(self, slug: str, target_id: str = DEFAULT_TARGET, ref: str | None = None, channel: str = DEFAULT_CHANNEL, reason: str = "",
+                path: Path | None = None) -> dict:
+        """Write the skill's release on ``channel`` (or an explicit ``ref``) to the target and record it.
+
+        ``path`` overrides where the file goes; ``sync`` passes the recorded
+        path so a repair lands where the copy was installed."""
         content = self.session.call("get_content", slug=slug, ref=ref or channel)
-        path = self.path_for(slug, target_id)
+        path = Path(path) if path is not None else self.path_for(slug, target_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content["content"], encoding="utf-8")
         self.session.call(
             "record_install", slug=slug, version=content["version"], target=target_id,
-            path=str(path), content_hash=content["content_hash"], host=self.host, channel=channel,
+            path=str(path), content_hash=content["content_hash"], host=self.host, channel=channel, reason=reason,
         )
         return {
             "slug": slug, "version": content["version"], "target": target_id, "path": str(path), "host": self.host,
@@ -152,6 +158,8 @@ class Installer:
                 state = "current"
             if intact and report:
                 self.session.call("report", slug=row["slug"], event="verified", target=row["target"], host=self.host, version=row["version"], content_hash=row["content_hash"])
+            if report and state in ("modified", "missing", "outdated"):
+                self._drift(row["slug"], row["target"], state, row["version"], row["target_version"], "observed")
             out.append(
                 {
                     "slug": row["slug"], "target": row["target"], "path": row["path"], "installed": row["version"],
@@ -160,17 +168,34 @@ class Installer:
             )
         return out
 
+    def _drift(self, slug: str, target_id: str, state: str, installed: str, channel_version: str | None, response: str) -> None:
+        self.session.call(
+            "report_drift", slug=slug, target=target_id, state=state, host=self.host,
+            installed_version=installed or "", channel_version=channel_version or "", response=response,
+        )
+
     def sync(self, target_id: str | None = None, force: bool = False) -> list[dict]:
-        """Bring installs back to what their channel serves. Locally modified copies are kept unless ``force``."""
+        """Bring installs back to what their channel serves. Locally modified copies are kept unless ``force``.
+
+        Every repair (and every modified copy it leaves alone) is reported to
+        the server, so the team can later tell whether sync ever caught a bad copy."""
         actions = []
         for item in self.status(target_id):
             state = item["state"]
             if state in ("current", "deprecated", "unreleased"):
                 actions.append({**item, "action": "kept"})
             elif state == "modified" and not force:
+                self._drift(item["slug"], item["target"], state, item["installed"], item["target_version"], "kept_local")
                 actions.append({**item, "action": "skipped", "reason": "local changes; use --force to overwrite"})
             else:
-                result = self.install(item["slug"], item["target"], channel=item["channel"])
+                # Repair in place: a custom or project copy lives where it was installed, not where this command runs.
+                # The path comes from the server, so only ever write a file shaped like <slug>/SKILL.md.
+                recorded = Path(item["path"])
+                if recorded.name != SKILL_FILE or recorded.parent.name != item["slug"]:
+                    actions.append({**item, "action": "skipped", "reason": f"recorded path is not {item['slug']}/{SKILL_FILE}; run install again"})
+                    continue
+                result = self.install(item["slug"], item["target"], channel=item["channel"], reason=f"sync:{state}", path=recorded)
+                self._drift(item["slug"], item["target"], state, item["installed"], item["target_version"], "forced" if state == "modified" else "repaired")
                 actions.append({**item, "action": "updated", "installed": result["version"]})
         return actions
 

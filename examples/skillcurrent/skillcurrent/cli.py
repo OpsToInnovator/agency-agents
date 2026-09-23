@@ -1,8 +1,11 @@
 """Command-line interface. ``python -m skillcurrent --help``."""
 
 import argparse
+import csv
 import json
+import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -78,7 +81,7 @@ def make_session(args):
         raise Invalid("a team is required: pass --team or set SKILLCURRENT_TEAM")
     if not args.user:
         raise Invalid("an actor is required: pass --as or set SKILLCURRENT_USER")
-    return LocalSession(Service(open_store(args)), args.team, args.user)
+    return LocalSession(Service(open_store(args), waitlist_team=os.environ.get("SKILLCURRENT_WAITLIST_TEAM")), args.team, args.user)
 
 
 # --------------------------------------------------------------------- commands
@@ -373,7 +376,7 @@ def cmd_import(args, out):
 
 
 def cmd_activity(args, out):
-    rows = make_session(args).call("activity", limit=args.limit, slug=args.slug)
+    rows = make_session(args).call("activity", limit=args.limit, slug=args.slug, action=args.action)
 
     def human():
         lines = []
@@ -416,9 +419,133 @@ def cmd_index(args, out):
     out.emit(idx, human)
 
 
+def _read_signup_rows(path: str) -> list[dict]:
+    """Rows from a CSV export (any column order; header names matched loosely) or a JSON list."""
+    text = Path(path).expanduser().read_text(encoding="utf-8-sig")
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+        return data if isinstance(data, list) else []
+    aliases = {
+        "email": ("email", "work email", "work_email", "e-mail"),
+        "team_size": ("team_size", "team size", "teamsize"),
+        "tools": ("tools", "tools in use", "tools_in_use"),
+        "note": ("note", "notes", "anything we should know?", "message"),
+        "source": ("source", "ref"),
+        "created_at": ("created_at", "created at", "date", "submitted_at", "timestamp"),
+    }
+    rows = []
+    for raw in csv.DictReader(text.splitlines()):
+        lowered = {str(k or "").strip().lower(): (v or "").strip() for k, v in raw.items()}
+        rows.append({field: next((lowered[n] for n in names if lowered.get(n)), "") for field, names in aliases.items()})
+    return rows
+
+
 def cmd_beta(args, out):
-    rows = make_session(args).call("list_beta_signups")
-    out.emit(rows, lambda: table(rows, [("email", "EMAIL"), ("team_size", "TEAM"), ("tools", "TOOLS"), ("source", "SOURCE"), ("created_at", "SIGNED UP"), ("note", "NOTE")]) if rows else "(no beta sign-ups yet)")
+    session = make_session(args)
+    sub = getattr(args, "beta_cmd", None)
+    if sub == "remove":
+        r = session.call("remove_beta_signup", email=args.email)
+        out.emit(r, lambda: f"Removed {r['email']}." if r["removed"] else f"No sign-up for {r['email']}.")
+        return 0 if r["removed"] else 1
+    if sub == "import":
+        r = session.call("import_beta_signups", rows=_read_signup_rows(args.file))
+        out.emit(r, lambda: f"Imported: {r['added']} new, {r['merged']} merged into existing sign-ups, {r['skipped']} skipped (invalid email).")
+        return 0
+    rows = session.call("list_beta_signups")
+    if getattr(args, "sources", False):
+        counts: dict[str, int] = {}
+        for r in rows:
+            counts[r["source"] or "(none)"] = counts.get(r["source"] or "(none)", 0) + 1
+        summary = [{"source": k, "signups": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+        out.emit(summary, lambda: table(summary, [("signups", "SIGN-UPS"), ("source", "SOURCE")]) if summary else "(no beta sign-ups yet)")
+        return 0
+    out.emit(rows, lambda: table(rows, [("email", "EMAIL"), ("team_size", "TEAM"), ("tools", "TOOLS"), ("source", "SOURCE"), ("submissions", "POSTS"), ("created_at", "SIGNED UP"), ("note", "NOTE")]) if rows else "(no beta sign-ups yet)")
+
+
+def cmd_beta_report(args, out):
+    r = make_session(args).call("beta_report", days=args.days)
+
+    def human():
+        rv, sy, ad, ans = r["review"], r["sync"], r["adoption"], r["answers"]
+        ck = sy["checks"]
+        window = f"last {r['window_days']} days" if r["window_days"] else "all time"
+        lines = [
+            f"SkillCurrent beta report for team {r['team']} ({window}), generated {r['generated_at']}",
+            f"auth mode: {r['auth_mode']}   members: {r['members']}   skills: {r['skills']}   schema: v{r['schema_version']}",
+            "",
+            f"1. Did the team keep review switched on?  {ans['kept_review_on']['verdict'].upper()}",
+            *[f"   - {b}" for b in ans["kept_review_on"]["because"]],
+            f"   submitted {rv['submitted']}, approved {rv['approved']}, rejected {rv['rejected']}, withdrawn {rv['withdrawn']}, pending {rv['pending']}",
+            f"   approvers {rv['distinct_approvers']}, submitters {rv['distinct_submitters']}, median submit-to-approve "
+            + (f"{rv['median_seconds_submit_to_approve']}s" if rv["median_seconds_submit_to_approve"] is not None else "n/a")
+            + f", approvals under 60s {rv['approvals_under_60_seconds']}",
+            f"   releases {rv['releases']}, rollbacks {rv['rollbacks']}, draft installs {rv['draft_installs']}",
+            "",
+            f"2. Did sync ever catch a bad copy?  {ans['sync_caught_bad_copy']['verdict'].upper()}",
+            *[f"   - {b}" for b in ans["sync_caught_bad_copy"]["because"]],
+            f"   checks: {ck['environments_checked']} environment(s), {ck['days_with_checks']} day(s), {ck['verified_receipts']} verified receipt(s), last "
+            + (ck["last_check_at"] or "never"),
+            f"   bad copies {sy['bad_copies']} (modified {sy['by_state']['modified']}, missing {sy['by_state']['missing']}); "
+            f"outdated {sy['by_state']['outdated']}; kept local {sy['by_response']['kept_local']}, repaired {sy['by_response']['repaired']}, "
+            f"forced {sy['by_response']['forced']}",
+            "",
+            f"Adoption now, by the versions on record: {ad['environments']} environments; installed {ad['installed']}, verified {ad['verified']}, "
+            f"loaded {ad['loaded']}, task-tested {ad['task_tested']}; on the channel's version {ad['current']}, behind or deprecated {ad['needs_attention']}",
+            "(A hand-edited copy still has its recorded version; question 2 is where edits and deletions show.)",
+            "",
+            "This report holds counts only: no skill content, member names or emails. Send it with --json to your beta contact.",
+        ]
+        return "\n".join(lines)
+
+    out.emit(r, human)
+
+
+def cmd_backup(args, out):
+    dest = open_store(args).backup(args.dest)
+    out.emit({"backup": str(dest)}, lambda: f"Wrote a consistent copy of {Path(args.db).expanduser()} to {dest}")
+
+
+def cmd_build_landing(args, out):
+    """Render the beta page for a static host (Netlify, GitHub Pages, Cloudflare Pages, any file server)."""
+    from .server import ASSETS_DIR, LANDING, render_landing, valid_endpoint
+
+    if not args.site_url.startswith(("https://", "http://")):
+        raise Invalid("--site-url must be the page's public address, e.g. https://beta.example.com")
+    endpoint = args.endpoint
+    if not valid_endpoint(endpoint):
+        raise Invalid("--endpoint must be '/api/beta', an https URL of a skillcurrent server, 'netlify' or 'mailto'")
+    if endpoint == "mailto" and not args.contact:
+        raise Invalid("--endpoint mailto needs --contact: sign-ups are sent by email to that address")
+    dest = Path(args.out).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    page = render_landing(LANDING.read_text(encoding="utf-8"), endpoint=endpoint, site_url=args.site_url, contact=args.contact or "")
+    (dest / "index.html").write_text(page, encoding="utf-8")
+    shutil.copyfile(ASSETS_DIR / "og.png", dest / "og.png")
+    (dest / "fonts").mkdir(exist_ok=True)
+    for font in sorted((ASSETS_DIR / "fonts").glob("*.woff2")):
+        shutil.copyfile(font, dest / "fonts" / font.name)
+    shutil.copyfile(ASSETS_DIR / "fonts" / "OFL.txt", dest / "fonts" / "OFL.txt")  # the font licence travels with the fonts
+    # Security headers for hosts that read a _headers file (Netlify, Cloudflare Pages).
+    connect = "'self'"
+    if endpoint.startswith(("https://", "http://")):
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(endpoint)
+        connect += f" {parts.scheme}://{parts.netloc}"
+    csp = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        f"font-src 'self'; connect-src {connect}; form-action 'self' mailto:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+    )
+    (dest / "_headers").write_text(
+        "/*\n"
+        f"  Content-Security-Policy: {csp}\n"
+        "  X-Content-Type-Options: nosniff\n"
+        "  Referrer-Policy: strict-origin-when-cross-origin\n"
+        "  X-Frame-Options: DENY\n",
+        encoding="utf-8",
+    )
+    files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
+    out.emit({"out": str(dest), "endpoint": endpoint, "files": files}, lambda: f"Wrote the beta page for {args.site_url} (form endpoint: {endpoint}) to {dest}:\n  " + "\n  ".join(files))
 
 
 def cmd_targets(args, out):
@@ -427,12 +554,29 @@ def cmd_targets(args, out):
 
 
 def cmd_serve(args, out):
-    from .server import make_server
+    from .server import LOOPBACK, make_server
 
-    service = Service(open_store(args))
-    server = make_server(service, args.host, args.port, no_auth=args.no_auth, verbose=args.verbose)
+    if args.no_auth and args.host not in LOOPBACK:
+        raise Invalid(
+            f"--no-auth trusts two request headers as identity, so anyone who can reach {args.host} could act as any member. "
+            "Use it only with --host 127.0.0.1."
+        )
+    if args.no_auth and args.public:
+        raise Invalid("--public and --no-auth cannot be combined")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
+    service = Service(open_store(args), waitlist_team=args.waitlist_team)
+    server = make_server(
+        service, args.host, args.port, no_auth=args.no_auth, verbose=args.verbose,
+        public=args.public, allow_origins=args.allow_origin or (), trust_proxy=args.trust_proxy,
+        contact=args.contact or "", site_url=args.site_url or "",
+        # A request log records client addresses. The public waitlist host keeps none unless asked to.
+        access_log=not args.quiet and (args.access_log or not args.public),
+    )
     mode = "no auth (identify with X-SkillCurrent-Team / X-SkillCurrent-User)" if args.no_auth else "member tokens"
-    print(f"SkillCurrent {__version__} serving {Path(args.db).expanduser()} at http://{args.host}:{server.server_address[1]}/  [{mode}]")
+    if args.public:
+        mode += "; public mode: beta page and waitlist only"
+    mode += "; request log " + ("on (records client addresses)" if server.RequestHandlerClass.access_log else "off")
+    print(f"SkillCurrent {__version__} serving {Path(args.db).expanduser()} at http://{args.host}:{server.server_address[1]}/  [{mode}]", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -587,7 +731,26 @@ def build_parser() -> argparse.ArgumentParser:
     rus.add_parser("remove").add_argument("name")
     ru.set_defaults(fn=cmd_rules)
     sub.add_parser("targets", help="list install targets").set_defaults(fn=cmd_targets)
-    sub.add_parser("beta", help="list landing-page beta sign-ups (owners)").set_defaults(fn=cmd_beta)
+    bt = sub.add_parser("beta", help="the landing-page waitlist (owners of the waitlist team)")
+    bts = bt.add_subparsers(dest="beta_cmd")
+    bl = bts.add_parser("list", help="list sign-ups (the default)")
+    bl.add_argument("--sources", action="store_true", help="count sign-ups by source tag (?c= and utm_ parameters)")
+    bt.add_argument("--sources", action="store_true", help="count sign-ups by source tag (?c= and utm_ parameters)")
+    bts.add_parser("remove", help="delete one sign-up (for deletion requests)").add_argument("email")
+    bts.add_parser("import", help="merge sign-ups from a CSV or JSON export (e.g. a static host's form service)").add_argument("file")
+    bt.set_defaults(fn=cmd_beta)
+    br = sub.add_parser("beta-report", help="counts that answer the two beta questions; send this back to your beta contact")
+    br.add_argument("--days", type=int, help="only the last N days (default: all time)")
+    br.set_defaults(fn=cmd_beta_report)
+    bk = sub.add_parser("backup", help="write a consistent copy of the database (safe while serving)")
+    bk.add_argument("dest")
+    bk.set_defaults(fn=cmd_backup)
+    bl2 = sub.add_parser("build-landing", help="render the beta page and its assets for a static host")
+    bl2.add_argument("out", help="output directory")
+    bl2.add_argument("--site-url", required=True, help="the page's public address, used for link previews")
+    bl2.add_argument("--endpoint", default="/api/beta", help="where the form posts: '/api/beta' (same host), an https URL of a skillcurrent server (needs --allow-origin there), 'netlify' (Netlify Forms), or 'mailto' (no server)")
+    bl2.add_argument("--contact", help="the address sign-ups can write to; shown on the page")
+    bl2.set_defaults(fn=cmd_build_landing)
 
     im = sub.add_parser("import", help="import SKILL.md folders or Agency agent files as drafts")
     im.add_argument("path")
@@ -597,14 +760,23 @@ def build_parser() -> argparse.ArgumentParser:
     ac = sub.add_parser("activity", help="recent team activity")
     ac.add_argument("--limit", type=int, default=30)
     ac.add_argument("--slug")
+    ac.add_argument("--action", help="only actions starting with this, e.g. drift. or review.")
     ac.set_defaults(fn=cmd_activity)
     sub.add_parser("dashboard", help="team overview").set_defaults(fn=cmd_dashboard)
 
     sv = sub.add_parser("serve", help="run the HTTP API and web UI")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8765)
-    sv.add_argument("--no-auth", action="store_true", help="trust X-SkillCurrent-* headers instead of tokens (demos only)")
-    sv.add_argument("--verbose", action="store_true")
+    sv.add_argument("--no-auth", action="store_true", help="trust X-SkillCurrent-* headers instead of tokens (loopback demos only)")
+    sv.add_argument("--public", action="store_true", help="internet-facing waitlist host: serve only the beta page, its assets and the sign-up endpoint")
+    sv.add_argument("--allow-origin", action="append", metavar="ORIGIN", help="let a page on this origin post sign-ups cross-origin (repeatable), e.g. https://beta.example.com")
+    sv.add_argument("--trust-proxy", action="store_true", help="read the client address from X-Forwarded-For (only behind your own proxy)")
+    sv.add_argument("--contact", default=os.environ.get("SKILLCURRENT_CONTACT"), help="address shown on the beta page for replies and questions [SKILLCURRENT_CONTACT]")
+    sv.add_argument("--site-url", default=os.environ.get("SKILLCURRENT_SITE_URL"), help="public https address of this server, for link previews [SKILLCURRENT_SITE_URL]")
+    sv.add_argument("--waitlist-team", default=os.environ.get("SKILLCURRENT_WAITLIST_TEAM"), help="team whose owners may read the waitlist [SKILLCURRENT_WAITLIST_TEAM]")
+    sv.add_argument("--access-log", action="store_true", help="log every request with the client's address (on by default, except with --public)")
+    sv.add_argument("--quiet", action="store_true", help="no access log, whatever else is set")
+    sv.add_argument("--verbose", action="store_true", help="(kept for compatibility; see --access-log and --quiet)")
     sv.set_defaults(fn=cmd_serve)
     return p
 

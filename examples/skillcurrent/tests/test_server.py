@@ -96,13 +96,17 @@ def test_landing_page_and_beta_signups(server, service):
             return exc.code, json.loads(exc.read())
 
     status, payload = signup({"email": "Lead@Example.com", "team_size": "5-15", "tools": ["claude-code", "codex"], "note": "we copy files today"})
-    assert status == 200 and payload["result"]["email"] == "lead@example.com"
+    assert status == 200 and payload["result"] == {"new": True}  # the response never echoes stored data back
     assert signup({"email": "not-an-email"})[0] == 400
-    assert signup({"email": "lead@example.com", "team_size": "16-50", "tools": "cursor,other"})[0] == 200  # same email updates
+    # A repeat post for the same email cannot overwrite what is stored: it fills gaps, unions tools, appends notes.
+    status, payload = signup({"email": "lead@example.com", "team_size": "16-50", "tools": "cursor,other", "note": "overwrite attempt"})
+    assert status == 200 and payload["result"] == {"new": False}
     with pytest.raises(Forbidden):
         service.list_beta_signups("acme", "ben")  # maintainers cannot read the waitlist
     rows = service.list_beta_signups("acme", "ana")
-    assert len(rows) == 1 and rows[0]["team_size"] == "16-50" and rows[0]["tools"] == ["cursor", "other"]
+    assert len(rows) == 1 and rows[0]["team_size"] == "5-15"
+    assert rows[0]["tools"] == ["claude-code", "codex", "cursor", "other"]
+    assert rows[0]["note"] == "we copy files today\n---\noverwrite attempt" and rows[0]["submissions"] == 2
     status, payload = post(url, {"op": "list_beta_signups"}, {"Authorization": f"Bearer {tokens['ana']}"})
     assert status == 200 and payload["result"][0]["email"] == "lead@example.com"
 
