@@ -286,6 +286,14 @@ addresses from GitHub commits or profiles: GitHub's Acceptable Use Policy
 forbids using information from the service to send unsolicited email. Say
 who you are and how you found them, and stop at the first "no".
 
+ApexForm Life is an Australian company, so Australia's Spam Act 2003
+applies to these emails. Send only where consent can be inferred: the
+person published the address for work contact, without saying they don't
+want unsolicited mail, and the email relates to their role. Identify
+ApexForm Life as the sender, and honour every "no" or unsubscribe
+promptly. Have the lawyer confirm this before a cold-email push
+(`docs/business/legal-brief.md`).
+
 Subject: which version of your skills is each machine running?
 
 > Hi [name],
@@ -296,5 +304,5 @@ Subject: which version of your skills is each machine running?
 >
 > Worth 20 minutes? The details and the sign-up are here: [link]
 >
-> [your name], [role, company or "independent"]
-> I found you through [where]. If this isn't relevant, reply "no" and I won't write again.
+> [your name], ApexForm Life Pty Ltd, Perth, Western Australia · apexformlife.com
+> I found you through [where]. If this isn't relevant, reply "no" or "unsubscribe" and I won't write again.

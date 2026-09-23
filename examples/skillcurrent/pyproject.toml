@@ -3,6 +3,7 @@ name = "skillcurrent"
 version = "0.2.0"
 description = "SkillCurrent: shared skill management for teams. One reviewed catalog of SKILL.md files, taken from draft through checks, approval of exact bytes and channel releases to per-environment adoption receipts"
 requires-python = ">=3.11"
+authors = [{ name = "ApexForm Life Pty Ltd" }]
 dependencies = []
 
 [project.optional-dependencies]

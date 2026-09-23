@@ -1,19 +1,18 @@
 # SkillCurrent beta terms
 
-> **For the operator, before you send this.** Fill in every `[[...]]` and
-> delete this box. These are plain-language terms for a small, free pilot.
-> They are not legal advice. If a pilot team's legal or procurement team
-> asks for more, get a lawyer to look before you agree to anything.
-> `LAUNCH.md` lists the decisions behind each fill-in.
+> **For the operator, before you send this.** Fill in the remaining
+> `[[...]]` (the ABN, the beta address, the date and the providers) and delete
+> this box. These are plain-language terms for a small, free pilot. They are
+> not legal advice: have them reviewed before the first pilot team signs
+> (`docs/business/legal-brief.md`).
 
 **Last updated:** [[date]]
 
 ## Who runs the beta
 
-The SkillCurrent beta is run by [[your name]], [[an individual / the company
-name and its registration]], based in [[country, and state if relevant]].
-"We" below means that person or company. Write to us at [[beta contact
-address]].
+The SkillCurrent beta is run by ApexForm Life Pty Ltd (ABN [[ABN]]), of
+Perth, Western Australia (apexformlife.com). "We" below means ApexForm Life.
+Write to us at [[beta contact address, on the apexformlife.com domain]].
 
 ## What the beta is
 
@@ -27,9 +26,11 @@ address]].
 
 ## The software
 
-- SkillCurrent is provided under [[licence, e.g. "the MIT licence in the
-  repository"]]. It comes "as is", without warranty of any kind, as that
-  licence says.
+- SkillCurrent is provided under the MIT licence in its `LICENSE` file
+  (copyright ApexForm Life Pty Ltd). It comes "as is", without warranty of
+  any kind, as that licence says. Nothing in these terms excludes rights
+  that the law, such as the Australian Consumer Law, says can't be
+  excluded.
 - It is beta software. Keep backups of your skills and of the catalog
   database (`skillcurrent backup`). You are responsible for your own data
   and systems.

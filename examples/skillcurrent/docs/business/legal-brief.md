@@ -4,9 +4,12 @@ Send this to a startup or marketing lawyer with a request for **one
 fixed-fee quote** covering everything below. One bundled review costs less
 than four separate ones.
 
-> **Fill in before sending:** [[your name]], [[company name and
-> registration, or "an individual"]], [[country, and state if relevant]],
-> [[countries where you expect pilot teams and ad audiences]].
+**From:** ApexForm Life Pty Ltd (ABN [[ABN]]), Perth, Western Australia,
+apexformlife.com.
+
+> **Fill in before sending:** the ABN, and the countries where you expect
+> pilot teams and ad audiences. Use a lawyer who can advise on Australian law
+> and, if you'll advertise or sell abroad, on those markets too.
 
 ## What SkillCurrent is
 
@@ -18,6 +21,23 @@ than four separate ones.
   a public sign-up page.
 - **What's planned.** After the beta, a paid support plan, flat per
   organisation. `BUSINESS.md` has the model.
+
+## Australian law to cover
+
+ApexForm Life is an Australian company, so ask counsel to cover these
+alongside any overseas rules:
+
+- **Australian Consumer Law:** misleading or deceptive conduct, for the ad
+  claims and the beta page, and warranties that can't be excluded, for the
+  beta terms and the order form.
+- **Privacy Act 1988 and the Australian Privacy Principles:** whether they
+  apply to ApexForm Life, and if not, whether to follow them anyway, since
+  pilot teams will ask.
+- **Spam Act 2003:** the cold emails in `marketing/ads/copy.md` and the
+  beta emails. They need consent, which may be inferred from a published
+  work address, plus sender identification and a working unsubscribe.
+- **GST:** how to show prices to Australian and overseas customers, and when
+  registration is required. Ask your accountant too.
 
 ## What to review, in priority order
 
@@ -80,9 +100,10 @@ Questions:
 ### 4. Names and ownership
 
 1. Is "SkillCurrent" clear to use as a product name in our markets?
-2. The code sits in a repository whose only licence file names "AgentLand
-   Contributors". What must we add so our own copyright and licence are
-   clear for SkillCurrent's directory?
+2. SkillCurrent's directory now has its own MIT `LICENSE`, copyright
+   ApexForm Life Pty Ltd. It sits inside a repository whose root licence
+   names "AgentLand Contributors". Is that enough to make our copyright and
+   licence clear, or should SkillCurrent move to its own repository?
 3. Is a Developer Certificate of Origin sign-off enough for outside
    contributions, given we sell support for the code?
 

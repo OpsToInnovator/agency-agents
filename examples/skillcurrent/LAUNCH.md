@@ -35,7 +35,7 @@ facts.
 
 | Decision | Recommendation | Why it matters |
 |---|---|---|
-| **Who "we" is** | Your name, and a company if you have one | The page, emails and terms say "we". The terms need a name, entity and country. If it's just you, say "I" in posts. |
+| **Who "we" is** | ApexForm Life Pty Ltd, Perth, Western Australia (decided). Add the ABN to the terms and the legal brief | The page, emails and terms say "we", and the beta page's footer names ApexForm Life. In personal posts, say "I" and name ApexForm Life. |
 | **Hosting** | One small VPS running `serve --public` behind Caddy | It is the path that's fully tested end to end, and sign-ups land straight in `skillcurrent beta`. The alternatives are below. |
 | **Domain** | A domain you own, with the page on `beta.<domain>` | Needed for HTTPS and a trustworthy reply address. Check the name for trademark conflicts in your market before paying for it. |
 | **Reply address** | A mailbox on that domain, with SPF, DKIM and DMARC set up by your mail provider | The page and every email send replies there. Avoid forwarding into a personal inbox and replying with "send mail as" through that inbox's servers: the mail isn't signed for your domain, so it can fail DMARC and land in spam. Don't publish a personal address. |
