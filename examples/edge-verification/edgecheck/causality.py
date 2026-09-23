@@ -216,11 +216,12 @@ class Report:
         where = (", at the times of day and on the days it prints" if self.calendar
                  else ", their times, after the next bar's, stepping as those bars' own do")
         level = ("a read of the level of volume further ahead, which stays near the tape's own there, of "
-                 "volatility, which is the given sigma's" if self.sigma is not None else
+                 "volatility, which is the given sigma's where the tape moves and still where it is still"
+                 if self.sigma is not None else
                  "a read of the level of volume or volatility further ahead, which stays near the tape's own there")
         # under a caller's sigma the far end can stray farther than a walk at that sigma (the tape's own
         # drift, rescaled): said as what it is (a nineteenth red team)
-        level += (", of where the price is far ahead, which the rebuild takes from the tape's own later moves, rescaled"
+        level += (", of where the price is far ahead, which the rebuild takes from the tape's own moves near it, rescaled"
                   if self.sigma is not None else
                   ", of where the price is far ahead, which strays from the tape's own less than a walk of its own would")
         when = ", or of a later bar's exact date" if self.calendar else ", or of when a later bar comes"
@@ -230,7 +231,7 @@ class Report:
         tick = ("prices on the tick the tape prints at their price level and time" if "eras" in self.grids
                 else "prices on the tape's own tick")
         parts = ([tick] if "tick" in self.grids else []) + \
-            ([("volumes on its own lot" if "tick" in self.grids else "volumes on the tape's own lot")]
+            ([("volumes on the lot found in it" if "tick" in self.grids else "volumes on the lot found in the tape")]
              if "lot" in self.grids else [])
         return " and ".join(parts)
 
@@ -268,6 +269,15 @@ class Report:
                              "data source could print under a rule not found in the tape (an adjustment by a "
                              "factor other than the split ratios it tries, a change of tick lasting under twenty "
                              "bars or at some price levels only) can go unseen")
+        else:
+            # a twentieth red team: with no grid found, the note said nothing of the prices at all
+            tie_residual += ("; no price grid was found in the tape, so a rebuilt price is any float, and a read "
+                             "of whether a price is one the data source could print can go unseen")
+        tie_residual += ("; volumes are set on the lot found in the tape, and a read of whether a volume is one "
+                         "the data source could print under a lot or rule not found there can go unseen"
+                         if "lot" in self.grids else
+                         "; no volume lot was found in the tape, so a rebuilt volume is any float, and a read of "
+                         "whether a volume is one the data source could print can go unseen")
         if self.draws == 1:
             combos = (f"one draw at each bar, pushing the close past its open and past the farthest of "
                       f"{levels} it could reach, the high and the low past the previous bar's, the "
@@ -818,6 +828,9 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
     by_bar, vgrid = grid
     pgrid = by_bar
     tape_sigma = realized_sigma(tape) if sigma is not None else 0.0
+    # whether the tape moves at all: realized_sigma is floored, so a tape of no moves read as moving,
+    # and its tail was a run of dojis under 'moves of sigma' (a twentieth red team)
+    moving = any(x > 0 for x in rms) if rms else any(b.close != b.open for b in tape)
     top_move, top_wick, top_up, top_dn, top_volume = (tuple(caps) + (None,) * 5)[:5]
 
     def on(x: float, how: str) -> float:
@@ -912,9 +925,10 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
             # A donor from a still stretch of a moving tape has no move to scale: it stays still. Given a
             # normal move of sigma, an untraded bar of a still stretch came back moving, which the tape
             # never prints, and a strategy keyed on that walked (a nineteenth red team). Only a tape
-            # with no moves at all is moved by the sigma alone, as the note says.
+            # with no moves at all is moved by normal draws of the sigma, as the note says.
             local = rms[d] if 0 <= d < len(rms) else tape_sigma
-            move = (own * sigma / local if local > 0 else 0.0) if tape_sigma > 0 else rng.gauss(0.0, sigma)
+            move = (own * sigma / local if local > 0 else 0.0) if moving else rng.gauss(0.0, sigma)
+            move = max(-50.0, min(50.0, move))     # never past what a float's exp can hold
         else:
             move = own
         closed = positive(opened * math.exp(move), opened)
@@ -1094,8 +1108,11 @@ class Sizes(NamedTuple):
 
 
 # Candidate steps, coarsest first: 1, 2, 2.5 and 5 times a power of ten, and the binary fractions
-# of one -- 1/8 to 1/256 -- times a power of ten, on which treasury futures and grains print.
-_STEPS = sorted({m * 10.0 ** p for p in range(-9, 4) for m in (5.0, 2.5, 2.0, 1.0)}
+# of one -- 1/8 to 1/256 -- times a power of ten, on which treasury futures and grains print. From
+# 1e-18 to 5e15: stopping at 1e-9 and 5000, a token's 1e-10 tick and a volume lot of 100,000 were
+# never found, and rebuilt values went off the tape's rule under a note that named it (a twentieth
+# red team).
+_STEPS = sorted({m * 10.0 ** p for p in range(-18, 16) for m in (5.0, 2.5, 2.0, 1.0)}
                 | {10.0 ** p / 2 ** j for p in range(-6, 4) for j in range(3, 9)}, reverse=True)
 
 
@@ -1118,8 +1135,12 @@ def _grid(values: Sequence[float], share: float = 1.0, steps: Sequence[float] | 
     anchors = [vals[0]] if not allowed else list(dict.fromkeys(
         vals[i] for i in (len(vals) // 2, len(vals) // 4, (3 * len(vals)) // 4, 0)))
     for step in (_STEPS if steps is None else steps):
-        if math.ulp(top) > step:
-            return None                  # the floats cannot hold a step this fine at this size
+        if step > top:
+            continue
+        if math.ulp(top) > step * 0.01:
+            # the floats cannot hold a step this fine at this size: within a hundredth of a step of
+            # one of its points, any float would be on it
+            return None
         for anchor in anchors:
             off = anchor - step * math.floor(anchor / step + 1e-9)
             if abs(off) < step * 1e-6 or abs(off - step) < step * 1e-6:
@@ -1162,7 +1183,8 @@ def _local_grids(values: Sequence[float], reach: float = 0.05, least: int = 12, 
     if base is None:
         return None                  # no grid anywhere on the tape, and none by price level either
     # every local grid is a whole multiple of the finest the tape's prices share
-    steps = [st for st in _STEPS if st >= base.step * (1 - 1e-9) and abs(st / base.step - round(st / base.step)) < 1e-6]
+    steps = [st for st in _STEPS if base.step * (1 - 1e-9) <= st <= u[-1]
+             and abs(st / base.step - round(st / base.step)) < 1e-6]
     cache: dict[tuple[int, int], Grid | None] = {}
 
     def grid_of(a: int, b: int) -> Grid | None:
@@ -1305,7 +1327,9 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
     base = _grid(flat) or _grid(flat, 0.9)
     if base is None:
         return []
-    steps = [st for st in _STEPS if st > base.step * (1 + 1e-9) and abs(st / base.step - round(st / base.step)) < 1e-6]
+    # no step past the largest price: a tolerance that grows with the step put every price on one
+    steps = [st for st in _STEPS if base.step * (1 + 1e-9) < st <= flat[-1]
+             and abs(st / base.step - round(st / base.step)) < 1e-6]
 
     def on(v: float, st: float) -> bool:
         m = round((v - base.off) / st)
@@ -1449,6 +1473,8 @@ def _ceil_n(grid: Grid, x: float, strict: bool = False) -> int:
     a hundred of a step. The billionth is of the step or of ``x``, whichever is less: of a step
     far wider than the price, it counted a point below ``x`` as at it (a nineteenth red team)."""
     tol = _tol(grid, x)
+    if math.ulp(x) >= grid.step / grid.scale:
+        return round(_index(grid, x))       # the floats cannot tell its points apart here
     ok = (lambda p: p > x + tol) if strict else (lambda p: p >= x - tol)
     n = math.ceil(_index(grid, x) - 1e-9)
     while not ok(_point(grid, n)):
@@ -1461,6 +1487,8 @@ def _ceil_n(grid: Grid, x: float, strict: bool = False) -> int:
 def _floor_n(grid: Grid, x: float, strict: bool = False) -> int:
     """The last grid point at or before ``x`` -- strictly before, with ``strict``."""
     tol = _tol(grid, x)
+    if math.ulp(x) >= grid.step / grid.scale:
+        return round(_index(grid, x))
     ok = (lambda p: p < x - tol) if strict else (lambda p: p <= x + tol)
     n = math.floor(_index(grid, x) + 1e-9)
     while not ok(_point(grid, n)):
@@ -1711,11 +1739,29 @@ def _past_clause(past: Sequence[str]) -> str:
             + " or ".join(kinds) + " the tape has made")
 
 
+SIGMA_MAX = 0.5     # the largest caller's sigma taken: a later bar's log move of a half, 65%
+
+
+def _ceil_sig(x: float, digits: int = 3) -> float:
+    """``x`` rounded UP to ``digits`` significant figures: a bound printed as the least that will do
+    must be one that does."""
+    if x <= 0 or not math.isfinite(x):
+        return x
+    e = math.floor(math.log10(x)) - digits + 1
+    y = math.ceil(x / 10.0 ** e - 1e-9) * 10.0 ** e
+    y = float(f"{y:.{digits}g}")
+    return y if y >= x else float(f"{math.nextafter(y, math.inf):.{digits + 1}g}")
+
+
 def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
-    """A caller's sigma a later bar can move by on the tape's grid: a positive finite number, and at
-    least the tape's tick, as a share of the price, at every price the tape closed at. Under a sigma below one tick at a $2 stock's
-    price, every rebuilt move rounded to nothing, the proof line said 'moves of sigma 0.0005' over a
-    tail of dojis, and a strategy keyed on the dojis walked (a nineteenth red team)."""
+    """A caller's sigma a later bar can move by: a positive finite number, no more than ``SIGMA_MAX``,
+    and at least the tape's tick -- or, off a grid, a thousand units in the last place of the float --
+    as a share of the price, at every price the tape closed at. Under a sigma below one tick at a $2
+    stock's price, every rebuilt move rounded to nothing, the proof line said 'moves of sigma 0.0005'
+    over a tail of dojis, and a strategy keyed on the dojis walked (a nineteenth red team); a float
+    tape took a sigma of 1e-17 the same way, a sigma of a million overflowed, a sigma of five hung the
+    snap on prices of 1e21, and the least sigma the refusal named, rounded down, was refused again (a
+    twentieth)."""
     try:
         ok = math.isfinite(sigma) and sigma > 0
     except TypeError:
@@ -1723,19 +1769,31 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
     if not ok:
         raise ValueError(f"sigma must be a positive finite number, not {sigma!r}")
     by = _prices_by_bar(sizes)
-    worst = None
+    worst, why = None, ""
     for i, b in enumerate(tape):
-        g = by(b.ts) if callable(by) else by
         x = b.close
+        if x <= 0:
+            continue
+        g = by(b.ts) if callable(by) else by
         h = g.at(x) if hasattr(g, "at") else g
-        if isinstance(h, Grid) and x > 0:
-            tick = h.step / h.scale / x
-            if worst is None or tick > worst[0]:
-                worst = (tick, i)
+        if isinstance(h, Grid):
+            share, kind = h.step / h.scale / x, "tick"
+        else:
+            share, kind = 1e3 * math.ulp(x) / x, "float"
+        if worst is None or share > worst[0]:
+            worst, why = (share, i), kind
+    least = _ceil_sig(worst[0]) if worst is not None else 0.0
+    what = (f"the tape's tick at bar {worst[1]}, {least:g} of its price" if why == "tick" else
+            f"what a float can move a price by at bar {worst[1]}, {least:g} of it") if worst else ""
+    if worst is not None and least > SIGMA_MAX:
+        raise ValueError(f"no sigma can be taken on this tape: {what}, is more than the largest sigma taken "
+                         f"({SIGMA_MAX:g}); audit it without a sigma")
+    if sigma > SIGMA_MAX:
+        raise ValueError(f"sigma {sigma:g} is more than the largest sigma taken, {SIGMA_MAX:g} (a later bar's log "
+                         f"move of {SIGMA_MAX:g})")
     if worst is not None and sigma < worst[0]:
-        raise ValueError(f"sigma {sigma:g} is below the tape's tick at bar {worst[1]}, {worst[0]:.3g} of its "
-                         f"price: later bars could not move by it on the grid the tape prints on; give a "
-                         f"sigma of at least {worst[0]:.3g}")
+        raise ValueError(f"sigma {sigma:g} is below {what}: a move that small cannot be printed there; give a "
+                         f"sigma of at least {least:g}")
 
 
 def _validate(tape: Sequence[Any]) -> None:
@@ -3138,6 +3196,11 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     if n < 8:
         raise ValueError(f"need at least 8 bars to probe, got {n}")
     _validate(tape)
+    # the tape's sizes, and the caller's sigma checked against them, before the strategy runs once: a
+    # sigma refused after the truncation phase cost a run per bar first (a twentieth red team)
+    sizes = _sizes(tape)
+    if sigma is not None:
+        _check_sigma(tape, sizes, sigma)
     nonce = seed if seed is not None else int.from_bytes(os.urandom(8), "big")
     if draws is None:
         draws = 4 if probes == "every_bar" else DEFAULT_DRAWS
@@ -3175,9 +3238,6 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
                            probe="truncation", detail="removed")
             candidates.append((d, (lambda c=cut: list(strategy(c))), truncated))
 
-    sizes = _sizes(tape)
-    if sigma is not None:
-        _check_sigma(tape, sizes, sigma)
     sg = realized_sigma(tape) if sigma is None else sigma
     mode = sizes.step_mode
     gapped = bool(sizes.gaps_up or sizes.gaps_dn)

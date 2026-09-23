@@ -1544,7 +1544,7 @@ def test_the_note_names_only_the_ties_and_grids_it_used():
     rd = check_causality(strat("clean_lagged").signals, doji, probes="every_bar", seed=1)
     assert "doji" in rd.ties and "a doji" in rd.coverage_note()
     rt = check_causality(strat("clean_lagged").signals, _tick_tape(), probes="every_bar", seed=1)
-    assert rt.grids == ("tick", "lot") and "prices on the tape's own tick and volumes on its own lot" in rt.coverage_note()
+    assert rt.grids == ("tick", "lot") and "prices on the tape's own tick and volumes on the lot found in it" in rt.coverage_note()
 
 
 def test_the_volume_floor_says_what_it_did():
@@ -2413,7 +2413,7 @@ def test_the_tail_clause_says_what_each_tape_got():
     assert "at the times of day" not in flat.coverage_note()
     wide = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1, sigma=0.05)
     assert ", of volatility, which is the given sigma's" in wide.coverage_note()
-    assert "of where the price is far ahead, which the rebuild takes from the tape's own later moves, rescaled" in wide.coverage_note()
+    assert "of where the price is far ahead, which the rebuild takes from the tape's own moves near it, rescaled" in wide.coverage_note()
     assert "of where the price is far ahead, which strays from the tape's own less than a walk of its own would" in flat.coverage_note()
     sess = check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100], draws=4, seed=1)
     assert "at the times of day and on the days it prints" in sess.coverage_note()
@@ -2631,3 +2631,72 @@ def test_two_changes_of_tick_are_not_joined_into_a_grid_that_snaps_backwards():
     assert _snap(0.9989, _joined(a, b), "up") >= 0.9989
     wide = Grid(79999999999999.03, 0.997, {})
     assert _snap(0.9989, wide, "up") >= 0.9989 and _snap(0.9989, wide, "down") <= 0.9989
+
+
+# ---------------------------------------------------------------- a twentieth red team
+
+def test_coarse_lots_and_sub_nano_ticks_are_found_and_a_tape_with_no_grid_says_so():
+    """A twentieth red team: the candidate steps stopped at 5000 and 1e-9, so a volume lot of 100,000
+    and a token's 1e-10 tick were never found; rebuilt values went off the tape's rule under a note
+    that said 'volumes on its own lot', or, with no grid found, said nothing of the prices at all."""
+    import random
+    from edgecheck.causality import _grid, _sizes
+    from edgecheck.fixtures import Bar
+    r, p, lots, nano = random.Random(3), 50.0, [], []
+    for i in range(200):
+        o, h, lo, c = _walk_bar(r, p, 0.01, tick=0.01)
+        lots.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(r.randint(100, 900) * 100_000)))
+        p = c
+    assert _sizes(lots).vol_grid.step == 100_000
+    p = 8e-6
+    for i in range(200):
+        o = round(p, 10)
+        c = round(o * math.exp(r.gauss(0, 0.01)), 10)
+        h, lo = round(max(o, c) * (1 + abs(r.gauss(0, 0.004))), 10), round(min(o, c) * (1 - abs(r.gauss(0, 0.004))), 10)
+        nano.append(Bar(1.7e9 + 60 * i, o, max(h, o, c), min(lo, o, c), c, float(r.randint(1, 90))))
+        p = c
+    assert abs(_sizes(nano).price_grid.step - 1e-10) < 1e-22
+    # floats near their last place are no grid at all: any of them sits within a unit of such a step
+    assert _grid([100 + r.random() for _ in range(300)]) is None
+    floats = bars(120, seed=5)
+    note = check_causality(strat("clean_lagged").signals, floats, boundaries=[60], draws=4, seed=1).coverage_note()
+    assert "no price grid was found in the tape, so a rebuilt price is any float" in note
+    note = check_causality(strat("clean_lagged").signals, lots, boundaries=[60], draws=4, seed=1).coverage_note()
+    assert "volumes on the lot found in it" in note and "own lot" not in note
+
+
+def test_a_sigma_is_checked_before_any_run_and_only_one_that_can_be_honoured_is_taken():
+    """A twentieth red team: the least sigma the refusal named, rounded down, was refused again; a float
+    tape took a sigma of 1e-17; a sigma of five hung the snap and one of a million overflowed; a tape
+    with no moves at all got a tail of dojis under 'moves of sigma'; and a bad sigma was refused only
+    after the truncation phase had run the strategy once a bar."""
+    import random
+    import re
+    from edgecheck.causality import _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    from edgecheck.sandbox import prove
+    r, p, cents = random.Random(8), 8.13, []
+    for i in range(120):
+        o, h, lo, c = _walk_bar(r, p, 0.004, tick=0.01)
+        cents.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(r.randint(1, 50) * 100)))
+        p = c
+    with pytest.raises(ValueError) as e:
+        check_causality(strat("clean_lagged").signals, cents, boundaries=[60], draws=4, seed=1, sigma=1e-6)
+    least = float(re.search(r"at least ([0-9.e+-]+)", str(e.value)).group(1))
+    check_causality(strat("clean_lagged").signals, cents, boundaries=[60], draws=4, seed=1, sigma=least)
+    for big in (5.0, 1e6, 1e300):
+        with pytest.raises(ValueError, match="largest sigma taken"):
+            check_causality(strat("clean_lagged").signals, cents, boundaries=[60], draws=4, seed=1, sigma=big)
+    with pytest.raises(ValueError, match="what a float can move a price by"):
+        check_causality(strat("clean_lagged").signals, bars(120, seed=5), boundaries=[60], draws=4, seed=1, sigma=1e-17)
+    runs = []
+    with pytest.raises(ValueError):
+        check_causality(lambda bs: runs.append(1) or [0] * len(bs), cents, probes="every_bar", seed=1, sigma=0.0)
+    assert not runs
+    with pytest.raises(ValueError, match="sigma"):
+        prove(None, cents, sigma=float("nan"))          # before the gates run anything
+
+    flat = [dataclasses.replace(b, close=b.open, high=b.open * 1.001, low=b.open * 0.999) for b in bars(120, seed=7)]
+    sz = _sizes(flat)
+    v = _perturbed(flat, 60, seed=5, sigma=0.01, plan=draw_plans(1, 60, 4)[0], sizes=sz)
+    assert sum(b.close != b.open for b in v[61:]) > 40

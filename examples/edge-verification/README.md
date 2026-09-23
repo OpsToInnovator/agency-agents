@@ -338,7 +338,7 @@ which the run passes by: at the same time of day, traded or not as that bar, clo
 and from a stretch as volatile; no two donors ever follow each other twice, so no run repeats. The
 spread of a rebuilt tail's end around the real one went from 0.1–0.3 of a walk's spread over the
 same bars to 0.4–0.95, by tape, and the same reader was caught in 10 to 17 of 24 one-bar audits,
-by seed (14 on a GARCH tape); the clustering
+by seed (14 on a GARCH tape, 6 on one whose volume trends); the clustering
 the runs keep stayed where it was (lag-one autocorrelation of log volume on a GARCH tape: real
 0.33, before 0.30, now 0.29–0.30). The note says what is left: the price far ahead strays from the
 tape's own less than a walk of its own would. A tail too short for runs, under eight bars, had been
@@ -371,6 +371,26 @@ grids are no longer joined, and a snap's tolerance is a billionth of the price w
 wider. Under a caller's sigma the note now says the price far ahead is the tape's own later moves,
 rescaled, rather than comparing it with a walk: on a trending tape it strayed three times farther
 than a walk at that sigma.
+
+The twentieth found two print rules the grid search could not reach, and the edges of round
+nineteen's sigma. Candidate steps ran from 1e-9 to 5,000, so a volume lot of 100,000 was taken for
+5,000 and a token's 1e-10 tick for no grid at all; a volume read made only on the real lot, and a
+close read made only where the close is written to ten places, walked under a note that said
+"volumes on its own lot", or said nothing of the prices. The steps now run from 1e-18 to 5e15, as
+far as the floats can hold them at the tape's size, and the note says "the lot found in it", and
+says so where no price grid or lot was found. The least sigma a refusal named was rounded down and
+refused again; it is now rounded up. A tape of no moves at all was never moved by the sigma, since
+its realized volatility is floored above zero: it now is, as the note said. A float tape took a
+sigma of 1e-17 over a tail of dojis; a sigma of five hung the snap on prices of 1e21, and one of a
+million overflowed. A sigma is now refused below a thousand units in the float's last place at any
+close, and above 0.5, and a snap on floats too coarse for the step returns at once. The refusal
+comes before the strategy runs at all, in `check_causality` and in `prove`, where it came after a
+run a bar. One bad print at a cent can leave no sigma a tape can take; the refusal says so. Under a
+sigma the note now says the tail is still where the tape is still, and that the price far ahead is
+the tape's own moves near it, rescaled: near the end of a tape most of them came from before the
+probed bar. On session tapes the next bar's planned gap is drawn from every gap the tape made,
+overnight ones too, so a read that stands down on a gap larger than any at that time of day can
+walk; the note's "how far the next bar gaps" covers it.
 
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
