@@ -99,6 +99,11 @@ def main(argv: list[str]) -> int:
     out_fd, viol_fd = int(argv[4]), int(argv[5])
     max_entries = int(argv[6]) if len(argv) > 6 else 20_000
     max_depth = int(argv[7]) if len(argv) > 7 else 64
+    # memory, processes, file size and open files, set here rather than before the launch: set
+    # there they bound the namespace setup too, and a file-size cap below the tape's size killed
+    # the setup's copy, a memory cap too small for the launcher killed it -- and either was
+    # reported as the strategy's own failure (a fourteenth red team)
+    rlimits = [int(x) for x in argv[8:12]] if len(argv) > 11 else None
     os.set_inheritable(out_fd, False)
     os.set_inheritable(viol_fd, False)
     os.chdir(run_dir)
@@ -114,9 +119,17 @@ def main(argv: list[str]) -> int:
         while view:
             view = view[write(fd, view):]
 
-    def finish(payload: dict, code: int) -> None:
+    # One result, from whichever of the strategy's return and the CPU-limit watcher gets there
+    # first: both writing interleaved into a result the parent could not parse.
+    import threading
+    once, sleep = threading.Lock(), __import__("time").sleep
+
+    def finish(body: str, code: int) -> None:
+        if not once.acquire(blocking=False):
+            while True:          # the other is writing and will end the process
+                sleep(1)
         try:
-            write_all(out_fd, dumps(payload).encode("utf-8"))
+            write_all(out_fd, body.encode("utf-8"))
         finally:
             exit_(code)
 
@@ -127,24 +140,33 @@ def main(argv: list[str]) -> int:
             pass
 
     # -- the CPU limit: SIGXCPU at the soft limit is catchable, SIGKILL at the hard one is not ----
+    # SIGXCPU is blocked in every thread and taken by one watcher with sigwaitinfo, which says who
+    # sent it: the kernel's limit arrives as SI_KERNEL, a strategy's own kill() as SI_USER. Timing
+    # could not tell them apart -- the kernel checks CPU in scheduler ticks, and a genuine signal
+    # came 15ms before the process's own clock reached the limit (a fourteenth red team), while a
+    # forged one came 10ms before it (a thirteenth).
     import signal
-
-    # The CPU this process has used, read when the signal arrives, goes with the claim: the
-    # parent's own count covers the namespace setup as well, and a twelfth red team's strategy
-    # raised SIGXCPU itself at 1.95s of 2 and was reported as having hit the limit.
-    # It is read from the process CPU clock, the one the kernel's limit counts on: getrusage's
-    # figures are an approximation of it, and a genuine hit read 1.99s of 2 in the namespace tier.
     import time
     process_time = time.process_time
+    sigwait = signal.sigwaitinfo
+    SI_KERNEL = 0x80
 
-    def on_xcpu(signum, frame):
+    def watch_xcpu() -> None:
+        # Only the kernel's signal ends the run. One the strategy sent itself is not the limit, and
+        # acting on it raced the strategy's own return: the same strategy got its output one run
+        # and an error the next. It is taken and dropped.
+        while True:
+            info = sigwait({signal.SIGXCPU})
+            if info.si_code == SI_KERNEL:
+                break
         try:
             used = process_time()
         except Exception:  # noqa: BLE001 -- the claim still goes out, with nothing to back it
             used = None
-        finish({"ok": False, "reason": "cpu_limit", "cpu": used}, 3)
+        finish(dumps({"ok": False, "reason": "cpu_limit", "cpu": used, "kernel": True}), 3)
 
-    signal.signal(signal.SIGXCPU, on_xcpu)
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGXCPU})
+    threading.Thread(target=watch_xcpu, daemon=True).start()
 
     # -- the record: every socket use and every spawn, from any module, unremovable ------------
     NETWORK = {"socket.connect", "socket.getaddrinfo", "socket.sendto", "socket.sendmsg"}
@@ -153,7 +175,9 @@ def main(argv: list[str]) -> int:
 
     def audit(event: str, args: tuple) -> None:
         if event in NETWORK:
-            record("network", f"{event}{args[1:3]!r}" if len(args) > 1 else event)
+            # getaddrinfo's arguments are (host, port, ...); the others' are (socket, address)
+            shown = args[0:2] if event == "socket.getaddrinfo" else args[1:2]
+            record("network", f"{event}{shown!r}")
             raise OSError(f"edgecheck: {event} is not available inside the sandbox")
         if event in SPAWN:
             record("spawn", f"{event}{args[:2]!r}")
@@ -213,6 +237,13 @@ def main(argv: list[str]) -> int:
         return out, over
 
     # -- the strategy ------------------------------------------------------------------------------
+    import resource
+    if rlimits is not None:
+        memory, nproc, fsize, nofile = rlimits
+        for res, value in ((resource.RLIMIT_AS, memory), (resource.RLIMIT_NPROC, nproc),
+                           (resource.RLIMIT_FSIZE, fsize), (resource.RLIMIT_NOFILE, nofile)):
+            resource.setrlimit(res, (value, value))
+    record("start", "")          # everything before this line is the sandbox's, everything after the strategy's
     sys.path.insert(0, os.path.join(run_dir, "strategy"))
     try:
         module = importlib.import_module(entry)
@@ -233,10 +264,7 @@ def main(argv: list[str]) -> int:
         body = dumps({"ok": False,
                       "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300]},
                       "traceback": format_exc()[-4000:], "spawn_lock": spawn_lock})
-    try:
-        write_all(out_fd, body.encode("utf-8"))
-    finally:
-        exit_(0)
+    finish(body, 0)
 
 
 if __name__ == "__main__":

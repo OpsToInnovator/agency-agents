@@ -219,9 +219,30 @@ thousandth of a step, binary fractions are candidates, the only size limit is wh
 resolve, and an unprinted point is written the way the tape writes its values. The older tell:
 every rebuilt bar's volume was its own times fresh noise, which widened the bar-to-bar volume
 changes after the probed bar by two thirds, and an evader that read its own close only where the
-tail's changes were no wider than the head's walked at every seed. The tail now carries a slow
-level offset, as wide as the tape's own changes, and its changes come out within a twentieth of
-the tape's; its moves are drawn from the tape's own, sign and all.
+tail's changes were no wider than the head's walked at every seed.
+
+A fourteenth red team showed that answer was one statistic deep. A slow offset on each bar's own
+volume made the rebuilt tail's log volume autocorrelated where the tape's was not, and moves
+drawn from other bars than the volumes broke the way volume rises with the size of a move; an
+evader keyed on either walked. So the rebuilt tail is now the tape itself, rearranged: runs of 16
+to 48 consecutive real bars from random places, each rebuilt bar taking one real bar's gap, time
+step, move, wicks and volume together, the sizes jittered off their exact values and the prices
+continued from wherever the rebuild has got to. Whatever goes with what on the tape — volatility
+clustering, volume with moves, runs of untraded bars — goes together in the rebuild, because it
+is the tape's own. The same round found the grid's remaining holes: a mid-price tape that prints
+one point as 49.974999999999994 and as 49.975 (now one point, and where the tape's floats are not
+plain roundings the note says a price it never printed may be spelled otherwise in its last
+bits), whole volumes above 2**43 (a unit in the last place now counts), a tick that changes with
+the price level and a few prints on a finer step than the rest (each price level now has its own
+grid, and a finer step a few prices there sit on is used at the rate they do, and only between
+the prices that print on it). Checking those fixes against the same round's tapes found three
+more ways a price came out on the wrong band's tick: the last few cent prices of a stock that
+rose just past a dollar took the sub-dollar tick, having no prices above them to judge by (a
+coarser grid of any window a price lies in now counts, where chance would not put that many
+prices on it); a price rebuilt between two printed prices on different ticks was set on either
+tick (it is now set on one of those two prices); and the probed bar, built on its open's tick,
+crossed a change of tick on it (each of its prices is now set on its own level's grid, and the
+note's check of the bar as built counts what that undid).
 
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
@@ -519,18 +540,28 @@ under a proof line saying one (it is one now), a floor push said to land on the 
 point when it landed on the first one at or beyond the floor (the note now says so), a strategy
 that exited with status 1 near the hard CPU limit told it had been killed there, a SIGXCPU raised
 at 1.99s of 2 taken as the limit, a limit of 1.0000001s printed as 1s, and limits `setrlimit`
-refuses crashing the launch without a name (refused by name now).
+refuses crashing the launch without a name (refused by name now). The fourteenth found the
+sandbox's accounting: limits on memory and file size bounded the sandbox's own setup and were
+reported as the strategy's failure (the child now sets them just before importing the strategy,
+and a run that stops before that is reported as the sandbox's), a run was billed for CPU another
+Sandbox's run used meanwhile (each run's CPU now comes from its own `wait4`), a CPU limit that
+overflows the kernel's nanosecond counter, a limit printed rounded, a network record that dropped
+the host it was asked for, and a file named `strategy_v1.2.py` that could not be imported.
 
 Two things measured, not assumed. `unshare --fork` passes on the signal that killed its
 child by killing itself with it — except `SIGKILL`, which it reports as rc=1 — so a run that
 died without output is classified by that signal, and only a kill at the hard CPU limit or a
 `SIGXCPU` at the soft one is called the limit; in the namespace tier a status of 1 there is
-reported as either a kill or an exit, since this tier cannot tell them apart. The child catches
-`SIGXCPU` and writes down why it is dying, with the time on its own process CPU clock; the
-parent believes the claim only where that reaches the limit the kernel enforces, in whole
-seconds, to within 5ms. The kernel checks the limit against CPU it samples in scheduler ticks,
-and a genuine signal was measured arriving up to 3ms before the finer clock reached the limit,
-so a claim that close cannot be told from the limit and is taken as it. In the namespace tier
+reported as either a kill or an exit, since this tier cannot tell them apart. The child blocks
+`SIGXCPU` and takes it with `sigwaitinfo`, which says who sent it: the kernel's limit arrives as
+`SI_KERNEL`, a strategy's own `kill()` as `SI_USER`. Timing could not tell them apart — the
+kernel checks the limit against CPU it samples in scheduler ticks, and a genuine signal came 15ms
+before the process's own clock reached the limit, where a forged one came 10ms before it. Only the
+kernel's ends the run; one the strategy sends itself is taken and dropped, and the run goes on to
+its output or to the real limit (ending the run on it raced the strategy's own return, so the
+same strategy got its output one run and an error the next). A
+strategy that uses `ctypes` to queue itself a signal marked as the kernel's is outside what this
+defends against. In the namespace tier
 the strategy is process 1 of its own process namespace, so a signal it sends itself with the
 default action — `SIGXCPU`, even `SIGKILL` — is ignored and the run goes on, where the plain
 tier would end. And the child must not coerce output —
