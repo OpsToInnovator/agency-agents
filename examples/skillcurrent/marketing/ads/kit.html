@@ -40,7 +40,7 @@
 </style>
 <div class="wrap">
   <div class="eyebrow">Beta launch kit</div>
-  <h1>SkillCurrent ads: three concepts, nine creatives, channel copy.</h1>
+  <h1>SkillCurrent ads: seven concepts, 21 creatives, channel copy.</h1>
   <p class="lede">Everything here follows the same rules as the landing page: one conversion goal (join the beta), and nothing we can't back with the shipped tool. Creatives are rendered from the brand tokens the app uses; the source lives in the repo under <code>marketing/ads/</code> and re-renders with one command.</p>
   <div class="rules">
     <div class="rule"><b>One ask</b>Every creative and every line ends at "Join the beta".</div>
@@ -49,7 +49,109 @@
     <div class="rule"><b>Beta framing</b>Free, self-hosted, 5 to 10 teams on two or more AI coding tools.</div>
   </div>
 
-  <h2>When to run which concept</h2>
+  <h2>Hook campaign</h2>
+  <p class="lede">Four concepts built on what SkillCurrent does that competitors don't bundle together. Every terminal line in these creatives is real CLI output, checked by <code>tests/test_ads.py</code>; a prompt like <code>sam$</code> means the command ran as that member. The evidence and limits behind each claim are in <code>claims.md</code>.</p>
+  <div class="rules">
+    <div class="rule"><b>Say what it does</b>Never "only", "first", "no one else" or a competitor's name.</div>
+    <div class="rule"><b>No brands in Google text</b>Agent and vendor names stay in keywords, not in ad text.</div>
+    <div class="rule"><b>Qualify sync</b>"Machines running the hook", never "every machine".</div>
+    <div class="rule"><b>Honest canary</b>Human-judged early access you choose per release: no traffic split, no automatic rollback.</div>
+  </div>
+  <p class="lede"><b>Who it's for:</b> platform, developer-experience and security leads at organisations that run two or more coding agents and need separation of duties, especially teams that self-host. <b>Not for:</b> solo developers, or single-agent teams whose vendor already syncs organisation skills.</p>
+
+  <div class="concept" id="refused">
+    <header><h3 style="margin:0">refused</h3><p>The author&#x27;s approval refused, then a second maintainer&#x27;s approval with the SHA-256. Dark theme.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/refused-1200x628.png" alt="It won&#x27;t let you approve your own work. Terminal shows the refusal and a second maintainer&#x27;s approval, 1200 by 628 link card"><span>refused-1200x628.png · link card</span></div>
+      <div class="size"><img src="out/refused-1080x1080.png" alt="It won&#x27;t let you approve your own work. Terminal shows the refusal and a second maintainer&#x27;s approval, square feed creative"><span>refused-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/refused-1080x1920.png" alt="It won&#x27;t let you approve your own work. Terminal shows the refusal and a second maintainer&#x27;s approval, story creative"><span>refused-1080x1920.png · story</span></div>
+    </div>
+    <div class="copyblock"><div class="k">LinkedIn · refused<button data-copy>Copy</button></div><pre>It won&#x27;t let you approve your own work.
+
+When skills are shared by copying files, whoever edits one last decides what everyone&#x27;s agent reads.
+
+In SkillCurrent, whoever wrote or edited a version can&#x27;t approve it. A second maintainer signs off on the exact bytes, stamped with a SHA-256, before the version can be released to a channel. The terminal in the image is real output, and a test keeps it that way.
+
+Self-hosted, built for teams with two maintainers and more than one coding agent. Free beta pilot for 5 to 10 teams → [link]?c=refused&amp;utm_source=linkedin</pre></div>
+  </div>
+
+  <div class="concept" id="early">
+    <header><h3 style="margin:0">early</h3><p>Approve, release to canary, then history showing canary 1.1.0 and production 1.0.0. Says plainly that it is human-judged.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/early-1200x628.png" alt="Early access first. Terminal shows a canary release, 1200 by 628 link card"><span>early-1200x628.png · link card</span></div>
+      <div class="size"><img src="out/early-1080x1080.png" alt="Early access first. Terminal shows a canary release, square feed creative"><span>early-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/early-1080x1920.png" alt="Early access first. Terminal shows a canary release, story creative"><span>early-1080x1920.png · story</span></div>
+    </div>
+    <div class="copyblock"><div class="k">LinkedIn · early<button data-copy>Copy</button></div><pre>Early access first. Everyone else when you say so.
+
+Release a new version of a skill to your canary channel first. The machines on it pick it up at their next sync. A maintainer moves production when the early group is happy, and rolls back by moving the pointer back.
+
+It&#x27;s human-judged: no traffic split, no automatic metrics, no automatic rollback. We&#x27;d rather say that plainly than dress it up.
+
+Free beta pilot for teams on more than one coding agent → [link]?c=early&amp;utm_source=linkedin</pre></div>
+  </div>
+
+  <div class="concept" id="noticed">
+    <header><h3 style="margin:0">noticed</h3><p>status finds a modified and a missing copy; sync keeps the edit and restores the missing one.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/noticed-1200x628.png" alt="Someone edited their copy. Terminal shows status and sync output, 1200 by 628 link card"><span>noticed-1200x628.png · link card</span></div>
+      <div class="size"><img src="out/noticed-1080x1080.png" alt="Someone edited their copy. Terminal shows status and sync output, square feed creative"><span>noticed-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/noticed-1080x1920.png" alt="Someone edited their copy. Terminal shows status and sync output, story creative"><span>noticed-1080x1920.png · story</span></div>
+    </div>
+    <div class="copyblock"><div class="k">LinkedIn · noticed<button data-copy>Copy</button></div><pre>Someone edited their copy of a skill. Sync noticed, and kept it.
+
+Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated copies are brought back to the released version. A hand-edited one is left alone and counted, so the team can decide whether the edit should become the next version.
+
+It works with the skill folders that Claude Code, Codex, Gemini CLI, Cursor and Antigravity read. Free beta pilot → [link]?c=noticed&amp;utm_source=linkedin</pre></div>
+  </div>
+
+  <div class="concept" id="yours">
+    <header><h3 style="margin:0">yours</h3><p>The real install targets list. Self-hosted, standard library, one SQLite file.</p></header>
+    <div class="sizes">
+      <div class="size"><img src="out/yours-1200x628.png" alt="Skills only. On your server. Terminal shows the install targets, 1200 by 628 link card"><span>yours-1200x628.png · link card</span></div>
+      <div class="size"><img src="out/yours-1080x1080.png" alt="Skills only. On your server. Terminal shows the install targets, square feed creative"><span>yours-1080x1080.png · feed</span></div>
+      <div class="size"><img src="out/yours-1080x1920.png" alt="Skills only. On your server. Terminal shows the install targets, story creative"><span>yours-1080x1920.png · story</span></div>
+    </div>
+    <div class="copyblock"><div class="k">LinkedIn · yours<button data-copy>Copy</button></div><pre>Skills only. On your server.
+
+No gateway, developer portal or security suite to adopt first. SkillCurrent is Python 3.11 with no dependencies and one SQLite file. It runs on your machines, and we never see your skills.
+
+Free during the beta pilot, for 5 to 10 teams that run more than one coding agent → [link]?c=yours&amp;utm_source=linkedin</pre></div>
+  </div>
+
+  <h3>Google Search, hook campaign</h3>
+  <div class="copyblock"><div class="k">15 headlines ≤ 30 chars · 4 descriptions ≤ 90 chars (checked by the test suite)<button data-copy>Copy</button></div><pre class="mono">H: Authors Can&#x27;t Self-Approve
+H: A Second Maintainer Approves
+H: Approve the Exact Bytes
+H: Separation of Duties, Built In
+H: Canary First, Then Everyone
+H: Early Access for New Skills
+H: Roll Back by Moving a Pointer
+H: See Hand-Edited Skill Copies
+H: Edits Reported, Not Wiped
+H: Self-Hosted Skills Catalog
+H: Skills Only, On Your Server
+H: No Gateway to Adopt First
+H: Review for SKILL.md Files
+H: Every Version Hash-Stamped
+H: Free During the Beta
+D: Whoever wrote or edited a version can&#x27;t approve it. Another maintainer approves the bytes.
+D: Release to an early-access channel first, then production when a maintainer decides.
+D: Machines running the hook report hand-edited and deleted copies. Sync repairs the rest.
+D: Self-hosted: Python standard library and one SQLite file. Pilot open to 5 to 10 teams.</pre></div>
+  <div class="note">Skills keywords also match job-seeking and learning searches. Add negatives: skillshare, course, class, training, certification, resume, cv, job, jobs, soft skills, interview, salary. Brand names are allowed as keywords, not in ad text.</div>
+  <h3>X / Threads, hook campaign</h3>
+  <div class="copyblock"><div class="k">four posts, each within 280 characters<button data-copy>Copy</button></div><pre>It won&#x27;t let you approve your own work. In SkillCurrent, whoever wrote or edited a version can&#x27;t approve it; a second maintainer signs off on the exact bytes. Self-hosted, free beta pilot → [link]
+
+Early access first, everyone else when you say so. Release new skill versions to a canary channel first; a maintainer moves production. Human-judged: no traffic split, no auto-rollback. Beta → [link]
+
+Someone edited their copy of a skill. Sync noticed, and kept it. Machines running the SkillCurrent hook report hand-edited and deleted copies to the team, and restore missing ones from the release → [link]
+
+Skills only, on your server. No gateway or portal to adopt first: Python 3.11, no dependencies, one SQLite file. We never see your skills. Free beta pilot → [link]</pre></div>
+
+  <h2>Launch concepts</h2>
+
+  <h3>When to run which launch concept</h3>
   <table>
     <thead><tr><th>Concept</th><th>Headline</th><th>Audience and placement</th><th>Theme</th></tr></thead>
     <tbody>
@@ -155,7 +257,7 @@ To try it: pip install "git+https://github.com/OpsToInnovator/agency-agents@main
 H: One Catalog for SKILL.md
 H: Approve Exact Bytes
 H: Skills Drift? Sync Them
-H: Claude Code + Codex Skills
+H: Skills for Coding Agents
 H: Free Beta Pilot
 H: Self-Hosted, No Deps
 

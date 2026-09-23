@@ -148,3 +148,24 @@ def test_cli_import(env, capsys):
     (env / "agent.md").write_text("---\nname: Reality Checker\ndescription: Verifies a feature is production ready before release.\ncolor: red\n---\n# Reality Checker\n\nCheck everything twice before declaring victory.\n", encoding="utf-8")
     code, out, _ = run(capsys, "import", env)
     assert code == 0 and "created" in out and "reality-checker" in out
+
+
+@pytest.mark.parametrize("argv", [["targets"], ["--json", "--team", "nosuch", "--as", "x", "skills", "show", "nosuch"]], ids=["success", "json-error"])
+def test_closed_pipe_exits_quietly(tmp_path, argv):
+    """`skillcurrent ... | head -1` must not print a Python traceback when the reader goes away,
+    whether the command succeeds or is reporting an error as JSON on stdout."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONPATH": str(root), "SKILLCURRENT_DB": str(tmp_path / "db.sqlite")}
+    read_end, write_end = os.pipe()
+    os.close(read_end)  # the reader is gone before the command starts, so every write fails: no timing race
+    try:
+        proc = subprocess.run([sys.executable, "-m", "skillcurrent", *argv], stdout=write_end, stderr=subprocess.PIPE, env=env, timeout=60)
+    finally:
+        os.close(write_end)
+    assert b"Traceback" not in proc.stderr and b"BrokenPipeError" not in proc.stderr, proc.stderr.decode()
+    assert proc.returncode == 141

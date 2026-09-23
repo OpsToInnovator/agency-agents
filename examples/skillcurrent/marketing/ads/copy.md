@@ -19,7 +19,153 @@ Voice: the copy says "we". If you are launching alone, say "I"; readers on
 Hacker News and Reddit check. The paths below are the install targets the
 tool ships; confirm each against the vendor's current docs before posting.
 
-## Concepts
+## Hook campaign: what SkillCurrent does that others don't bundle
+
+A competitor scan on 23 September 2026 found each of these mechanics
+somewhere, but not all of them in one self-hosted, skills-only tool:
+
+- **Whoever wrote or edited a version can't approve it.** A second maintainer
+  approves the exact bytes, stamped with a SHA-256.
+- **Early access first.** New versions go to a canary channel, and a maintainer
+  moves production when satisfied.
+- **Edits are reported, not wiped.** Machines running the hook report
+  hand-edited and deleted copies. Sync repairs missing and outdated ones and
+  keeps local edits.
+- **Skills only, on your server.** No gateway, portal or security suite to adopt
+  first.
+
+`claims.md` lists the evidence and the limits behind each line.
+
+**Who it's for:** platform, developer-experience and security leads at
+organisations that run two or more coding agents and need separation of
+duties for changes. It also suits teams that self-host, or that can't use a
+vendor's cloud sync (API keys, Bedrock, regulated environments).
+
+**Who it isn't for:** solo developers, and teams on one agent that already get
+organisation skills from their vendor. Anthropic's organisation library
+blocks self-approval and syncs to Claude Code for signed-in users.
+
+**Rules for this campaign:**
+
+1. Say what SkillCurrent does. Never write "only", "first", "no one else" or a
+   competitor's name in an ad. The category is months old and each mechanic
+   exists somewhere, so a uniqueness claim would be false or soon out of date.
+   It is also hard to substantiate under the FTC's and the UK CAP Code's rules
+   on comparative claims.
+2. Keep coding-agent and vendor brand names out of Google ad text. Keywords
+   may use them. Creatives and social posts may name the tools SkillCurrent
+   installs into, as compatibility facts.
+3. Sync claims say "machines running the hook", never "every machine".
+4. Describe the canary as human-judged early access, never as automatic or
+   "safe" rollout.
+5. Terminal output in the creatives must stay real. `tests/test_ads.py`
+   replays every line against the CLI and fails if one drifts.
+6. Tag every link: `?c=refused|early|noticed|yours&utm_source=<channel>`.
+
+### Creatives
+
+`out/refused-*`, `out/early-*`, `out/noticed-*`, `out/yours-*`, each at
+1200×628, 1080×1080 and 1080×1920. Each one shows real CLI output.
+
+| Concept | Headline | Proof shown |
+|---|---|---|
+| refused | It won't let you approve your own work. | the author's approval refused, then a second maintainer's approval with the SHA-256 |
+| early | Early access first. Everyone else when you say so. | approve, release to canary, history showing canary 1.1.0 and production 1.0.0 |
+| noticed | Someone edited their copy. Sync noticed, and kept it. | status finds one modified and one missing copy; sync keeps the edit and repairs the missing one |
+| yours | Skills only. On your server. | the install targets: Claude Code, Antigravity, the shared ~/.agents/skills folder, any custom folder |
+
+### Google Search (responsive search ad)
+
+Headlines are at most 30 characters and descriptions at most 90. The test
+suite checks both limits, plus the banned words from rule 1 and rule 2.
+
+<!-- rsa-hook -->
+```text
+H: Authors Can't Self-Approve
+H: A Second Maintainer Approves
+H: Approve the Exact Bytes
+H: Separation of Duties, Built In
+H: Canary First, Then Everyone
+H: Early Access for New Skills
+H: Roll Back by Moving a Pointer
+H: See Hand-Edited Skill Copies
+H: Edits Reported, Not Wiped
+H: Self-Hosted Skills Catalog
+H: Skills Only, On Your Server
+H: No Gateway to Adopt First
+H: Review for SKILL.md Files
+H: Every Version Hash-Stamped
+H: Free During the Beta
+D: Whoever wrote or edited a version can't approve it. Another maintainer approves the bytes.
+D: Release to an early-access channel first, then production when a maintainer decides.
+D: Machines running the hook report hand-edited and deleted copies. Sync repairs the rest.
+D: Self-hosted: Python standard library and one SQLite file. Pilot open to 5 to 10 teams.
+```
+
+**Keywords** (phrase and exact match): "skills registry", "agent skills
+registry", "SKILL.md", "share agent skills with team", "skill versioning",
+"claude code skills team", "codex skills team", "agent skills governance".
+Brand names are allowed in keywords, but not in ad text.
+
+**Negative keywords:** skills on their own match job-seeking and learning
+searches, so exclude: skillshare, course, class, training, certification,
+resume, cv, job, jobs, soft skills, interview, salary.
+
+Start with a small daily cap on the skills terms and check `skillcurrent
+beta --sources` weekly. The scan found no readable competitor ad on these
+terms, but that says nothing about what they cost.
+
+### LinkedIn (sponsored or organic)
+
+**refused**
+
+> It won't let you approve your own work.
+>
+> When skills are shared by copying files, whoever edits one last decides what everyone's agent reads.
+>
+> In SkillCurrent, whoever wrote or edited a version can't approve it. A second maintainer signs off on the exact bytes, stamped with a SHA-256, before the version can be released to a channel. The terminal in the image is real output, and a test keeps it that way.
+>
+> Self-hosted, built for teams with two maintainers and more than one coding agent. Free beta pilot for 5 to 10 teams → [link]?c=refused&utm_source=linkedin
+
+**early**
+
+> Early access first. Everyone else when you say so.
+>
+> Release a new version of a skill to your canary channel first. The machines on it pick it up at their next sync. A maintainer moves production when the early group is happy, and rolls back by moving the pointer back.
+>
+> It's human-judged: no traffic split, no automatic metrics, no automatic rollback. We'd rather say that plainly than dress it up.
+>
+> Free beta pilot for teams on more than one coding agent → [link]?c=early&utm_source=linkedin
+
+**noticed**
+
+> Someone edited their copy of a skill. Sync noticed, and kept it.
+>
+> Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated copies are brought back to the released version. A hand-edited one is left alone and counted, so the team can decide whether the edit should become the next version.
+>
+> It works with the skill folders that Claude Code, Codex, Gemini CLI, Cursor and Antigravity read. Free beta pilot → [link]?c=noticed&utm_source=linkedin
+
+**yours**
+
+> Skills only. On your server.
+>
+> No gateway, developer portal or security suite to adopt first. SkillCurrent is Python 3.11 with no dependencies and one SQLite file. It runs on your machines, and we never see your skills.
+>
+> Free during the beta pilot, for 5 to 10 teams that run more than one coding agent → [link]?c=yours&utm_source=linkedin
+
+### X / Threads
+
+Each post stays within 280 characters, counting a link as 23; the test
+checks this.
+
+<!-- x-hook -->
+- It won't let you approve your own work. In SkillCurrent, whoever wrote or edited a version can't approve it; a second maintainer signs off on the exact bytes. Self-hosted, free beta pilot → [link]
+- Early access first, everyone else when you say so. Release new skill versions to a canary channel first; a maintainer moves production. Human-judged: no traffic split, no auto-rollback. Beta → [link]
+- Someone edited their copy of a skill. Sync noticed, and kept it. Machines running the SkillCurrent hook report hand-edited and deleted copies to the team, and restore missing ones from the release → [link]
+- Skills only, on your server. No gateway or portal to adopt first: Python 3.11, no dependencies, one SQLite file. We never see your skills. Free beta pilot → [link]
+<!-- /x-hook -->
+
+## Launch concepts
 
 | Concept | Headline | When to use |
 |---|---|---|
@@ -117,7 +263,7 @@ Headlines (≤ 30 chars):
 - One Catalog for SKILL.md
 - Approve Exact Bytes
 - Skills Drift? Sync Them
-- Claude Code + Codex Skills
+- Skills for Coding Agents
 - Free Beta Pilot
 - Self-Hosted, No Deps
 

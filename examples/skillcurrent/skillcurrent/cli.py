@@ -786,6 +786,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     out = Out(args.json)
     try:
+        code = _run(args, out)
+        sys.stdout.flush()  # surface a closed pipe here, not as a traceback at interpreter exit
+        return code
+    except BrokenPipeError:
+        # The reader went away (`skillcurrent ... | head`), on success or while reporting an
+        # error: stop quietly, the way Unix tools do.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 141  # 128 + SIGPIPE
+
+
+def _run(args, out) -> int:
+    try:
         code = args.fn(args, out)
     except SkillCurrentError as exc:
         if args.json:

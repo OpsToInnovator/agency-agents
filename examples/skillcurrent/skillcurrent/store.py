@@ -562,6 +562,23 @@ class Store:
             r["details"] = json.loads(r["details"])
         return rows
 
+    # Activity that ends a draft's authorship: an approval (logged as 'skill.published' by the
+    # pre-release team-skills engine, whose databases this store still opens), a discarded draft,
+    # or a deleted never-published skill whose slug may be created again.
+    DRAFT_RESETS = ("skill.approved", "skill.published", "skill.draft_discarded", "skill.deleted")
+
+    def draft_authors(self, team_id: int, slug: str) -> set[str]:
+        """Everyone who created or edited the current draft: activity since the last reset for this slug."""
+        marks = ", ".join("?" for _ in self.DRAFT_RESETS)
+        rows = self.all(
+            "SELECT DISTINCT actor FROM activity WHERE team_id = ? AND skill_slug = ?"
+            " AND action IN ('skill.created', 'skill.draft_updated')"
+            " AND id > COALESCE((SELECT MAX(id) FROM activity WHERE team_id = ? AND skill_slug = ?"
+            f" AND action IN ({marks})), 0)",
+            (team_id, slug, team_id, slug, *self.DRAFT_RESETS),
+        )
+        return {r["actor"] for r in rows}
+
     def receipts_since(self, team_id: int, event: str, since: str | None = None) -> list[dict]:
         """Where and when receipts of one kind arrived: (handle, host, target, created_at) only."""
         sql = "SELECT handle, host, target, created_at FROM receipts WHERE team_id = ? AND event = ?"
