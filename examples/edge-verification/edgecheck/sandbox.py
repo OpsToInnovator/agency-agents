@@ -124,11 +124,28 @@ class Limits:
     def __post_init__(self) -> None:
         # Every limit is a positive amount. A fractional cpu_s used to reach setrlimit in the
         # child's preexec hook, fail there as a bare SubprocessError, and leak six pipe ends.
-        for name in ("cpu_s", "wall_s", "memory_bytes", "nproc", "fsize_bytes", "nofile", "result_bytes",
-                     "violation_bytes", "run_dir_entries", "run_dir_depth", "run_dir_bytes"):
+        # The two times may be fractional; every count and size is a whole number. A twelfth
+        # red team passed violation_bytes=1e6: the drain thread died on a float slice and the
+        # network record it carried was dropped -- a strategy that dialled out came back clean.
+        for name in ("cpu_s", "wall_s"):
             value = getattr(self, name)
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or not value > 0:
-                raise ValueError(f"Limits.{name} must be a positive number, not {value!r}")
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0 < value < math.inf):
+                raise ValueError(f"Limits.{name} must be a positive, finite number of seconds, not {value!r}")
+        for name in ("memory_bytes", "nproc", "fsize_bytes", "nofile", "result_bytes", "violation_bytes",
+                     "run_dir_entries", "run_dir_depth", "run_dir_bytes"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or not value > 0:
+                raise ValueError(f"Limits.{name} must be a positive whole number, not {value!r}")
+
+    @property
+    def cpu_enforced(self) -> int:
+        """The CPU limit the kernel actually enforces: it counts whole seconds."""
+        return math.ceil(self.cpu_s)
+
+    def cpu_words(self) -> str:
+        return (f"the {self.cpu_s:g}s CPU limit" if self.cpu_s == self.cpu_enforced else
+                f"the CPU limit of {self.cpu_s:g}s, which the kernel enforces in whole seconds, at "
+                f"{self.cpu_enforced}s")
 
 
 class SandboxError(Exception):
@@ -224,7 +241,7 @@ def _rlimit_installer(limits: Limits):
     def install() -> None:
         # Soft limit first: SIGXCPU, which the child catches to record the cause. Hard
         # limit a few seconds on: SIGKILL, for a strategy that ignores the first.
-        cpu = math.ceil(limits.cpu_s)                 # the kernel counts whole seconds
+        cpu = limits.cpu_enforced                     # the kernel counts whole seconds
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 3))
         resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
         resource.setrlimit(resource.RLIMIT_NPROC, (limits.nproc, limits.nproc))
@@ -287,6 +304,8 @@ def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threa
     evidence of anything but a strategy trying to exhaust the auditor. ``tail`` keeps the
     LAST ``cap`` bytes instead of the first: for stderr, where the error that ended the run
     is at the end, and a long log before it had pushed it out of the report."""
+    cap = int(cap)
+
     def go() -> None:
         buf = bytearray()
         total = 0
@@ -305,9 +324,14 @@ def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threa
         except OSError:
             pass
         finally:
-            os.close(fd)
-        sink.append(bytes(buf))
-        sink.append(b"1" if total > cap else b"0")
+            # Whatever happened above, what was read is handed over: a drain that died took the
+            # network record with it once (a twelfth red team).
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            sink.append(bytes(buf))
+            sink.append(b"1" if total > cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -491,13 +515,25 @@ class Sandbox:
 
         raw = outs[0] if outs else b""
         if not raw:
-            # The exit code is not evidence here: `unshare --fork` reports 1 for a child the
-            # kernel killed. The CPU the run actually consumed, as accounted to us by the
-            # kernel on reaping, is.
+            # No output: the process died. What killed it is in the exit status -- a signal the
+            # plain tier reports as such and `unshare --fork` passes on, except SIGKILL, which it
+            # reports as exit status 1. Only a kill at the hard CPU limit (three seconds past the
+            # soft one, for a strategy that ignored SIGXCPU) or a SIGXCPU at the soft limit is the
+            # CPU limit; a twelfth red team's segfault at 1.95s of a 2s limit was reported as
+            # having used the limit, because the parent's count includes the namespace setup.
             tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
-            if cpu_used >= self.limits.cpu_s:
-                raise ResourceExceeded(f"used {cpu_used:.1f}s CPU against a {self.limits.cpu_s:g}s limit")
-            raise StrategyError(f"no output (rc={proc.returncode}, {cpu_used:.1f}s CPU); "
+            rc = proc.returncode
+            sig = -rc if rc is not None and rc < 0 else None
+            killed = sig == signal.SIGKILL or (self.isolation == "namespace" and rc == 1)
+            hard = self.limits.cpu_enforced + 3
+            if killed and cpu_used >= hard - 1e-2:
+                raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, having ignored "
+                                       f"{self.limits.cpu_words()} ({cpu_used:.1f}s used)")
+            if sig == signal.SIGXCPU and cpu_used >= self.limits.cpu_enforced - 1e-2:
+                raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({cpu_used:.1f}s used)")
+            how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
+                   else f"rc={rc}")
+            raise StrategyError(f"no output ({how}, {cpu_used:.1f}s CPU); "
                                 f"the strategy's own stderr ended: {tail}")
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -509,15 +545,22 @@ class Sandbox:
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
-                # The child's word, checked against the kernel's: a claimed CPU-limit death
-                # with no CPU consumed is a forged claim, and is reported as one.
-                # The kernel sends SIGXCPU only once the limit is reached, and the children's
-                # accounting covers the whole tree, so a real hit reads at or past the limit. A
-                # tenth red team raised the signal itself at 1.3s of 2s; an eleventh at 1.8s.
-                shown = math.floor(cpu_used * 100) / 100          # never rounded up to the limit
-                if cpu_used >= self.limits.cpu_s - 1e-3:
-                    raise ResourceExceeded(f"hit the {self.limits.cpu_s:g}s CPU limit ({shown:.2f}s used)")
-                raise StrategyError(f"claimed the CPU limit at {shown:.2f}s of a {self.limits.cpu_s:g}s limit")
+                # The child's word, checked against the kernel's. The kernel sends SIGXCPU once the
+                # process's OWN CPU reaches the limit it enforces -- whole seconds, so a 1.5s limit
+                # fires at 2s -- and the child reports that CPU with its claim. The parent's count
+                # covers the namespace setup too, so it is only a bound: a real hit reads at or
+                # past the enforced limit on both. A tenth red team raised the signal itself at
+                # 1.3s of 2s, an eleventh at 1.8s, a twelfth at 1.95s, where the setup carried
+                # the parent's count past the limit.
+                own = payload.get("cpu")
+                own = own if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own) else None
+                limit = self.limits.cpu_enforced
+                if own is not None and own >= limit - 1e-2 and cpu_used >= limit - 1e-2:
+                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} "
+                                           f"({math.floor(own * 100) / 100:.2f}s used by the strategy)")
+                shown = math.floor((own if own is not None else cpu_used) * 100) / 100
+                raise StrategyError(f"claimed the CPU limit at {shown:.2f}s of CPU, short of "
+                                    f"{self.limits.cpu_words()}")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
             if etype == "MemoryError":

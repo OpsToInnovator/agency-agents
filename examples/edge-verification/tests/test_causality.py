@@ -907,9 +907,11 @@ def test_every_claimed_push_is_delivered_on_the_fixture_tapes(gap_prob):
     undelivered, and the repair draws that make that so are a modest share of the audit. At
     two draws the share is larger by construction: a gappy tape's next bar can gap up, gap
     down or not gap, and two draws cannot hold three states, so one is repaired at nearly
-    every bar."""
+    every bar. Since round twelve an ungapped next open is a tie at a bar whose real next bar
+    gapped, and gets a draw of its own there -- about one repair at three bars in ten on the
+    gappy tape, which is what moved its four-draw share from 7% to 12%."""
     tape = bars(200, gap_prob=gap_prob, late_prob=0.1)
-    for draws, share in ((2, 0.35), (4, 0.1), (8, 0.1)):
+    for draws, share in ((2, 0.35), (4, 0.15), (8, 0.1)):
         r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", draws=draws, seed=3)
         assert not r.leaks and r.undelivered == (), (draws, r.undelivered)
         assert r.repairs < share * r.probes_run, (draws, r.repairs, r.probes_run)
@@ -963,9 +965,9 @@ def test_a_zero_volume_push_comes_from_the_planned_draws(tape):
     zt = _zero_volume_tape(0.3)
     with_zero = check_causality(strat("clean_lagged").signals, zt, probes="every_bar", seed=2)
     assert with_zero.undelivered == ()
-    # the same ceiling the fixture tapes are held to at four draws; the owed set grew in rounds
-    # ten and eleven, and what this test guards is that zero comes from a planned draw (above)
-    assert with_zero.repairs < 0.1 * with_zero.probes_run
+    # the same ceiling the gappy fixture tape is held to at four draws; the owed set grew in rounds
+    # ten to twelve, and what this test guards is that zero comes from a planned draw (above)
+    assert with_zero.repairs < 0.15 * with_zero.probes_run
 
 
 def test_the_one_draw_note_mentions_its_repairs_and_runs_are_named_as_runs(tape):
@@ -1053,7 +1055,7 @@ def test_every_relation_to_the_previous_bar_is_owed_where_it_can_be_made():
             assert nxt <= owed
         else:
             assert not (nxt & owed), "the last bar has no next bar to push"
-    assert fields_seen == {(f, n) for f in ("close", "high", "low") for n in LEVELS}
+    assert fields_seen == {(f, n) for f in ("close", "high", "low") for n in LEVELS} | {("high", "own"), ("low", "own")}
     for seed in (1, 2):
         r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=seed)
         assert not r.leaks and r.undelivered == ()
@@ -1247,3 +1249,310 @@ def test_a_given_sigma_on_a_tape_with_no_moves_is_named():
     note = r.coverage_note()
     assert "pushed by the given sigma 0.05" in note and "a floor size" not in note
     assert r.undelivered == ()
+
+
+# -- round twelve ---------------------------------------------------------------------------
+
+def _any_tie(b, p) -> bool:
+    return b.close == b.open or any(getattr(b, f) in (p.open, p.close, p.high, p.low) for f in ("close", "high", "low"))
+
+
+def test_a_probe_adds_no_tie_the_real_bar_did_not_print():
+    """A twelfth red team: snapping to the tick and merged repairs put ties on probed bars at
+    three times the rate real bars carry them, and an evader that answered as on real data
+    whenever the probed bar showed a tie -- reading its own close otherwise -- walked at six
+    seeds of ten. A draw now counts only where it carries no tie the real bar did not print."""
+    tape = _tick_tape()
+    at = 10
+    assert not _any_tie(tape[at], tape[at - 1])
+
+    def evader(bs):
+        out = [0] + [1 if bs[i - 1].close > bs[i - 1].open else -1 for i in range(1, len(bs))]
+        if len(bs) > at and not _any_tie(bs[at], bs[at - 1]):
+            out[at] = 1 if bs[at].close > bs[at].open else -1
+        return out
+
+    for seed in range(1, 11):
+        r = check_causality(evader, tape, boundaries=[at], draws=4, seed=seed)
+        assert any(p.evidence.index == at for p in r.proven), f"missed at seed {seed}"
+
+
+def test_a_repair_draw_sets_one_tie_at_a_time():
+    """The same red team's evader hid behind merged repairs carrying a doji, a high tie and a low
+    tie at once. A draw that sets a tie now merges with nothing."""
+    from edgecheck.causality import Plan, _merge
+    ties = [Plan(close_at="own"), Plan(vol_eq=True), Plan(move=1, hi_vs=(("high", 0),)), Plan(next_gap=0),
+            Plan(next_past=("high", 0))]
+    strict = [Plan(move=1, band="far"), Plan(volume=-1), Plan(next_step=1)]
+    for a in ties:
+        for b in ties + strict:
+            assert _merge(a, b) is None and _merge(b, a) is None
+    assert _merge(strict[0], strict[1]) is not None
+
+
+def test_the_high_or_low_on_the_bars_own_open_is_owed_and_caught():
+    """``low == open`` at a bar whose low was below its open walked at every seed: the high or
+    low level with the bar's own open was never owed. It is, where the tape prints it."""
+    tape = _tick_tape()
+    levels = lambda p: (p.open, p.close, p.high, p.low)
+    picks = [k for k in range(10, 190) if tape[k].low != tape[k].open and tape[k].open not in levels(tape[k - 1])][:3]
+    assert picks
+    for at in picks:
+        s = _one_bar(at, lambda bs, at=at: 1 if bs[at].low == bs[at].open else -1)
+        for seed in range(1, 7):
+            r = check_causality(s, tape, boundaries=[at], draws=4, seed=seed)
+            assert any(p.evidence.index == at for p in r.proven), (at, seed)
+
+
+def _gappy_tick_tape(n: int = 200, seed: int = 11, tick: float = 0.05):
+    """A tick tape on which every bar gaps by a tick or two, and next opens land on the previous
+    bar's levels by themselves. A twelfth red team's."""
+    import random
+    from edgecheck.fixtures import Bar
+    rng, out, ts, c = random.Random(seed), [], 1.7e9, 100.0
+    for i in range(n):
+        o = round(c + tick * rng.choice((1, 2, -1, -2)), 2) if i else 100.0
+        c = round(o + tick * rng.choice((-3, -2, -1, 1, 2, 3)), 2)
+        h = round(max(o, c) + tick * rng.choice((0, 1, 2)), 2)
+        lo = round(min(o, c) - tick * rng.choice((0, 1, 2)), 2)
+        out.append(Bar(ts, o, h, lo, c, float(rng.randint(5, 20) * 100)))
+        ts += 60
+    return out
+
+
+def test_the_next_open_on_a_previous_level_by_a_gap_is_caught():
+    """The next open level with a previous-bar level was owed only through an ungapped bar, so on
+    a tape that always gaps ``next open == previous high`` walked. It is now set exactly, by a gap
+    of the tape's own size from a close near the level."""
+    from edgecheck.causality import _sizes
+    tape = _gappy_tick_tape()
+    sz = _sizes(tape)
+    assert not sz.gap0
+    tried = 0
+    for at in range(10, 60):
+        b, p, nb = tape[at], tape[at - 1], tape[at + 1]
+        g = math.log(p.high / b.close)
+        if nb.open == p.high or not ((g > 0 and g <= sz.gaps_up[-1]) or (g < 0 and -g <= sz.gaps_dn[-1])):
+            continue
+        s = _one_bar(at, lambda bs, at=at: 1 if bs[at + 1].open == bs[at - 1].high else -1)
+        for seed in range(1, 6):
+            r = check_causality(s, tape, boundaries=[at], draws=4, seed=seed)
+            assert any(q.evidence.index == at for q in r.proven), (at, seed)
+        tried += 1
+        if tried == 3:
+            break
+    assert tried == 3 and "next" in sz.ties
+
+
+def _cents_times_float():
+    """Whole ticks times 0.01, as a store of integer ticks converts them: 100.19000000000001."""
+    ticks = lambda x: round(x / 0.01)
+    out = []
+    for b in bars(200, seed=7, gap_prob=0.3, late_prob=0.1):
+        o, c = ticks(b.open), ticks(b.close)
+        h, lo = max(ticks(b.high), o, c), min(ticks(b.low), o, c)
+        out.append(dataclasses.replace(b, open=o * 0.01, high=h * 0.01, low=lo * 0.01, close=c * 0.01,
+                                       volume=float(round(b.volume))))
+    return out
+
+
+def test_a_grid_is_found_under_float_noise_and_off_zero():
+    """A tape stored as whole ticks times 0.01 was taken for no grid at all, and a mid-price tape
+    on x.xx5 was snapped to whole cents; on both, an evader that answered as on real data
+    whenever a price left the tape's lattice walked at every seed."""
+    from edgecheck.causality import _sizes, draw_plans
+    noisy = _cents_times_float()
+    mid = [dataclasses.replace(b, open=round(b.open + 0.005, 3), high=round(b.high + 0.005, 3),
+                               low=round(b.low + 0.005, 3), close=round(b.close + 0.005, 3)) for b in _tick_tape()]
+    for tape, off in ((noisy, 0.0), (mid, 0.005)):
+        sz = _sizes(tape)
+        assert sz.price_grid is not None and abs(sz.price_grid.step - 0.01) < 1e-12
+        assert abs(sz.price_grid.off - off) < 1e-9
+        lat = lambda x: abs((x - off) * 100 - round((x - off) * 100)) < 1e-6
+        for k in (40, 120):
+            for i, plan in enumerate(draw_plans(5, k, 4, zero=sz.zero)):
+                v = _perturbed(tape, k, seed=5 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+                assert all(lat(x) for b in v[k:] for x in (b.open, b.high, b.low, b.close)), (off, k, i)
+        at = next(k for k in range(15, 190) if tape[k].close > tape[k].open and tape[k - 1].close > tape[k - 1].open)
+
+        def evader(bs, at=at, lat=lat):
+            b, nb = bs[at], bs[at + 1]
+            if not all(lat(x) for x in (b.close, b.high, b.low, nb.open, nb.close)):
+                return 1
+            return 1 if b.close > b.open else -1
+
+        for seed in range(1, 5):
+            r = check_causality(_one_bar(at, evader), tape, boundaries=[at], draws=4, seed=seed)
+            assert any(q.evidence.index == at for q in r.proven), (off, seed)
+
+
+def _penny_tape(price: float = 0.03, tick: float = 0.01, n: int = 200, seed: int = 7, vol: float = 0.3):
+    import random
+    from edgecheck.fixtures import Bar
+    rng, out, ts, p = random.Random(seed), [], 1.7e9, price
+    for _ in range(n):
+        o = p
+        c = max(tick, round(round(o * math.exp(rng.gauss(0, vol)) / tick) * tick, 10))
+        top, bot = max(o, c), min(o, c)
+        h = round(top + (tick if top >= 0.03 and rng.random() < 0.5 else 0), 10)
+        lo = round(bot - (tick if bot >= 0.03 and rng.random() < 0.5 else 0), 10)
+        out.append(Bar(ts, o, h, lo, c, float(rng.randint(1, 9))))
+        ts += 60
+        p = c
+    return out
+
+
+def test_honest_tapes_that_used_to_crash_the_auditor_get_a_report():
+    """A penny stock on a one-cent tick snapped a low to zero; a single bad print with a wick past
+    the body end made a lower wick of more than 100%; volumes in whole contracts snapped to zero
+    on a tape that never prints one. Each crashed the auditor on an honest strategy (a twelfth red
+    team). None of them may."""
+    from edgecheck.causality import _sizes, draw_plans
+    honest_log = lambda bs: [0] + [1 if math.log(bs[i - 1].close / bs[i - 1].open) > 0 else -1 for i in range(1, len(bs))]
+    r = check_causality(honest_log, _penny_tape(), probes="every_bar", seed=1)
+    assert not r.leaks
+    spike = bars(200, seed=7, gap_prob=0.3)
+    spike[100] = dataclasses.replace(spike[100], high=max(spike[100].open, spike[100].close) * 2.2)
+    assert not check_causality(strat("clean_lagged").signals, spike, probes="every_bar", seed=1).leaks
+    import random
+    rng = random.Random(3)
+    thin = [dataclasses.replace(b, volume=float(rng.randint(1, 12))) for b in _tick_tape()]
+    sz = _sizes(thin)
+    assert not sz.zero
+    for k in range(4, 200, 9):
+        for i, plan in enumerate(draw_plans(2, k, 4)):
+            v = _perturbed(thin, k, seed=2 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            assert all(b.volume > 0 for b in v), (k, i)
+            assert all(b.low > 0 for b in v), (k, i)
+    honest_vol = lambda bs: [0, 0] + [1 if bs[i - 1].close > bs[i - 1].open and math.log(bs[i - 1].volume / bs[i - 2].volume) > 0
+                                      else -1 for i in range(2, len(bs))]
+    assert not check_causality(honest_vol, thin, probes="every_bar", seed=1).leaks
+
+
+@pytest.mark.parametrize("field", ["ts", "open", "high", "low", "close", "volume"])
+def test_a_value_that_is_not_finite_is_refused_by_name(field):
+    tape = bars(40)
+    for bad in (math.inf, math.nan):
+        t = list(tape)
+        t[10] = dataclasses.replace(t[10], **{field: bad})
+        with pytest.raises(ValueError, match=f"bar 10 has a {field}"):
+            check_causality(strat("clean_lagged").signals, t, seed=1)
+
+
+def test_a_one_draw_audit_pushes_the_close_strictly_past_the_farthest_level():
+    """On a tick tape a far close snapped to the nearest tick landed exactly ON the farthest level
+    it was to pass, and a one-draw audit counted it delivered with no repair: a read of the close
+    past the previous low walked. The close now lands on the grid strictly inside its band, and
+    the one-draw audit owes, and checks, the far close and the range it claims."""
+    from edgecheck.causality import _owed, _sizes, draw_plans, realized_sigma
+    tape = _tick_tape(0.05)
+    sz, sg = _sizes(tape), realized_sigma(tape)
+    for k in range(10, 190, 7):
+        p, o = tape[k - 1], tape[k].open
+        for nonce in (1, 2, 3):
+            plan = draw_plans(nonce, k, 1)[0]
+            b = _perturbed(tape, k, seed=nonce ^ (k * 1_000_003), sigma=None, plan=plan, sizes=sz)[k]
+            owed = _owed(tape, k, sz, [plan], sg)
+            for name in ("open", "close", "high", "low"):
+                level = getattr(p, name)
+                if ("rel", "close", name, plan.move) in owed:
+                    assert (b.close - level) * plan.move >= 0
+                if (level - o) * plan.move > 0:
+                    assert b.close != level, (k, nonce, name, "a far close landed on a level it was to pass")
+    at = 5
+    s = _one_bar(at, lambda bs: 1 if bs[at].close < bs[at - 1].low else -1)
+    for seed in range(1, 9):
+        r = check_causality(s, tape, probes="every_bar", draws=1, seed=seed)
+        down = draw_plans(r.seed, at, 1)[0].move < 0
+        if down and at not in r.undelivered:
+            assert any(q.evidence.index == at for q in r.proven), seed
+
+
+def test_a_floor_push_on_a_grid_never_crosses_a_level_it_calls_out_of_reach():
+    """On a doji tape on a half-point tick the floor push was nudged a tick and crossed levels the
+    note counted as out of its reach; on a float doji tape a draw forcing no move drew a size
+    wider than the floor. Reach and the push now come from the same function."""
+    from edgecheck.causality import _sizes, draw_plans
+    r_ = lambda x: round(round(x / 0.5) * 0.5, 10)
+    tape = []
+    for b in bars(120, seed=7, gap_prob=0.3, late_prob=0.1, vol=0.01):
+        o = r_(b.open)
+        tape.append(dataclasses.replace(b, open=o, close=o, high=o + 0.5, low=o - 0.5, volume=float(round(b.volume))))
+    report = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
+    sz = _sizes(tape)
+    for k in report.beyond_reach[:25]:
+        p, o = tape[k - 1], tape[k].open
+        far = [x for x in (p.open, p.close, p.high, p.low) if x != o]
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            b = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)[k]
+            from edgecheck.causality import _reach, realized_sigma
+            reach = _reach(o, p, sz, realized_sigma(tape))
+            for level in far:
+                if not reach["past"](level):
+                    assert not ((b.close - level) * (level - o) > 0), (k, i, level)
+    float_doji = [dataclasses.replace(b, close=b.open, high=b.open * 1.0024, low=b.open * 0.9976)
+                  for b in bars(120, seed=7, gap_prob=0.3, late_prob=0.1)]
+    from edgecheck.causality import Plan
+    for k in (20, 60, 100):
+        for seed in range(6):
+            b = _perturbed(float_doji, k, seed=seed, sigma=None, plan=Plan(volume=1))[k]
+            assert abs(abs(math.log(b.close / b.open)) - 0.002) < 1e-12, "an unforced draw used a wider size"
+
+
+def test_a_push_off_the_tapes_scale_is_named_in_the_proof():
+    """Where one tick is larger than any move the tape has made at that price, a push of one tick
+    was reported as varied "at the tape's own scale" -- a hundred times the largest move."""
+    from edgecheck.fixtures import Bar
+    tape = []
+    for i in range(120):
+        price = 1000.0 if i < 60 else 10.0
+        o = price
+        c = price + (0.01 if i % 2 and i < 60 else 0.0)
+        tape.append(Bar(1.7e9 + 60 * i, o, max(o, c), min(o, c), c, 100.0 + 10 * (i % 3)))
+    read = _one_bar(80, lambda bs: 1 if bs[80].close > bs[80].open else 0)
+    r = check_causality(read, tape, boundaries=[80], draws=4, seed=1)
+    assert r.leaks
+    text = r.describe()
+    assert "tape's own scale" not in text and "farther than any move the tape has made" in text
+
+
+def test_volumes_on_a_lot_stay_on_it():
+    """A volume pushed below a previous volume of one lot fell back to the float just under it:
+    99.99999999999999 on a lot of 100."""
+    from edgecheck.causality import _sizes, draw_plans
+    tape = [dataclasses.replace(b, volume=100.0 * (1 + (i % 7 == 0) + 2 * (i % 11 == 0)))
+            for i, b in enumerate(_tick_tape())]
+    sz = _sizes(tape)
+    assert sz.vol_grid is not None and sz.vol_grid.step == 100.0
+    for k in range(4, 200, 3):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            assert all(b.volume % 100.0 == 0.0 and b.volume > 0 for b in v), (k, i)
+
+
+def test_the_note_names_only_the_ties_and_grids_it_used():
+    """The tie list named a doji, a close on a previous level, a repeated volume and an ungapped
+    open on every tape, and on a doji tape no doji was ever built; the grid clause named a tick
+    and a lot on tapes that had neither. Both now say what was set."""
+    float_tape = bars(200, seed=7, gap_prob=0.0)
+    r = check_causality(strat("clean_lagged").signals, float_tape, probes="every_bar", seed=1)
+    note = r.coverage_note()
+    assert "set level with its reference" not in note and "own tick" not in note and "own lot" not in note
+    assert r.ties == () and r.grids == ()
+    doji = [dataclasses.replace(b, close=b.open, high=max(b.high, b.open), low=min(b.low, b.open))
+            for b in bars(120, seed=7, gap_prob=0.3)]
+    rd = check_causality(strat("clean_lagged").signals, doji, probes="every_bar", seed=1)
+    assert "doji" in rd.ties and "a doji" in rd.coverage_note()
+    rt = check_causality(strat("clean_lagged").signals, _tick_tape(), probes="every_bar", seed=1)
+    assert rt.grids == ("tick", "lot") and "prices on the tape's own tick and volumes on its own lot" in rt.coverage_note()
+
+
+def test_the_volume_floor_says_what_it_did():
+    """"The tape has made no volume changes" on a tape whose volume went between zero and a lot,
+    and "pushed by a floor ratio" when the lot rounded every push to a whole lot."""
+    tape = [dataclasses.replace(b, volume=0.0 if i % 2 else 100.0 * (1 + i % 3)) for i, b in enumerate(_tick_tape())]
+    r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
+    note = r.coverage_note()
+    assert "volume changes" in r.floors
+    assert "no volume changes" not in note
+    assert "never changed from one traded bar to the next" in note and "rounded to its lot" in note

@@ -129,8 +129,19 @@ def main(argv: list[str]) -> int:
     # -- the CPU limit: SIGXCPU at the soft limit is catchable, SIGKILL at the hard one is not ----
     import signal
 
+    # The CPU this process has used, read when the signal arrives, goes with the claim: the
+    # parent's own count covers the namespace setup as well, and a twelfth red team's strategy
+    # raised SIGXCPU itself at 1.95s of 2 and was reported as having hit the limit.
+    import resource
+    getrusage, RUSAGE_SELF = resource.getrusage, resource.RUSAGE_SELF
+
     def on_xcpu(signum, frame):
-        finish({"ok": False, "reason": "cpu_limit"}, 3)
+        try:
+            ru = getrusage(RUSAGE_SELF)
+            used = ru.ru_utime + ru.ru_stime
+        except Exception:  # noqa: BLE001 -- the claim still goes out, with nothing to back it
+            used = None
+        finish({"ok": False, "reason": "cpu_limit", "cpu": used}, 3)
 
     signal.signal(signal.SIGXCPU, on_xcpu)
 

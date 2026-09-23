@@ -193,11 +193,29 @@ lot (a price off the grid was itself a tell); and a repair draw pursues several 
 once where they force different parts of the bar. Nothing is ever accused on a tape it
 could not deliver: no clean strategy was convicted in any sweep.
 
-The cost is honest and uneven. On float tapes repairs are about 5–7% of runs at four draws
-(the every-bar default); at two draws a quarter on a gappy tape, whose next bar has three
-gap states for two draws. On a tick-and-lot tape, where ties are owed against every level,
-repairs are about six draws a bar — roughly half the runs — and a few bars a tape still
-come up short after three attempts; the report counts them. The same round found that zero volume had
+A twelfth red team turned the ties against the audit. Snapping to the tick put a far close
+exactly *on* the level it was meant to pass, and merged repairs carried a doji, a high tie and a
+low tie at once, so probed bars carried ties at three times the rate real bars did. An evader
+that answered as on real data whenever the bar showed a tie, and read its own close otherwise,
+walked at six seeds of ten. So a draw is now credited only with what it delivered on a bar
+carrying no tie the real bar did not print, other than the one being set; a draw that sets a
+tie merges with nothing; untargeted ties are stepped off; and a close is placed on the grid
+strictly inside its band, never on the level it passes. The same round added the last members
+of the set — the high or the low level with the bar's *own* open, and the next open set exactly
+on a level by a gap of the tape's own size from a close near it, where the tape always gaps —
+and found the grid itself misread: a tape stored as whole ticks times 0.01 prints
+100.19000000000001 and was taken for no grid, and a mid-price tape on x.xx5 was snapped to whole
+cents. The grid is now found with a tolerance and at its own offset, and every point set on it
+is the tape's own float for that point.
+
+The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
+four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
+is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
+tape, where every tie the tape prints is owed against every level and each needs a draw of its
+own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
+one-cent tick they are about twelve a bar, and a third of its bars still come up short: at two
+cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
+did not print, which is not counted. The report counts every such bar. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
 where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
@@ -207,8 +225,9 @@ bars that did not diverge, that probing of a bar stopped at its first divergence
 bars had a level out of reach, and states the residual: a read of a magnitude rather than a
 direction, against a level further back than the previous bar, or of how two of these
 relations combine at a single bar, is tried only on the draws that happen to produce it and
-can go unseen. Made at every bar, as real code makes it, each such combination was convicted
-in every audit measured. With one draw the report says each bar was pushed one way only;
+can go unseen; so is a read, at a bar that itself printed a tie, that changes with whether
+that tie is there. Made at every bar, as real code makes it, each such combination was
+convicted in every audit measured. With one draw the report says each bar was pushed one way only;
 with none, that nothing a bar had not yet printed was varied. A
 fourth red team's one-bar wick read was being missed in one audit out of eight while the
 report said "every bar was probed"; the wick was a random donor's, and only the move had
@@ -467,12 +486,25 @@ strategy measures it another (both now), a quiet tape rebuilt at a floor seven t
 largest move (the floor is only for a tape with no moves), a given sigma called a floor, a
 self-raised CPU signal at 1.8s of 2s taken as the limit (only at the limit now), a
 fractional CPU limit that crashed the launch and leaked pipes (validated, cleaned up), and
-prices rebuilt off the tape's tick (on it now).
+prices rebuilt off the tape's tick (on it now). The twelfth, besides the tie evader above,
+found crashes on honest tapes — a penny stock whose low snapped to zero, a bad print whose
+lower wick passed 100%, whole-contract volumes snapped to zero on a tape that never prints one,
+an infinite price (refused by name now, as is a NaN) — and sentences: a floor push nudged a
+tick and crossing levels the note called out of its reach, a one-tick push a hundred times the
+tape's largest move called "at the tape's own scale" (the proof line says what it was now), a
+tie list naming a doji on a tape where none was built, a volume floor described in words the
+lot rounding made false, and in the sandbox a forged CPU claim at 1.95s of 2s, a segfault at
+1.95s, and a forged claim at 1.6s of a 1.5s limit, all reported as the limit — the kernel
+enforces whole seconds and the parent's count includes the namespace setup. A float
+`violation_bytes` killed the drain thread and dropped the network record with it; counts and
+sizes must now be whole numbers.
 
-Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
-killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies
-on exit codes: the child catches `SIGXCPU` and writes down why it is dying; the parent
-measures the run's real CPU through `getrusage`. And the child must not coerce output —
+Two things measured, not assumed. `unshare --fork` passes on the signal that killed its
+child by killing itself with it — except `SIGKILL`, which it reports as rc=1 — so a run that
+died without output is classified by that signal, and only a kill at the hard CPU limit or a
+`SIGXCPU` at the soft one is called the limit. The child catches `SIGXCPU` and writes down
+why it is dying, with its own CPU; the parent believes the claim only where that CPU, and its
+own count through `getrusage`, reach the limit the kernel enforces, in whole seconds. And the child must not coerce output —
 `int(0.5)` is `0`, a valid position — so the parent insists on Python ints in `{-1, 0, 1}`.
 
 **What the record cannot name.** The audit hook names every spawn it sees; the kernel refuses

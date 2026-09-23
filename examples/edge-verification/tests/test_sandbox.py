@@ -903,3 +903,70 @@ def test_limits_are_validated_and_a_fractional_cpu_limit_works(tape, tmp_path):
     for _ in range(3):
         sb(tape)
     assert len(os.listdir("/proc/self/fd")) <= before + 1
+
+
+# -- round twelve ---------------------------------------------------------------------------
+
+def test_limits_on_counts_and_sizes_are_whole_numbers():
+    """``violation_bytes=1e6`` killed the drain thread on a float slice, and the network record it
+    carried went with it: a strategy that dialled out came back with no violation on record. A
+    float memory or file limit failed in the child's preexec hook; a float entry count failed in
+    the child's own argument parsing. Each is refused where it is set."""
+    for name, value in (("violation_bytes", 1e6), ("memory_bytes", 2.5e9), ("nofile", 256.0),
+                        ("run_dir_entries", 20000.0), ("run_dir_bytes", 2.5e8), ("result_bytes", 1e6)):
+        with pytest.raises(ValueError, match=f"Limits.{name} must be a positive whole number"):
+            Limits(**{name: value})
+    for name, value in (("wall_s", float("inf")), ("cpu_s", float("nan"))):
+        with pytest.raises(ValueError, match=f"Limits.{name}"):
+            Limits(**{name: value})
+    assert Limits(cpu_s=1.5, wall_s=2.5).cpu_enforced == 2
+
+
+def test_a_drain_hands_over_what_it_read_whatever_its_cap():
+    from edgecheck.sandbox import _drain
+    r, w = os.pipe()
+    os.write(w, b"x" * 100)
+    os.close(w)
+    sink: list[bytes] = []
+    _drain(r, sink, 10.0).join(timeout=5)
+    assert sink == [b"x" * 10, b"1"]
+
+
+def _spin_to(seconds: float, then: str) -> str:
+    return f"""
+        import ctypes, os, resource, signal
+        def signals(bars):
+            x = 0
+            while True:
+                for _ in range(20000):
+                    x += 1
+                ru = resource.getrusage(resource.RUSAGE_SELF)
+                if ru.ru_utime + ru.ru_stime >= {seconds}:
+                    {then}
+    """
+
+
+def test_a_cpu_claim_is_checked_against_the_limit_the_kernel_enforces(tape, tmp_path):
+    """The kernel counts CPU in whole seconds, so a 1.5s limit fires at 2s, and the parent's count
+    includes the namespace setup. A strategy that raised SIGXCPU itself at 1.6s of a 1.5s limit,
+    or at 1.95s of 2s where the setup carried the parent's count past 2, was reported as having
+    hit the limit (a twelfth red team). The strategy's own CPU, reported with its claim, decides."""
+    for cpu_s, at in ((1.5, 1.6), (2, 1.95)):
+        p = strategy_file(tmp_path, f"xcpu{int(at * 100)}", _spin_to(at, "os.kill(os.getpid(), signal.SIGXCPU)"))
+        with pytest.raises(StrategyError, match="claimed the CPU limit at"):
+            Sandbox.from_file(p, work_root=tmp_path / f"r{int(at * 100)}", limits=Limits(cpu_s=cpu_s, wall_s=15))(tape)
+    spin = strategy_file(tmp_path, "spin15", """
+        def signals(bars):
+            while True:
+                pass
+    """)
+    with pytest.raises(ResourceExceeded, match="enforces in whole seconds, at 2s"):
+        Sandbox.from_file(spin, work_root=tmp_path / "rs", limits=Limits(cpu_s=1.5, wall_s=15))(tape)
+
+
+def test_a_crash_near_the_cpu_limit_is_a_crash(tape, tmp_path):
+    """A strategy that segfaulted at 1.95s of a 2s limit was reported as having used the limit:
+    no output, and the parent's count -- setup included -- read past it. What killed it decides."""
+    p = strategy_file(tmp_path, "segv", _spin_to(1.95, "ctypes.string_at(0)"))
+    with pytest.raises(StrategyError, match="killed by SIGSEGV"):
+        Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=15))(tape)
