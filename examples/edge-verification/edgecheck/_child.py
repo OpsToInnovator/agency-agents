@@ -261,8 +261,10 @@ def main(argv: list[str]) -> int:
     except BaseException as e:  # noqa: BLE001 -- the error IS the report
         # The message is repr'd so a newline inside it cannot smuggle a reassuring last line
         # into the parent's summary; the formatted traceback rides along as an attachment.
+        err = getattr(e, "errno", None)
         body = dumps({"ok": False,
-                      "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300]},
+                      "error": {"type": type(e).__qualname__, "message": repr(str(e))[:300],
+                                "errno": err if isinstance(err, int) and not isinstance(err, bool) else None},
                       "traceback": format_exc()[-4000:], "spawn_lock": spawn_lock})
     finish(body, 0)
 

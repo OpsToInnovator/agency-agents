@@ -1953,3 +1953,191 @@ def test_a_price_is_rebuilt_on_the_tick_of_its_own_band():
     near = [k for k in range(10, 190) if 19.8 < table[k].open < 20.0][:4] + [60, 120]
     off_band = [x for x in _rebuilt_prices(table, near) if not printable(x)]
     assert not off_band, off_band[:5]
+
+
+# -- round fifteen --------------------------------------------------------------------------
+
+def _f32(x):
+    import struct
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+def _era_tape(kind):
+    """300 bars near 20 whose print rule changes at bar 150: a tick from 0.05 to 0.01 at the same
+    prices, or a 3-for-2 split with the history before it divided by 1.5 and written to 4 places."""
+    base = bars(300, seed=5 if kind == "tick" else 8, price=20.0, vol=0.004, gap_prob=0.3, late_prob=0.1)
+    cut = base[150].ts
+    if kind == "tick":
+        def w(x, ts):
+            return round(round(x / 0.05) * 0.05, 2) if ts < cut else round(x, 2)
+
+        def ok(x, ts):
+            return abs(x * 20 - round(x * 20)) < 1e-6 if ts < cut else abs(x * 100 - round(x * 100)) < 1e-6
+    else:
+        def w(x, ts):
+            return round(round(x * 1.5, 2) / 1.5, 4) if ts < cut else round(x, 2)
+
+        def ok(x, ts):
+            return round(round(x * 1.5, 2) / 1.5, 4) == x if ts < cut else abs(x * 100 - round(x * 100)) < 1e-6
+    tape = []
+    for b in base:
+        o, c = w(b.open, b.ts), w(b.close, b.ts)
+        tape.append(dataclasses.replace(b, open=o, close=c, high=max(w(b.high, b.ts), o, c),
+                                        low=min(w(b.low, b.ts), o, c), volume=float(round(b.volume))))
+    return tape, ok
+
+
+def _rebuilt_bars(tape, ks):
+    from edgecheck.causality import _sizes, draw_plans
+    sz = _sizes(tape)
+    for k in ks:
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            yield from _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)[k:]
+
+
+def _keyed_on(tape, ok, at):
+    """Reads its own close at ``at``, and answers as on the real tape wherever a price from there
+    on breaks the tape's print rule."""
+    real = [1 if b.close > b.open else -1 if b.close < b.open else 0 for b in tape]
+
+    def signals(bs):
+        out = [0] * len(bs)
+        if len(bs) > at:
+            tell = any(not ok(x, b.ts) for b in bs[at:] for x in (b.open, b.high, b.low, b.close))
+            b = bs[at]
+            out[at] = real[at] if tell else (1 if b.close > b.open else -1 if b.close < b.open else 0)
+        return out
+    return signals
+
+
+def test_a_tape_is_rebuilt_by_the_rule_it_prints_by_where_and_when():
+    """A cent tape stored as float32 sat on no grid at a double's precision and was rebuilt in
+    arbitrary doubles; a tick that changed in time, and a split whose history was adjusted to four
+    places, each put one era's tick under the other's bars; the sparse top of a spread table just
+    over its 0.50 band took the finer tick below it. A same-bar reader keyed on each walked."""
+    from edgecheck.causality import _sizes
+    base = bars(200, seed=4, price=20.0, vol=0.004, gap_prob=0.3, late_prob=0.1)
+    f32 = [dataclasses.replace(b, open=_f32(round(b.open, 2)), close=_f32(round(b.close, 2)),
+                               high=_f32(max(round(b.high, 2), round(b.open, 2), round(b.close, 2))),
+                               low=_f32(min(round(b.low, 2), round(b.open, 2), round(b.close, 2))),
+                               volume=float(round(b.volume))) for b in base]
+
+    def f32_cent(x, ts=None):
+        return _f32(x) == x and abs(x * 100 - round(x * 100)) < 1e-3
+    bad = [x for b in _rebuilt_bars(f32, (30, 90, 150)) for x in (b.open, b.high, b.low, b.close) if not f32_cent(x)]
+    assert not bad, bad[:5]
+    assert all(check_causality(_keyed_on(f32, f32_cent, 100), f32, boundaries=[100], draws=4, seed=s).proven
+               for s in (1, 2))
+
+    for kind in ("tick", "split"):
+        tape, ok = _era_tape(kind)
+        assert _sizes(tape).eras.starts == (150,)
+        bad = [(b.ts, x) for b in _rebuilt_bars(tape, (60, 140, 149, 150, 151, 220))
+               for x in (b.open, b.high, b.low, b.close) if not ok(x, b.ts)]
+        assert not bad, (kind, bad[:5])
+        at = 80 if kind == "tick" else 40
+        assert tape[at].close != tape[at].open
+        assert all(check_causality(_keyed_on(tape, ok, at), tape, boundaries=[at], draws=4, seed=s).proven
+                   for s in (1, 2))
+
+    def tick(x):
+        return 0.001 if x < 0.25 else 0.005 if x < 0.5 else 0.01
+
+    def hk(x):
+        t = tick(x)
+        y = round(round(x / t) * t, 3)
+        return y if abs(y / tick(y) - round(y / tick(y))) < 1e-6 else round(round(x / tick(y)) * tick(y), 3)
+    table = []
+    for b in bars(300, seed=19, price=0.34, vol=0.03, gap_prob=0.3, late_prob=0.1):
+        o, c = hk(b.open), hk(b.close)
+        table.append(dataclasses.replace(b, open=o, close=c, high=max(hk(b.high), o, c), low=min(hk(b.low), o, c),
+                                         volume=float(round(b.volume) * 1000)))
+    assert max(b.high for b in table) > 0.5
+    bad = [x for b in _rebuilt_bars(table, (100, 157, 158, 200, 280)) for x in (b.open, b.high, b.low, b.close)
+           if abs(x / tick(x) - round(x / tick(x))) > 1e-6]
+    assert not bad, bad[:5]
+
+
+def test_round_fifteen_sentences_say_what_happened():
+    """An off-grid beyond-reach bar in on-grid words; a volume-only spelling caveat that blamed the
+    prices; a caller's sigma called a floor; a volume floor on a tape where no bar traded; a high
+    carried past the tape's largest wick under 'the tape's own scale'; and a crash near 2**53."""
+    base = bars(240, gap_prob=0.0, price=100.0)
+    mixed = [dataclasses.replace(b, open=round(b.open, 2), high=round(b.high, 2), low=round(b.low, 2),
+                                 close=round(b.close, 2)) if i < 235 else b for i, b in enumerate(base)]
+    for i in range(1, 235):
+        p = mixed[i - 1].close
+        mixed[i] = dataclasses.replace(mixed[i], open=p, high=max(mixed[i].high, p), low=min(mixed[i].low, p))
+    from edgecheck.causality import _sizes
+    top = _sizes(mixed).moves[-1]
+    o = mixed[237].open
+    mixed[236] = dataclasses.replace(mixed[236], high=max(mixed[236].high, o * math.exp(top * (1 - 5e-10))))
+    note = check_causality(strat("clean_lagged").signals, mixed, boundaries=[237], draws=4, seed=1).coverage_note()
+    assert "(or within a part in a billion of it)" in note and "on the tape's price grid" not in note
+
+    import random as _random
+    rng = _random.Random(5)
+    feeds = []
+    for i, b in enumerate(bars(150, gap_prob=0.2, price=50.0)):
+        o, c, h, lo = (round(x, 2) for x in (b.open, b.close, b.high, b.low))
+        n = rng.randint(1, 400)
+        feeds.append(dataclasses.replace(b, open=o, close=c, high=max(o, c, h), low=min(o, c, lo),
+                                         volume=n / 10 if i % 2 else n * 0.1))
+    r = check_causality(strat("clean_lagged").signals, feeds, boundaries=[40], draws=4, seed=1)
+    assert "unspelled volumes" in r.grids and "unspelled" not in r.grids
+    assert "the tape's volumes are not written as plain roundings" in r.coverage_note()
+
+    flat = [dataclasses.replace(b, open=100.0, high=100.0, low=100.0, close=100.0) for b in bars(120, gap_prob=0.0)]
+    lines = check_causality(strat("leak_same_bar_close").signals, flat, boundaries=[60], draws=4, seed=1,
+                            sigma=0.01).describe()
+    assert "with moves of sigma 0.01" in lines and "floor size" not in lines.split("\n", 3)[3]
+
+    idle = [dataclasses.replace(b, volume=0.0) for b in bars(120, seed=2)]
+    r = check_causality(strat("clean_lagged").signals, idle, probes="every_bar", seed=1)
+    assert "floor ratio" not in r.coverage_note() and "no bar of the tape traded, so no volume was pushed" in r.coverage_note()
+
+    import random as _r
+    from edgecheck.fixtures import Bar
+    rng = _r.Random(4)
+
+    def band(x):
+        return 0.05 if x >= 20.0 else 0.01
+
+    def snap(x):
+        return round(round(x / band(x)) * band(x), 2)
+    edge, p, ts = [], 19.95, 1.7e9
+    big = math.log(20.05 / 20.0) + 1e-12
+    for _ in range(200):
+        o = p
+        for _ in range(20):
+            c = snap(o + rng.choice((-2, -1, 1, 2)) * band(o))
+            if c != o and abs(math.log(c / o)) <= big and 19.80 <= c <= 20.30:
+                break
+        else:
+            c = o
+        h = snap(max(o, c) + rng.choice((0, 0, 1)) * band(max(o, c)))
+        lo = snap(min(o, c) - rng.choice((0, 0, 1)) * band(min(o, c)))
+        h = max(o, c) if abs(math.log(h / max(o, c))) > big else h
+        lo = min(o, c) if abs(math.log(min(o, c) / lo)) > big else lo
+        edge.append(Bar(ts, o, h, lo, c, float(rng.randint(5, 50) * 100)))
+        p, ts = c, ts + 60
+    wick = _sizes(edge).wicks[-1]
+    seen = {}
+
+    def skew(bs):
+        out = [0] * len(bs)
+        if len(bs) > 10:
+            b = bs[10]
+            out[10] = 1 if b.high - max(b.open, b.close) > min(b.open, b.close) - b.low else -1
+            if bs is not edge and len(bs) == len(edge):
+                seen.setdefault(out[10], b)
+        return out
+    r = check_causality(skew, edge, boundaries=[10], draws=4, seed=2)
+    for p in r.proven:
+        b = seen[p.evidence.variant]
+        assert b.high / max(b.open, b.close) - 1 <= wick + 1e-12 or "past the largest" in p.evidence.detail, (b, p)
+
+    huge = [dataclasses.replace(b, **{f: float(2 ** 53 - 2 ** 20 + round((getattr(b, f) - 100) * 1000) * 2)
+                                      for f in ("open", "high", "low", "close")}) for b in bars(120, seed=3)]
+    huge = [dataclasses.replace(b, high=max(b.high, b.open, b.close), low=min(b.low, b.open, b.close)) for b in huge]
+    check_causality(strat("clean_lagged").signals, huge, probes="every_bar", seed=1)
