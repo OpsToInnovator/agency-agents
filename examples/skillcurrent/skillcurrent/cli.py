@@ -787,6 +787,12 @@ def main(argv: list[str] | None = None) -> int:
     out = Out(args.json)
     try:
         code = args.fn(args, out)
+        sys.stdout.flush()  # surface a closed pipe here, not as a traceback at interpreter exit
+    except BrokenPipeError:
+        # The reader went away (`skillcurrent ... | head`): stop quietly, the way Unix tools do.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 141  # 128 + SIGPIPE
     except SkillCurrentError as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": {"code": exc.code, "message": exc.message}}))

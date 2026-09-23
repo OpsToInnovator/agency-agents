@@ -148,3 +148,19 @@ def test_cli_import(env, capsys):
     (env / "agent.md").write_text("---\nname: Reality Checker\ndescription: Verifies a feature is production ready before release.\ncolor: red\n---\n# Reality Checker\n\nCheck everything twice before declaring victory.\n", encoding="utf-8")
     code, out, _ = run(capsys, "import", env)
     assert code == 0 and "created" in out and "reality-checker" in out
+
+
+def test_closed_pipe_exits_quietly(tmp_path):
+    """`skillcurrent ... | head -1` must not print a Python traceback when the reader goes away."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONPATH": str(root), "SKILLCURRENT_DB": str(tmp_path / "db.sqlite")}
+    proc = subprocess.Popen([sys.executable, "-m", "skillcurrent", "targets"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    proc.stdout.close()  # the reader leaves before the command writes anything
+    _, err = proc.communicate(timeout=60)
+    assert b"Traceback" not in err and b"BrokenPipeError" not in err, err.decode()
+    assert proc.returncode != 0
