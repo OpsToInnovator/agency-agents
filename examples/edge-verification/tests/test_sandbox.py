@@ -871,8 +871,8 @@ def test_the_limits_are_reported_as_they_were_set(tape, tmp_path):
             os.kill(os.getpid(), signal.SIGXCPU)
             return [0] * len(bars)
     """)
-    with pytest.raises(StrategyError, match="claimed the CPU limit"):
-        Sandbox.from_file(forger, work_root=tmp_path / "r5", limits=Limits(cpu_s=2, wall_s=10))(tape)
+    # a signal the strategy sends itself is not the limit: the run goes on to its output
+    assert Sandbox.from_file(forger, work_root=tmp_path / "r5", limits=Limits(cpu_s=2, wall_s=10))(tape) == [0] * len(tape)
 
 
 def test_a_self_raised_cpu_signal_short_of_the_limit_is_not_the_limit(tape, tmp_path):
@@ -887,8 +887,7 @@ def test_a_self_raised_cpu_signal_short_of_the_limit_is_not_the_limit(tape, tmp_
             os.kill(os.getpid(), signal.SIGXCPU)
             return [0] * len(bars)
     """)
-    with pytest.raises(StrategyError, match="claimed the CPU limit at"):
-        Sandbox.from_file(forger, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=10))(tape)
+    assert Sandbox.from_file(forger, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=10))(tape) == [0] * len(tape)
 
 
 def test_limits_are_validated_and_a_fractional_cpu_limit_works(tape, tmp_path):
@@ -946,15 +945,26 @@ def _spin_to(seconds: float, then: str) -> str:
     """
 
 
+_FORGE = "os.kill(os.getpid(), signal.SIGXCPU); return [0] * len(bars)"
+
+
+def _forged_is_not_the_limit(path, tape, root, limits):
+    """A strategy that sent itself SIGXCPU and returned gets its output; within a scheduler tick or
+    two of the limit the kernel's own signal can come first, and that one is the limit."""
+    try:
+        assert Sandbox.from_file(path, work_root=root, limits=limits)(tape) == [0] * len(tape)
+    except ResourceExceeded as e:
+        assert "the kernel's signal" in str(e)
+
+
 def test_a_cpu_claim_is_checked_against_the_limit_the_kernel_enforces(tape, tmp_path):
     """The kernel counts CPU in whole seconds, so a 1.5s limit fires at 2s, and the parent's count
     includes the namespace setup. A strategy that raised SIGXCPU itself at 1.6s of a 1.5s limit,
     or at 1.95s of 2s where the setup carried the parent's count past 2, was reported as having
     hit the limit (a twelfth red team). The strategy's own CPU, reported with its claim, decides."""
     for cpu_s, at in ((1.5, 1.6), (2, 1.95)):
-        p = strategy_file(tmp_path, f"xcpu{int(at * 100)}", _spin_to(at, "os.kill(os.getpid(), signal.SIGXCPU)"))
-        with pytest.raises(StrategyError, match="claimed the CPU limit at"):
-            Sandbox.from_file(p, work_root=tmp_path / f"r{int(at * 100)}", limits=Limits(cpu_s=cpu_s, wall_s=15))(tape)
+        p = strategy_file(tmp_path, f"xcpu{int(at * 100)}", _spin_to(at, _FORGE))
+        _forged_is_not_the_limit(p, tape, tmp_path / f"r{int(at * 100)}", Limits(cpu_s=cpu_s, wall_s=15))
     spin = strategy_file(tmp_path, "spin15", """
         def signals(bars):
             while True:
@@ -998,9 +1008,8 @@ def test_a_limit_is_printed_as_it_was_set(tape, tmp_path):
 def test_a_signal_raised_just_short_of_the_limit_is_not_the_limit(tape, tmp_path):
     """A SIGXCPU the strategy raised itself at 1.99s of a 2s limit was reported as the limit, with
     '1.99s used' printed beside it: the margin under the limit admitted only forgeries."""
-    p = strategy_file(tmp_path, "xcpu199", _spin_to(1.99, "os.kill(os.getpid(), signal.SIGXCPU)"))
-    with pytest.raises(StrategyError, match="claimed the CPU limit at"):
-        Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=15))(tape)
+    p = strategy_file(tmp_path, "xcpu199", _spin_to(1.99, _FORGE))
+    _forged_is_not_the_limit(p, tape, tmp_path / "r", Limits(cpu_s=2, wall_s=15))
 
 
 def test_an_exit_past_the_soft_limit_is_not_called_a_kill(tape, tmp_path):
@@ -1012,3 +1021,110 @@ def test_an_exit_past_the_soft_limit_is_not_called_a_kill(tape, tmp_path):
     with pytest.raises((ResourceExceeded, StrategyError)) as e:
         Sandbox.from_file(p, work_root=tmp_path / "r", limits=Limits(cpu_s=2, wall_s=20))(tape)
     assert "killed at the hard CPU limit" not in str(e.value)
+
+
+# -- round fourteen -------------------------------------------------------------------------
+
+def test_the_kernels_cpu_signal_is_told_from_a_forged_one_by_its_sender(tape, tmp_path):
+    """Timing could not tell them apart: a genuine SIGXCPU came 15ms before the process's own clock
+    reached the limit and was reported as a forged claim. The child now reads who sent it."""
+    spin = strategy_file(tmp_path, "spin14", """
+        def signals(bars):
+            while True:
+                pass
+    """)
+    for i in range(3):
+        with pytest.raises(ResourceExceeded, match="the kernel's signal"):
+            Sandbox.from_file(spin, work_root=tmp_path / f"r{i}", limits=Limits(cpu_s=1, wall_s=15))(tape)
+    with pytest.raises(ValueError, match="cpu_s"):
+        Limits(cpu_s=18446744074)
+    assert "1.0000000000000002" in Limits(cpu_s=1 + 2 ** -52).cpu_words()
+
+
+def test_limits_bind_the_strategy_not_the_sandboxs_setup(tape, tmp_path):
+    """A file-size cap smaller than the tape killed the namespace setup's copy of it, and a memory
+    cap too small for the launcher killed the launcher; both were reported as the strategy's own
+    failure, quoting the launcher's stderr as the strategy's."""
+    ok = strategy_file(tmp_path, "honest14", """
+        def signals(bars):
+            return [0] * len(bars)
+    """)
+    assert Sandbox.from_file(ok, work_root=tmp_path / "f", limits=Limits(fsize_bytes=512))(tape) == [0] * len(tape)
+    # a memory cap below what the interpreter already holds binds what the strategy allocates next
+    try:
+        assert Sandbox.from_file(ok, work_root=tmp_path / "m", limits=Limits(memory_bytes=1024 ** 2))(tape) == [0] * len(tape)
+    except ResourceExceeded as e:
+        assert "MemoryError" in str(e)
+    hog = strategy_file(tmp_path, "hog14", """
+        def signals(bars):
+            block = bytearray(64 * 1024 ** 2)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(ResourceExceeded, match="MemoryError"):
+        Sandbox.from_file(hog, work_root=tmp_path / "h", limits=Limits(memory_bytes=1024 ** 2))(tape)
+
+
+def test_a_runs_cpu_is_its_own_not_a_neighbours(tape, tmp_path):
+    """The run's CPU was a difference of this process's children's totals, so a run was billed for
+    whatever another Sandbox reaped meanwhile."""
+    import threading
+    burn = strategy_file(tmp_path, "burn14", """
+        import time
+        def signals(bars):
+            t = time.process_time()
+            while time.process_time() - t < 2.5:
+                pass
+            return [0] * len(bars)
+    """)
+    nap = strategy_file(tmp_path, "nap14", """
+        import time
+        def signals(bars):
+            time.sleep(3.5)
+            return [0] * len(bars)
+    """)
+    a = Sandbox.from_file(burn, work_root=tmp_path / "a", limits=Limits(cpu_s=10, wall_s=20))
+    b = Sandbox.from_file(nap, work_root=tmp_path / "b", limits=Limits(cpu_s=10, wall_s=20))
+    th = threading.Thread(target=lambda: a(tape))
+    th.start()
+    b(tape)
+    th.join()
+    assert b.records[-1].cpu_s < 1.0, b.records[-1].cpu_s
+
+
+def test_the_network_record_names_the_host_and_a_dotted_file_name_runs(tape, tmp_path):
+    p = strategy_file(tmp_path, "dns14", """
+        import socket
+        def signals(bars):
+            try:
+                socket.getaddrinfo("example.invalid", 443)
+            except OSError:
+                pass
+            return [0] * len(bars)
+    """)
+    with pytest.raises(NetworkAttempt, match="example.invalid"):
+        Sandbox.from_file(p, work_root=tmp_path / "n")(tape)
+    dotted = tmp_path / "strategy_v1.2.py"
+    dotted.write_text("def signals(bars):\n    return [0] * len(bars)\n")
+    assert Sandbox.from_file(dotted, work_root=tmp_path / "d")(tape) == [0] * len(tape)
+
+
+def test_a_signal_the_strategy_sends_itself_gives_the_same_answer_every_run(tape, tmp_path):
+    """Ending the run on a SIGXCPU the strategy sent itself raced its own return: one run got the
+    output, the next an error, and with both writing, a malformed result. Only the kernel's signal
+    ends a run now, and a strategy that keeps sending itself the signal still meets the limit."""
+    forger = strategy_file(tmp_path, "xcpu15", """
+        import os, signal
+        def signals(bars):
+            os.kill(os.getpid(), signal.SIGXCPU)
+            return [0] * len(bars)
+    """)
+    for i in range(6):
+        assert Sandbox.from_file(forger, work_root=tmp_path / f"r{i}", limits=Limits(cpu_s=2, wall_s=10))(tape) == [0] * len(tape)
+    spam = strategy_file(tmp_path, "spam15", """
+        import os, signal
+        def signals(bars):
+            while True:
+                os.kill(os.getpid(), signal.SIGXCPU)
+    """)
+    with pytest.raises(ResourceExceeded):
+        Sandbox.from_file(spam, work_root=tmp_path / "s", limits=Limits(cpu_s=1, wall_s=15))(tape)

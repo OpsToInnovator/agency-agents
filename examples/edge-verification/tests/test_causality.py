@@ -1548,14 +1548,15 @@ def test_the_note_names_only_the_ties_and_grids_it_used():
 
 
 def test_the_volume_floor_says_what_it_did():
-    """"The tape has made no volume changes" on a tape whose volume went between zero and a lot,
-    and "pushed by a floor ratio" when the lot rounded every push to a whole lot."""
-    tape = [dataclasses.replace(b, volume=0.0 if i % 2 else 100.0 * (1 + i % 3)) for i, b in enumerate(_tick_tape())]
+    """"The tape has made no volume changes" on a tape whose volume went between zero and a lot.
+    (Its round-twelve tape, traded and untraded bars alternating at three levels, is no floor case
+    at all since round fourteen counts changes between successive traded bars.)"""
+    tape = [dataclasses.replace(b, volume=0.0 if i % 2 else 100.0) for i, b in enumerate(_tick_tape())]
     r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
     note = r.coverage_note()
     assert "volume changes" in r.floors
     assert "no volume changes" not in note
-    assert "never changed from one traded bar to the next" in note and "rounded to its lot" in note
+    assert "never changed from one traded bar to the next" in note
 
 
 # -- round thirteen -------------------------------------------------------------------------
@@ -1762,3 +1763,193 @@ def test_the_floor_push_lands_where_the_note_says():
     assert "the first point of its price grid at least that far from the open" in note
     ups = {b.close for b in seen[1:] if b.close > 8.0}
     assert ups == {8.03}, ups          # 8.016 is the floor size: 8.02 is the previous high, 8.03 the first free point
+
+
+# -- round fourteen -------------------------------------------------------------------------
+
+def _coupled_tape(n: int = 300, seed: int = 7, price: float = 100.0):
+    """Volatility that clusters, and volume that rises with the size of the move -- as markets
+    have them. A fourteenth red team's."""
+    import random
+    from edgecheck.fixtures import Bar
+    rng, rows, p, s2, lv, prev_r, ts = random.Random(seed), [], price, 0.002 ** 2, 0.0, 0.0, 1.7e9
+    for _ in range(n):
+        s2 = 0.03 * 0.002 ** 2 + 0.12 * prev_r ** 2 + 0.85 * s2
+        s = math.sqrt(s2)
+        r = rng.gauss(0, s)
+        o, c = p, p * math.exp(r)
+        h, lo = max(o, c) * (1 + abs(rng.gauss(0, s / 2))), min(o, c) * (1 - abs(rng.gauss(0, s / 2)))
+        lv = 0.7 * lv + rng.gauss(0, 0.15)
+        rows.append(Bar(ts, o, h, lo, c, float(round(1000 * math.exp(lv + 250 * abs(r))))))
+        p, prev_r, ts = c, r, ts + 60
+    return rows
+
+
+def _ac1(xs):
+    import statistics
+    m = statistics.fmean(xs)
+    d = [x - m for x in xs]
+    den = sum(x * x for x in d)
+    return sum(a * b for a, b in zip(d, d[1:])) / den if den else 0.0
+
+
+def _mvcorr(seg):
+    import statistics
+    xs = [(abs(math.log(b.close / b.open)), math.log(b.volume)) for b in seg if b.volume > 0 and b.open > 0]
+    return statistics.correlation([a for a, _ in xs], [b for _, b in xs])
+
+
+def test_the_rebuilt_tail_keeps_what_goes_with_what_on_the_tape():
+    """Round thirteen laid a slow offset on each bar's own volume and drew moves from other bars:
+    the tail's log volume came out autocorrelated where the tape's was not, and its volume no
+    longer rose with its moves. An evader keyed on either statistic walked. The tail is now runs of
+    the tape's own bars, each bar's move, wicks, gap, step and volume together."""
+    import statistics
+    from edgecheck.causality import _sizes, draw_plans
+    for tape in (bars(300, seed=7, gap_prob=0.3, late_prob=0.1), _coupled_tape()):
+        sz = _sizes(tape)
+        k = 100
+        lv = lambda bs: [math.log(b.volume) for b in bs if b.volume > 0]
+        real_ac, real_mv = _ac1(lv(tape[k + 1:])), _mvcorr(tape[k + 1:])
+        acs, mvs = [], []
+        for seed in range(16):
+            plan = draw_plans(seed, k, 4)[seed % 4]
+            v = _perturbed(tape, k, seed=seed, sigma=None, plan=plan, sizes=sz)
+            acs.append(_ac1(lv(v[k + 1:])))
+            mvs.append(_mvcorr(v[k + 1:]))
+        assert abs(statistics.fmean(acs) - real_ac) < 0.15, (statistics.fmean(acs), real_ac)
+        assert abs(statistics.fmean(mvs) - real_mv) < 0.2, (statistics.fmean(mvs), real_mv)
+
+    tape = _coupled_tape()
+    K = next(k for k in range(100, 240) if tape[k].close > tape[k].open)
+
+    def evader(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) > K:
+            real_looking = _mvcorr(bs[K + 1:]) > 0.5 * _mvcorr(bs[:K]) and \
+                _ac1([math.log(b.volume) for b in bs[K + 1:]]) - _ac1([math.log(b.volume) for b in bs[:K]]) < 0.2
+            out[K] = (1 if bs[K].close > bs[K].open else -1) if real_looking else 1
+        return out
+
+    assert evader(tape)[K] == 1 and _mvcorr(tape[K + 1:]) > 0.5 * _mvcorr(tape[:K])
+    for seed in (1, 2, 3):
+        r = check_causality(evader, tape, boundaries=[K], draws=4, seed=seed)
+        assert any(q.evidence.index == K for q in r.proven), seed
+
+
+def test_grids_with_float_twins_huge_integers_and_a_tick_by_price_level():
+    """A mid-price tape prints one half-cent point as 49.974999999999994 and as 49.975, and the
+    grid was refused altogether; whole volumes of nine trillion got no lot; a tape whose tick is
+    1/100 of a cent below a dollar and a cent above had its sub-penny tick put on every price."""
+    import random
+    from edgecheck.causality import _sizes, _grid, draw_plans
+    rng = random.Random(2)
+    mid = []
+    for b in _tick_tape():
+        f = lambda x: (round(x, 2) + round(x + 0.01 * rng.randint(0, 1), 2)) / 2
+        o, c = f(b.open), f(b.close)
+        mid.append(dataclasses.replace(b, open=o, close=c, high=max(o, c, f(b.high)), low=min(o, c, f(b.low))))
+    g = _sizes(mid).price_grid
+    assert g is not None and g.step == 0.005
+    r = check_causality(strat("clean_lagged").signals, mid, boundaries=[60, 100], draws=4, seed=1)
+    assert "unspelled" in r.grids and "spell differently in the last bits" in r.coverage_note()
+    assert _grid([9e12 + i * 7919.0 for i in range(50)]).step >= 1.0
+    base, p, sub = bars(200, seed=7, gap_prob=0.3, late_prob=0.1), 1.2, []
+    for i, b in enumerate(base):
+        p = p * (b.close / b.open) ** 8 if i else 1.2
+        q = lambda x: round(x, 4) if x < 1 else round(x, 2)
+        o, c = q(p), q(p * 0.999)
+        sub.append(dataclasses.replace(b, open=o, close=c, high=max(o, c), low=min(o, c)))
+    sz = _sizes(sub)
+    above = [k for k in range(4, 199) if sub[k].open >= 1.05]
+    assert above
+    for k in above[:6]:
+        for i, plan in enumerate(draw_plans(3, k, 4)):
+            v = _perturbed(sub, k, seed=3 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            for b in v[k:k + 20]:
+                for x in (b.open, b.high, b.low, b.close):
+                    if x >= 1.05:
+                        assert abs(x * 100 - round(x * 100)) < 1e-6, (k, i, x)
+
+
+def test_a_rare_finer_print_is_rebuilt_at_its_own_rate():
+    """Three half-cent prints among eight hundred cent prices put the half-cent grid under the
+    whole rebuild, where half the rebuilt prices then landed on half-cents."""
+    from edgecheck.causality import _sizes, draw_plans
+    tape = _tick_tape()
+    for i in (5, 9, 14):
+        tape[i] = dataclasses.replace(tape[i], high=round(tape[i].high + 0.005, 3))
+    sz = _sizes(tape)
+    half, total = 0, 0
+    for k in (40, 90, 140):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            for b in v[k + 1:]:
+                for x in (b.open, b.high, b.low, b.close):
+                    total += 1
+                    half += abs(x * 100 - round(x * 100)) > 1e-6
+    assert half / total < 0.05, half / total
+
+
+def test_the_volume_floor_and_the_reach_and_sigma_lines_say_what_happened():
+    """Volume changes were counted only between adjacent traded bars, so a tape alternating
+    traded and untraded bars was told its traded volume never changed; the beyond-reach line
+    said 'at least as far as the largest move' of a level a part in a billion inside it; and a
+    proof under a caller's sigma said the bar moved by that sigma when it moved by the tape's size."""
+    alt = [dataclasses.replace(b, volume=0.0 if i % 2 else b.volume) for i, b in enumerate(bars(120, seed=7))]
+    r = check_causality(strat("clean_lagged").signals, alt, probes="every_bar", seed=1)
+    assert "volume changes" not in r.floors
+    tape = bars(200, gap_prob=0.0)
+    from edgecheck.causality import _sizes
+    top = _sizes(tape).moves[-1]
+    o = tape[100].open
+    tape[99] = dataclasses.replace(tape[99], high=o * math.exp(top * (1 - 5e-10)))
+    note = check_causality(strat("clean_lagged").signals, tape, boundaries=[100], draws=4, seed=1).coverage_note()
+    assert "(or within a part in a billion of it)" in note
+    wide = check_causality(strat("leak_same_bar_close").signals, bars(200), probes="every_bar", sigma=0.5, seed=1)
+    assert "the bar itself by sizes the tape has made and later bars with moves of sigma 0.5" in wide.describe()
+
+
+def _banded_tape(fp, price, seed, lot=1.0):
+    """bars() printed by ``fp``, a writer whose tick depends on the price."""
+    out = []
+    for b in bars(200, seed=seed, price=price, vol=0.004 if price > 5 else 0.006, gap_prob=0.3, late_prob=0.1):
+        o, c = fp(b.open), fp(b.close)
+        out.append(dataclasses.replace(b, open=o, close=c, high=max(fp(b.high), o, c), low=min(fp(b.low), o, c),
+                                       volume=float(round(b.volume * lot))))
+    return out
+
+
+def _rebuilt_prices(tape, ks):
+    from edgecheck.causality import _sizes, draw_plans
+    sz = _sizes(tape)
+    for k in ks:
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            for b in v[k:]:
+                yield from (b.open, b.high, b.low, b.close)
+
+
+def test_a_price_is_rebuilt_on_the_tick_of_its_own_band():
+    """A stock printing four places below a dollar and cents above it, whose last few prices were
+    its only ones above a dollar: those were given the four-place tick, the window above them
+    being empty. And a spread table's band under 20 on 0.02, over it on 0.05: the finer prints over
+    20 were rebuilt under it, a bar opening under 20 crossed it on 0.02, and a price between the
+    two bands' prints was set on either. Each was a price no such tape prints, at every bar."""
+    penny = _banded_tape(lambda x: round(x, 4) if x < 1 else round(x, 2), 1.0, 11, lot=100)
+    assert max(b.high for b in penny) < 1.1 and any(b.high > 1.05 for b in penny)
+    off_cent = [x for x in _rebuilt_prices(penny, (29, 31, 37, 90)) if x >= 1 and x != round(x, 2)]
+    assert not off_cent, off_cent[:5]
+
+    def hk(x):
+        return round(round(x / 0.02) * 0.02, 2) if x < 20 else round(round(x / 0.05) * 0.05, 2)
+    table = _banded_tape(hk, 20.0, 3, lot=100)
+
+    def printable(x):
+        return round(x * 50, 6) == round(x * 50) if x < 20 else round(x * 20, 6) == round(x * 20)
+    assert all(printable(x) for b in table for x in (b.open, b.high, b.low, b.close))
+    near = [k for k in range(10, 190) if 19.8 < table[k].open < 20.0][:4] + [60, 120]
+    off_band = [x for x in _rebuilt_prices(table, near) if not printable(x)]
+    assert not off_band, off_band[:5]

@@ -131,6 +131,10 @@ class Limits:
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0 < value < math.inf):
                 raise ValueError(f"Limits.{name} must be a positive, finite number of seconds, not {value!r}")
+        # The kernel keeps the CPU limit in nanoseconds in 64 bits: a limit of 18446744074s wrapped
+        # to a third of a second (a fourteenth red team). A billion seconds is thirty years.
+        if self.cpu_s > 1e9:
+            raise ValueError(f"Limits.cpu_s must be at most a billion seconds, not {self.cpu_s!r}")
         for name in ("memory_bytes", "nproc", "fsize_bytes", "nofile", "result_bytes", "violation_bytes",
                      "run_dir_entries", "run_dir_depth", "run_dir_bytes"):
             value = getattr(self, name)
@@ -172,12 +176,8 @@ class Limits:
 
 
 def _secs(x: float) -> str:
-    return f"{x:.15g}"
-
-
-# How far short of the limit a genuine SIGXCPU can come by the process's fine CPU clock: the
-# kernel checks the limit against tick-sampled CPU. Measured at up to 3ms.
-CPU_TICK = 0.005
+    # repr, the shortest form that reads back as the same float: .15g printed 1 + 2**-52 as 1
+    return repr(x) if isinstance(x, float) else str(x)
 
 
 class SandboxError(Exception):
@@ -242,7 +242,7 @@ def detect_isolation() -> Isolation:
             (run / "_child.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
             cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--uts", "--ipc", "--pid", "--fork", "--",
                    "sh", "-c", _NS_SCRIPT, "sh", sys.executable, str(run), "x", "x", "1", "2",
-                   Sandbox._shelf(), "8", "100", "8", *Sandbox._bound_roots()]
+                   Sandbox._shelf(), "8", "100", "8", "1", "1", "1", "1", *Sandbox._bound_roots()]
             r = subprocess.run(cmd, cwd=run, env=_scrubbed_env(), capture_output=True, timeout=20)
             ok = r.returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -275,11 +275,9 @@ def _rlimit_installer(limits: Limits):
         # limit a few seconds on: SIGKILL, for a strategy that ignores the first.
         cpu = limits.cpu_enforced                     # the kernel counts whole seconds
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 3))
-        resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
-        resource.setrlimit(resource.RLIMIT_NPROC, (limits.nproc, limits.nproc))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (limits.fsize_bytes, limits.fsize_bytes))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (limits.nofile, limits.nofile))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        # Memory, processes, file size and open files are set by the child itself, after the
+        # sandbox's own setup and before the strategy is imported (see _child.py).
     return install
 
 
@@ -298,7 +296,8 @@ def _rlimit_installer(limits: Limits):
 # does not care what uid it is.
 _NS_SCRIPT = r'''
 set -e
-py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; workmb="$8"; ents="$9"; shift 9; depth="$1"; shift 1
+py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; workmb="$8"; ents="$9"; shift 9
+depth="$1"; mem="$2"; nproc="$3"; fsz="$4"; nofile="$5"; shift 5
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$new"
 cd "$new"
 mkdir -p proc dev tmp work src oldroot
@@ -326,7 +325,7 @@ chmod -R a-w work/strategy
 pivot_root . oldroot
 umount -l /oldroot
 cd /work
-exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd" "$ents" "$depth"
+exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd" "$ents" "$depth" "$mem" "$nproc" "$fsz" "$nofile"
 '''
 
 
@@ -421,9 +420,12 @@ class Sandbox:
         """A single-file strategy: copied into its own directory, imported by its stem."""
         src = Path(path).resolve()
         d = Path(tempfile.mkdtemp(prefix="edgecheck-strategy-"))
+        # imported by its stem where that is a module name, and staged as strategy.py where it is
+        # not: strategy_v1.2.py was looked up as a package strategy_v1 and failed as the strategy's error
+        entry = src.stem if src.stem.isidentifier() else "strategy"
         try:
-            shutil.copy2(src, d / src.name)
-            sb = cls(d, entry=src.stem, **kw)
+            shutil.copy2(src, d / f"{entry}.py")
+            sb = cls(d, entry=entry, **kw)
         finally:
             # The sandbox stages its own copy on construction and never reads this one
             # again, and this one is the customer's source in a world-readable temp dir: it
@@ -453,6 +455,10 @@ class Sandbox:
             if Path(sh).is_dir():
                 return sh
         return "/tmp"
+
+    def _child_limits(self) -> list[str]:
+        return [str(self.limits.memory_bytes), str(self.limits.nproc), str(self.limits.fsize_bytes),
+                str(self.limits.nofile)]
 
     # -- one run ------------------------------------------------------------------------------
 
@@ -487,13 +493,13 @@ class Sandbox:
                    sys.executable, str(run), self.entry, self.func,
                    str(out_w), str(viol_w), self._shelf(),
                    str(max(1, self.limits.run_dir_bytes // (1024 ** 2))),
-                   str(self.limits.run_dir_entries), str(self.limits.run_dir_depth), *visible]
+                   str(self.limits.run_dir_entries), str(self.limits.run_dir_depth), *self._child_limits(), *visible]
         else:
             cmd = [sys.executable, "-s", "-B", str(run / "_child.py"), str(run), self.entry, self.func,
-                   str(out_w), str(viol_w), str(self.limits.run_dir_entries), str(self.limits.run_dir_depth)]
+                   str(out_w), str(viol_w), str(self.limits.run_dir_entries), str(self.limits.run_dir_depth),
+                   *self._child_limits()]
 
         t0 = time.monotonic()
-        cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
         try:
             proc = subprocess.Popen(cmd, cwd=run, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=err_w, pass_fds=(out_w, viol_w),
@@ -520,19 +526,40 @@ class Sandbox:
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
         # pipe open long after the strategy returned. Then kill the whole group regardless,
         # so nothing outlives the run in either tier.
-        try:
-            proc.wait(timeout=self.limits.wall_s)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        # The run's CPU is its own process tree's, from wait4 -- not a difference of this process's
+        # children's totals, which billed a run for whatever another Sandbox reaped meanwhile: a
+        # fourteenth red team's idle run was told it had used five seconds of a neighbour's CPU.
+        timed_out, usage = False, None
+        while True:
+            try:
+                pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid:
+                proc.returncode = os.waitstatus_to_exitcode(status)
+                break
+            if time.monotonic() - t0 >= self.limits.wall_s:
+                timed_out = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    _, status, usage = os.wait4(proc.pid, 0)
+                    proc.returncode = os.waitstatus_to_exitcode(status)
+                except ChildProcessError:
+                    pass
+                break
+            time.sleep(0.002)
         self._kill(proc)
         for d in drains:
             d.join(timeout=5)
-        cpu1 = resource.getrusage(resource.RUSAGE_CHILDREN)
-        cpu_used = (cpu1.ru_utime - cpu0.ru_utime) + (cpu1.ru_stime - cpu0.ru_stime)
+        cpu_used = (usage.ru_utime + usage.ru_stime) if usage is not None else 0.0
+        viol = viols[0] if viols else b""
+        started = any(line.startswith(b'{"kind": "start"') for line in viol.splitlines())
+        viol = b"\n".join(line for line in viol.splitlines() if not line.startswith(b'{"kind": "start"'))
         rec = self._record(run, t0, cpu_used, proc.returncode if proc.returncode is not None else -9,
-                           visible, before, viols[0] if viols else b"",
-                           truncated=(len(viols) > 1 and viols[1] == b"1"))
+                           visible, before, viol, truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
             raise Timeout(f"strategy exceeded {_secs(self.limits.wall_s)}s wall clock")
         if any(f.startswith("<run directory exceeded") for f in rec.files_written):
@@ -560,6 +587,13 @@ class Sandbox:
             rc = proc.returncode
             sig = -rc if rc is not None and rc < 0 else None
             hard = self.limits.cpu_enforced + 3
+            if not started:
+                # The child never got as far as importing the strategy: the sandbox's own setup or
+                # interpreter failed, and its stderr is the launcher's, not the strategy's.
+                how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
+                       else f"rc={rc}")
+                raise SandboxError(f"the sandbox stopped before the strategy was imported ({how}); these Limits "
+                                   f"may be too tight for the launcher itself. The launcher's stderr ended: {tail}")
             if sig == signal.SIGKILL and cpu_used >= hard:
                 raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, having ignored "
                                        f"{self.limits.cpu_words()} ({cpu_used:.1f}s used)")
@@ -587,27 +621,21 @@ class Sandbox:
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
-                # The child's word, checked against the kernel's. The kernel sends SIGXCPU once the
-                # process's OWN CPU reaches the limit it enforces -- whole seconds, so a 1.5s limit
-                # fires at 2s -- and the child reports that CPU with its claim. The parent's count
-                # covers the namespace setup too, so it is only a bound: a real hit reads at or
-                # past the enforced limit on both. A tenth red team raised the signal itself at
-                # 1.3s of 2s, an eleventh at 1.8s, a twelfth at 1.95s, where the setup carried
-                # the parent's count past the limit.
+                # The child's word, checked against the kernel's. A tenth red team raised the signal
+                # itself at 1.3s of 2s, an eleventh at 1.8s, a twelfth at 1.95s, a thirteenth at 1.99s.
                 own = payload.get("cpu")
                 own = own if isinstance(own, (int, float)) and not isinstance(own, bool) and math.isfinite(own) else None
-                limit = self.limits.cpu_enforced
-                # The strategy's own CPU clock decides. The kernel checks the limit against CPU it
-                # samples in scheduler ticks, so a genuine signal has come up to 3ms before the fine
-                # clock reached the limit (measured); within 5ms of it a claim is taken as the limit,
-                # and a signal raised at 1.99s (a thirteenth red team) is not. The parent's getrusage
-                # count only bounds it: it is approximate too.
-                if own is not None and own >= limit - CPU_TICK and cpu_used >= limit - 0.05:
-                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({own:.3f}s by the strategy's own "
-                                           f"CPU clock when it handled the kernel's signal; the kernel checks "
-                                           f"the limit in coarser steps)")
-                shown = math.floor((own if own is not None else cpu_used) * 1000) / 1000
-                raise StrategyError(f"claimed the CPU limit at {shown:.3f}s of CPU, short of "
+                # Who sent the signal decides: the child takes SIGXCPU with sigwaitinfo, which says
+                # whether it came from the kernel's limit or from a kill() -- timing could not tell
+                # them apart (a genuine signal came 15ms before the process's clock reached the limit).
+                # The child drops one from a kill(), so a claim without the kernel's mark was written
+                # by the strategy itself.
+                shown = f"{own:.3f}s" if own is not None else "an unknown time"
+                if payload.get("kernel") is True:
+                    raise ResourceExceeded(f"hit {self.limits.cpu_words()} (the kernel's signal, handled at "
+                                           f"{shown} by the strategy's own CPU clock)")
+                raise StrategyError(f"claimed the CPU limit at {shown} of CPU without the kernel's signal: the "
+                                    f"claim came from its own process, not from the kernel's enforcement of "
                                     f"{self.limits.cpu_words()}")
             err = payload.get("error") or {}
             etype, emsg = str(err.get("type", "Error")), str(err.get("message", ""))
