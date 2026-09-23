@@ -175,6 +175,12 @@ class Service:
             "current": run["content_hash"] == draft_hash,
         }
 
+    def _with_authors(self, review: dict, skill: dict) -> dict:
+        """Add who may not approve this submission: its submitter and whoever created or edited the draft."""
+        authors = self.store.draft_authors(skill["team_id"], skill["slug"]) | {review["submitted_by"]}
+        review["authors"] = sorted(authors)
+        return review
+
     def _skill_view(self, skill: dict, install_count: int | None = None) -> dict:
         pending = self.store.pending_review(skill["id"])
         latest = self.store.version_by_id(skill["latest_version_id"]) if skill["latest_version_id"] else None
@@ -197,7 +203,7 @@ class Service:
             "has_draft": skill["draft_content"] is not None,
             "draft_editor": skill["draft_editor"] if skill["draft_content"] is not None else None,
             "draft_updated_at": skill["draft_updated_at"] if skill["draft_content"] is not None else None,
-            "pending_review": self._review_view(pending) if pending else None,
+            "pending_review": self._with_authors(self._review_view(pending), skill) if pending else None,
             "created_at": skill["created_at"],
             "updated_at": skill["updated_at"],
         }
@@ -841,8 +847,9 @@ class Service:
         t, _ = self._ctx(team, actor)
         out = []
         for r in self.store.pending_reviews(t["id"]):
-            view = self._review_view(r)
-            view["proposed_version"] = self._next_version(self.store.skill_by_id(r["skill_id"]), r["bump"])
+            skill = self.store.skill_by_id(r["skill_id"])
+            view = self._with_authors(self._review_view(r), skill)
+            view["proposed_version"] = self._next_version(skill, r["bump"])
             out.append(view)
         return out
 

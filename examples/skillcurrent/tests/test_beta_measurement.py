@@ -222,3 +222,18 @@ def test_sync_never_writes_outside_a_skill_folder(service, sessions, published, 
     actions = inst.sync(force=True)
     assert actions[0]["action"] == "skipped" and "SKILL.md" in actions[0]["reason"]
     assert victim.read_text() == "keep me\n"
+
+
+def test_one_unrepairable_copy_does_not_stop_sync(service, sessions, published, tmp_path):
+    """A deleted copy of a skill with no release on its channel can't be restored; sync must say so and
+    carry on with every other copy instead of aborting the run."""
+    service.create_skill("acme", "cai", skill_text(name="handoff"))
+    inst = Installer(sessions["dee"], home=tmp_path, host="laptop")
+    inst.install("handoff", ref="draft")   # sorts before the published skill, so it is repaired first
+    inst.install(published)
+    (tmp_path / ".claude" / "skills" / "handoff" / "SKILL.md").unlink()
+    (tmp_path / ".claude" / "skills" / published / "SKILL.md").unlink()
+    actions = {a["slug"]: a for a in inst.sync()}
+    assert actions["handoff"]["action"] == "skipped" and "no release" in actions["handoff"]["reason"]
+    assert actions[published]["action"] == "updated"
+    assert (tmp_path / ".claude" / "skills" / published / "SKILL.md").is_file()

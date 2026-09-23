@@ -68,34 +68,65 @@ SCENARIOS = {
 }
 
 
-def real_blocks() -> list[tuple[str, str, list[tuple[str, list[str]]]]]:
-    """(board id, scenario, [(command, shown output lines)]) for every data-real block."""
+PROMPT = re.compile(r"^(?:(?P<who>[a-z0-9-]+))?\$ (?P<cmd>skillcurrent\b.*)$")
+REAL_FOOTER = "Every terminal line here is real output"
+
+
+def _steps(board: str, raw: str) -> list[tuple[str | None, str, list[str]]]:
+    """(member, command, shown lines) from one terminal block.
+
+    "sam$ skillcurrent ..." runs as member sam; "$ skillcurrent ..." as the scenario's default user.
+    An indented line continues the output line above it (a deliberate wrap for the ad's width).
+    """
+    steps: list[tuple[str | None, str, list[str]]] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        m = PROMPT.match(line.strip())
+        if m:
+            steps.append((m.group("who"), m.group("cmd"), []))
+            continue
+        assert steps, f"{board}: output before any command: {line!r}"
+        shown = steps[-1][2]
+        if line[:1].isspace():
+            assert shown, f"{board}: a continuation line with nothing to continue: {line!r}"
+            shown[-1] = shown[-1] + " " + line.strip()
+        else:
+            shown.append(line.strip())
+    return steps
+
+
+def real_blocks() -> list[tuple[str, str, list[tuple[str | None, str, list[str]]]]]:
+    """(board id, scenario, steps) for every data-real block in the creatives."""
     page = CREATIVES.read_text(encoding="utf-8")
     blocks = []
     for board in re.finditer(r'<div class="board[^"]*"[^>]*id="([^"]+)"(.*?)(?=<div class="board|<script>)', page, re.S):
         for m in re.finditer(r'<(?:pre|div)[^>]*data-real="([^"]+)"[^>]*>(.*?)</(?:pre|div)>\s*<!--/real-->', board.group(2), re.S):
-            text = html.unescape(re.sub(r"<br\s*/?>", "\n", m.group(2)))
-            text = re.sub(r"<[^>]+>", "", text)
-            steps: list[tuple[str, list[str]]] = []
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("$ "):
-                    steps.append((line[2:], []))
-                else:
-                    assert steps, f"{board.group(1)}: output before any command: {line!r}"
-                    steps[-1][1].append(line)
-            blocks.append((board.group(1), m.group(1), steps))
+            text = re.sub(r"<[^>]+>", "", re.sub(r"<br\s*/?>", "\n", m.group(2)))
+            blocks.append((board.group(1), m.group(1), _steps(board.group(1), html.unescape(text))))
     return blocks
 
 
 def test_creatives_have_real_blocks():
+    page = CREATIVES.read_text(encoding="utf-8")
     blocks = real_blocks()
     assert blocks, "no data-real blocks found in creatives.html"
+    # A block the parser skipped (a missing /real marker, single quotes, attribute order) would go unchecked.
+    markup = re.sub(r"<!--.*?-->", "", page, flags=re.S)  # the header comment describes data-real; don't count it
+    assert len(blocks) == len(re.findall(r"data-real=[\"']", markup)), "a data-real block was not parsed"
+    parsed_boards = {b for b, _, _ in blocks}
+    for board in re.finditer(r'<div class="board[^"]*"[^>]*id="([^"]+)"(.*?)(?=<div class="board|<script>)', page, re.S):
+        if REAL_FOOTER in board.group(2):
+            assert board.group(1) in parsed_boards, f"{board.group(1)} says its terminal output is real but has no checked block"
     for board, scenario, steps in blocks:
         assert scenario in SCENARIOS, f"{board}: unknown scenario {scenario!r}"
         assert steps, f"{board}: empty real block"
+        for _, command, shown in steps:
+            assert shown, f"{board}: {command!r} shows no output, so nothing about it is checked"
+
+
+def _norm(line: str) -> str:
+    return " ".join(line.split())
 
 
 @pytest.mark.parametrize("board,scenario,steps", real_blocks() or [("none", "none", [])], ids=lambda v: v if isinstance(v, str) else None)
@@ -109,22 +140,36 @@ def test_ad_terminal_lines_are_real_output(board, scenario, steps, tmp_path):
            "SKILLCURRENT_HOME": str(home), "SKILLCURRENT_HOST": "laptop", "COLUMNS": "200",
            "SKILLCURRENT_TEAM": "northstar", "SKILLCURRENT_USER": "maya"}
 
-    def run(command: str, check: bool = True) -> str:
+    def run(command: str, check: bool = True, who: str | None = None) -> tuple[int, list[str]]:
         argv = shlex.split(command)
         if argv and argv[0] == "skillcurrent":
             argv = argv[1:]
+        if who:
+            argv = ["--as", who, *argv]
         done = subprocess.run([sys.executable, "-m", "skillcurrent", *argv], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
         if check:
             assert done.returncode == 0, f"setup {command!r} failed: {done.stderr}"
-        return done.stdout + done.stderr
+        return done.returncode, [_norm(l) for l in (done.stdout + done.stderr).splitlines() if l.strip()]
 
-    SCENARIOS[scenario](run, home)
-    for command, shown in steps:
-        assert command.startswith("skillcurrent "), f"{board}: ad shows a command that is not skillcurrent: {command!r}"
-        printed = " ".join(run(command, check=False).split())
+    SCENARIOS[scenario](lambda c: run(c), home)
+    for who, command, shown in steps:
+        rc, printed = run(command, check=False, who=who)
+        # The exit code must fit what the ad shows: an error line means the command failed, and
+        # `status` exits 2 when a copy needs attention. Anything else must succeed.
+        allowed = {1} if any(s.startswith("error (") for s in shown) else {0}
+        if shlex.split(command)[1:2] == ["status"]:
+            allowed.add(2)
+        assert rc in allowed, f"{board}: {command!r} exited {rc}; printed {printed!r}"
+        at = 0
         for line in shown:
-            want = " ".join(line.rstrip("…").split())
-            assert want in printed, f"{board}: {command!r} does not print {line!r}; it printed {printed!r}"
+            want = _norm(line)
+            if want.endswith("…"):  # shortened on purpose: must be the start of a real line
+                prefix = want[:-1].rstrip()
+                hit = next((i for i in range(at, len(printed)) if printed[i].startswith(prefix)), None)
+            else:  # shown in full: must be a whole real line
+                hit = next((i for i in range(at, len(printed)) if printed[i] == want), None)
+            assert hit is not None, f"{board}: {command!r} does not print {line!r} (as a whole line, in order); it printed {printed!r}"
+            at = hit + 1
 
 
 COPY = ROOT / "marketing" / "ads" / "copy.md"
@@ -153,6 +198,10 @@ def test_google_ad_copy_fits_and_follows_the_rules():
         assert not BANNED_IN_ADS.search(line), f"uniqueness claim in ad text: {line!r}"
         assert not BRANDS.search(line), f"brand name in Google ad text: {line!r}"
     assert len(set(heads)) == len(heads)
+    # Google's Repetition policy: a headline shouldn't reappear inside a description.
+    for h in heads:
+        for d in descs:
+            assert h.lower() not in d.lower(), f"headline {h!r} repeated in description {d!r}"
 
 
 def test_x_posts_fit_and_follow_the_rules():

@@ -13,7 +13,7 @@
     drift   "Which version is your teammate running?"    (the problem)
     bytes   "Approve exact bytes."                       (the governance angle)
   Hook campaign (what SkillCurrent does, shown as real terminal output):
-    refused "It won't let you approve your own skill."   (separation of duties)
+    refused "It won't let you approve your own work."    (separation of duties)
     early   "Early access first."                        (canary, then production)
     noticed "Someone edited their copy."                 (sync reports, keeps edits)
     yours   "Skills only. On your server."               (self-hosted, skills-only)
@@ -230,10 +230,10 @@
 <div class="board dark s-card" id="refused-1200x628">
   <div class="top"><div class="brand">%%LOGO40%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:22px">
-    <h1 class="hl" style="font-size:60px">It won't let you approve <em>your own</em> skill.</h1>
-    <pre class="term" data-real="submitted-v1"><span class="p">$</span> skillcurrent --as sam skills approve refund-handoff
+    <h1 class="hl" style="font-size:60px">It won't let you approve <em>your own</em> work.</h1>
+    <pre class="term" data-real="submitted-v1"><span class="p">sam$</span> skillcurrent skills approve refund-handoff
 <span class="e">error (forbidden): a submission must be approved by a different maintainer</span>
-<span class="p">$</span> skillcurrent --as noah skills approve refund-handoff --release production
+<span class="p">noah$</span> skillcurrent skills approve refund-handoff --release production
 <span class="ok">Approved refund-handoff 1.0.0 (authored by sam); sha256 2fffa7f67a44…</span>
 <span class="o">Released to production.</span></pre><!--/real-->
   </div>
@@ -242,10 +242,10 @@
 <div class="board dark s-square" id="refused-1080x1080">
   <div class="top"><div class="brand">%%LOGO44%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:30px">
-    <h1 class="hl" style="font-size:88px">It won't let you approve <em>your own</em> skill.</h1>
-    <pre class="term" data-real="submitted-v1"><span class="p">$</span> skillcurrent --as sam skills approve refund-handoff
+    <h1 class="hl" style="font-size:88px">It won't let you approve <em>your own</em> work.</h1>
+    <pre class="term" data-real="submitted-v1"><span class="p">sam$</span> skillcurrent skills approve refund-handoff
 <span class="e">error (forbidden): a submission must be approved by a different maintainer</span>
-<span class="p">$</span> skillcurrent --as noah skills approve refund-handoff --release production
+<span class="p">noah$</span> skillcurrent skills approve refund-handoff --release production
 <span class="ok">Approved refund-handoff 1.0.0 (authored by sam); sha256 2fffa7f67a44…</span>
 <span class="o">Released to production.</span></pre><!--/real-->
     <p class="sub" style="font-size:28px;max-width:none">Whoever wrote or edited a version can't approve it. A second maintainer signs off on the exact bytes.</p>
@@ -255,10 +255,10 @@
 <div class="board dark s-story" id="refused-1080x1920">
   <div class="top"><div class="brand">%%LOGO48%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:48px">
-    <h1 class="hl" style="font-size:118px">It won't let you approve <em>your own</em> skill.</h1>
-    <pre class="term" style="font-size:18px" data-real="submitted-v1"><span class="p">$</span> skillcurrent --as sam skills approve refund-handoff
+    <h1 class="hl" style="font-size:118px">It won't let you approve <em>your own</em> work.</h1>
+    <pre class="term" style="font-size:18px" data-real="submitted-v1"><span class="p">sam$</span> skillcurrent skills approve refund-handoff
 <span class="e">error (forbidden): a submission must be approved by a different maintainer</span>
-<span class="p">$</span> skillcurrent --as noah skills approve refund-handoff --release production
+<span class="p">noah$</span> skillcurrent skills approve refund-handoff --release production
 <span class="ok">Approved refund-handoff 1.0.0 (authored by sam); sha256 2fffa7f67a44…</span>
 <span class="o">Released to production.</span></pre><!--/real-->
     <p class="sub" style="font-size:36px;max-width:none">Whoever wrote or edited a version can't approve it. A second maintainer signs off on the exact bytes, stamped with a SHA-256.</p>
@@ -272,11 +272,11 @@
   <div class="top"><div class="brand">%%LOGO40%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:22px">
     <h1 class="hl" style="font-size:58px">Early access first.<br><em>Everyone else</em> when you say so.</h1>
-    <pre class="term" data-real="submitted-v2"><span class="p">$</span> skillcurrent --as noah skills approve refund-handoff
+    <pre class="term" data-real="submitted-v2"><span class="p">noah$</span> skillcurrent skills approve refund-handoff
 <span class="ok">Approved refund-handoff 1.1.0 (authored by sam); sha256 4d86ab74be24…</span>
-<span class="p">$</span> skillcurrent --as noah skills release refund-handoff --channel canary
+<span class="p">noah$</span> skillcurrent skills release refund-handoff --channel canary
 <span class="o">refund-handoff 1.1.0 is now the canary release.</span>
-<span class="p">$</span> skillcurrent skills history refund-handoff
+<span class="p">noah$</span> skillcurrent skills history refund-handoff
 <span class="y">refund-handoff: canary = 1.1.0, production = 1.0.0</span></pre><!--/real-->
   </div>
   <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Human-judged: no traffic split, no automatic rollback</span></div>
@@ -285,13 +285,13 @@
   <div class="top"><div class="brand">%%LOGO44%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:30px">
     <h1 class="hl" style="font-size:84px">Early access first.<br><em>Everyone else</em><br>when you say so.</h1>
-    <pre class="term" data-real="submitted-v2"><span class="p">$</span> skillcurrent --as noah skills approve refund-handoff
+    <pre class="term" data-real="submitted-v2"><span class="p">noah$</span> skillcurrent skills approve refund-handoff
 <span class="ok">Approved refund-handoff 1.1.0 (authored by sam); sha256 4d86ab74be24…</span>
-<span class="p">$</span> skillcurrent --as noah skills release refund-handoff --channel canary
+<span class="p">noah$</span> skillcurrent skills release refund-handoff --channel canary
 <span class="o">refund-handoff 1.1.0 is now the canary release.</span>
-<span class="p">$</span> skillcurrent skills history refund-handoff
+<span class="p">noah$</span> skillcurrent skills history refund-handoff
 <span class="y">refund-handoff: canary = 1.1.0, production = 1.0.0</span></pre><!--/real-->
-    <p class="sub" style="font-size:28px;max-width:none">New versions reach the machines on your canary channel first. Move production when you're satisfied; roll back by moving the pointer back.</p>
+    <p class="sub" style="font-size:28px;max-width:none">Release to your canary channel first, then move production when you're satisfied. Roll back by moving the pointer back.</p>
   </div>
   <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Every terminal line here is real output</span></div>
 </div>
@@ -299,13 +299,13 @@
   <div class="top"><div class="brand">%%LOGO48%% skillcurrent.</div><span class="pill">Beta pilot</span></div>
   <div class="grow" style="gap:48px">
     <h1 class="hl" style="font-size:112px">Early access first.<br><em>Everyone else</em> when you say so.</h1>
-    <pre class="term" style="font-size:18px" data-real="submitted-v2"><span class="p">$</span> skillcurrent --as noah skills approve refund-handoff
+    <pre class="term" style="font-size:19px" data-real="submitted-v2"><span class="p">noah$</span> skillcurrent skills approve refund-handoff
 <span class="ok">Approved refund-handoff 1.1.0 (authored by sam); sha256 4d86ab74be24…</span>
-<span class="p">$</span> skillcurrent --as noah skills release refund-handoff --channel canary
+<span class="p">noah$</span> skillcurrent skills release refund-handoff --channel canary
 <span class="o">refund-handoff 1.1.0 is now the canary release.</span>
-<span class="p">$</span> skillcurrent skills history refund-handoff
+<span class="p">noah$</span> skillcurrent skills history refund-handoff
 <span class="y">refund-handoff: canary = 1.1.0, production = 1.0.0</span></pre><!--/real-->
-    <p class="sub" style="font-size:36px;max-width:none">New versions reach the machines on your canary channel first. A maintainer moves production when the early group is happy. Roll back by moving the pointer back.</p>
+    <p class="sub" style="font-size:36px;max-width:none">Release a new version to your canary channel first. Machines on it pick it up at their next sync; a maintainer moves production when the early group is happy. Roll back by moving the pointer back.</p>
     <p class="sub" style="font-size:28px;max-width:none">Human-judged early access: no traffic split, no automatic rollback.</p>
   </div>
   <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Every terminal line here is real output</span></div>
@@ -317,8 +317,8 @@
   <div class="grow" style="gap:20px">
     <h1 class="hl" style="font-size:56px">Someone edited their copy. <em>Sync noticed,</em> and kept it.</h1>
     <pre class="term" data-real="drifted"><span class="p">$</span> skillcurrent status
-<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span>
-<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span>
+<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span><span class="o">  …</span>
+<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span><span class="o">   …</span>
 <span class="p">$</span> skillcurrent sync
 <span class="o">refund-handoff  claude-code  production  </span><span class="e">skipped</span><span class="o">  1.0.0  1.0.0</span>
 <span class="o">    local changes; use --force to overwrite</span>
@@ -331,13 +331,13 @@
   <div class="grow" style="gap:30px">
     <h1 class="hl" style="font-size:84px">Someone edited their copy. <em>Sync noticed,</em> and kept it.</h1>
     <pre class="term" data-real="drifted"><span class="p">$</span> skillcurrent status
-<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span>
-<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span>
+<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span><span class="o">  …</span>
+<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span><span class="o">   …</span>
 <span class="p">$</span> skillcurrent sync
 <span class="o">refund-handoff  claude-code  production  </span><span class="e">skipped</span><span class="o">  1.0.0  1.0.0</span>
 <span class="o">    local changes; use --force to overwrite</span>
 <span class="o">refund-handoff  codex        production  </span><span class="ok">updated</span><span class="o">  1.0.0  1.0.0</span></pre><!--/real-->
-    <p class="sub" style="font-size:28px;max-width:none">Machines running the hook report hand-edited and deleted copies to the team. Missing ones are repaired; local edits stay until you say otherwise.</p>
+    <p class="sub" style="font-size:28px;max-width:none">Machines running the hook report hand-edited and deleted copies to the team. Missing ones are restored from the release; local edits stay until you say otherwise.</p>
   </div>
   <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Every terminal line here is real output</span></div>
 </div>
@@ -346,13 +346,13 @@
   <div class="grow" style="gap:48px">
     <h1 class="hl" style="font-size:112px">Someone edited their copy. <em>Sync noticed,</em> and kept it.</h1>
     <pre class="term" data-real="drifted"><span class="p">$</span> skillcurrent status
-<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span>
-<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span>
+<span class="o">refund-handoff  claude-code  production  1.0.0  1.0.0  </span><span class="e">modified</span><span class="o">  …</span>
+<span class="o">refund-handoff  codex        production  1.0.0  1.0.0  </span><span class="y">missing</span><span class="o">   …</span>
 <span class="p">$</span> skillcurrent sync
 <span class="o">refund-handoff  claude-code  production  </span><span class="e">skipped</span><span class="o">  1.0.0  1.0.0</span>
 <span class="o">    local changes; use --force to overwrite</span>
 <span class="o">refund-handoff  codex        production  </span><span class="ok">updated</span><span class="o">  1.0.0  1.0.0</span></pre><!--/real-->
-    <p class="sub" style="font-size:36px;max-width:none">Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated ones are repaired. Local edits stay put, and get counted, until you decide.</p>
+    <p class="sub" style="font-size:36px;max-width:none">Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated copies are brought back to the released version. Local edits stay put, and get counted, until you decide.</p>
   </div>
   <div class="foot"><span class="cta">Join the beta →</span><span class="fine">Every terminal line here is real output</span></div>
 </div>

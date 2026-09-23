@@ -69,7 +69,7 @@ blocks self-approval and syncs to Claude Code for signed-in users.
 
 | Concept | Headline | Proof shown |
 |---|---|---|
-| refused | It won't let you approve your own skill. | the author's approval refused, then a second maintainer's approval with the SHA-256 |
+| refused | It won't let you approve your own work. | the author's approval refused, then a second maintainer's approval with the SHA-256 |
 | early | Early access first. Everyone else when you say so. | approve, release to canary, history showing canary 1.1.0 and production 1.0.0 |
 | noticed | Someone edited their copy. Sync noticed, and kept it. | status finds one modified and one missing copy; sync keeps the edit and repairs the missing one |
 | yours | Skills only. On your server. | the install targets: Claude Code, Antigravity, the shared ~/.agents/skills folder, any custom folder |
@@ -82,7 +82,7 @@ suite checks both limits, plus the banned words from rule 1 and rule 2.
 <!-- rsa-hook -->
 ```text
 H: Authors Can't Self-Approve
-H: Approval by a Second Person
+H: A Second Maintainer Approves
 H: Approve the Exact Bytes
 H: Separation of Duties, Built In
 H: Canary First, Then Everyone
@@ -94,12 +94,12 @@ H: Self-Hosted Skills Catalog
 H: Skills Only, On Your Server
 H: No Gateway to Adopt First
 H: Review for SKILL.md Files
-H: One Approved Version a Skill
+H: Every Version Hash-Stamped
 H: Free During the Beta
-D: Whoever wrote or edited a skill can't approve it. A second maintainer approves the bytes.
-D: Release to an early-access channel first, then production. Roll back by moving a pointer.
+D: Whoever wrote or edited a version can't approve it. Another maintainer approves the bytes.
+D: Release to an early-access channel first, then production when a maintainer decides.
 D: Machines running the hook report hand-edited and deleted copies. Sync repairs the rest.
-D: Self-hosted: Python standard library and one SQLite file. Free during the beta pilot.
+D: Self-hosted: Python standard library and one SQLite file. Pilot open to 5 to 10 teams.
 ```
 
 **Keywords** (phrase and exact match): "skills registry", "agent skills
@@ -119,11 +119,11 @@ terms, but that says nothing about what they cost.
 
 **refused**
 
-> It won't let you approve your own skill.
+> It won't let you approve your own work.
 >
 > When skills are shared by copying files, whoever edits one last decides what everyone's agent reads.
 >
-> In SkillCurrent, whoever wrote or edited a version can't approve it. A second maintainer signs off on the exact bytes, stamped with a SHA-256, before anything reaches a machine. The terminal in the image is real output, and a test keeps it that way.
+> In SkillCurrent, whoever wrote or edited a version can't approve it. A second maintainer signs off on the exact bytes, stamped with a SHA-256, before the version can be released to a channel. The terminal in the image is real output, and a test keeps it that way.
 >
 > Self-hosted, built for teams with two maintainers and more than one coding agent. Free beta pilot for 5 to 10 teams → [link]?c=refused&utm_source=linkedin
 
@@ -131,7 +131,7 @@ terms, but that says nothing about what they cost.
 
 > Early access first. Everyone else when you say so.
 >
-> A new version of a skill goes to the machines on your canary channel. A maintainer moves production when the early group is happy, and rolls back by moving the pointer back.
+> Release a new version of a skill to your canary channel first. The machines on it pick it up at their next sync. A maintainer moves production when the early group is happy, and rolls back by moving the pointer back.
 >
 > It's human-judged: no traffic split, no automatic metrics, no automatic rollback. We'd rather say that plainly than dress it up.
 >
@@ -141,7 +141,7 @@ terms, but that says nothing about what they cost.
 
 > Someone edited their copy of a skill. Sync noticed, and kept it.
 >
-> Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated copies are repaired. A hand-edited one is left alone and counted, so the team can decide whether the edit should become the next version.
+> Machines running the SkillCurrent hook report hand-edited and deleted copies to the team. Missing and outdated copies are brought back to the released version. A hand-edited one is left alone and counted, so the team can decide whether the edit should become the next version.
 >
 > It works with the skill folders that Claude Code, Codex, Gemini CLI, Cursor and Antigravity read. Free beta pilot → [link]?c=noticed&utm_source=linkedin
 
@@ -159,9 +159,9 @@ Each post stays within 280 characters, counting a link as 23; the test
 checks this.
 
 <!-- x-hook -->
-- It won't let you approve your own skill. In SkillCurrent, whoever wrote or edited a version can't approve it; a second maintainer signs off on the exact bytes. Self-hosted, free beta pilot → [link]
-- Early access first, everyone else when you say so. New skill versions go to a canary channel; a maintainer moves production. Human-judged: no traffic split, no auto-rollback. Beta → [link]
-- Someone edited their copy of a skill. Sync noticed, and kept it. Machines running the SkillCurrent hook report hand-edited and deleted copies to the team, and repair the missing ones → [link]
+- It won't let you approve your own work. In SkillCurrent, whoever wrote or edited a version can't approve it; a second maintainer signs off on the exact bytes. Self-hosted, free beta pilot → [link]
+- Early access first, everyone else when you say so. Release new skill versions to a canary channel first; a maintainer moves production. Human-judged: no traffic split, no auto-rollback. Beta → [link]
+- Someone edited their copy of a skill. Sync noticed, and kept it. Machines running the SkillCurrent hook report hand-edited and deleted copies to the team, and restore missing ones from the release → [link]
 - Skills only, on your server. No gateway or portal to adopt first: Python 3.11, no dependencies, one SQLite file. We never see your skills. Free beta pilot → [link]
 <!-- /x-hook -->
 

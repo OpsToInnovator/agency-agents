@@ -270,7 +270,7 @@
 
     async reviews() {
       const rows = await rpc('pending_reviews');
-      return h('div', {}, h('div', { class: 'crumbs' }, 'Change room'), h('h1', {}, 'Waiting for review'), h('p', { class: 'lede' }, 'Approval attaches to exact bytes. A submission must be approved by someone other than its author.'),
+      return h('div', {}, h('div', { class: 'crumbs' }, 'Change room'), h('h1', {}, 'Waiting for review'), h('p', { class: 'lede' }, 'Approval attaches to exact bytes. A submission must be approved by a maintainer who did not write, edit or submit it.'),
         h('div', { class: 'card' }, rows.length ? table([['Skill', (r) => r.skill], ['Proposed', (r) => r.proposed_version], ['By', (r) => r.submitted_by], ['Submitted', (r) => when(r.created_at)], ['Note', (r) => r.note]], rows, (r) => go('skill', r.skill, 'release')) : h('p', { class: 'muted' }, 'Nothing waiting for review.')));
     },
 
@@ -390,14 +390,15 @@
     // Submission / review card
     if (s.pending_review) {
       const r = s.pending_review;
-      const mine = r.submitted_by === state.me.handle;
+      // Whoever wrote, edited or submitted this draft cannot approve it (the server enforces this too).
+      const mine = r.submitted_by === state.me.handle || (r.authors || []).includes(state.me.handle);
       left.append(h('div', { class: 'card' }, h('h3', {}, 'Review candidate'), h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, `${s.title} ${r.proposed_version || ''}`), badge('in_review')),
         kv([['Submitted by', r.submitted_by], ['Bump', r.bump], ['Note', r.note || '—'], ['Content identity', h('span', { class: 'mono' }, short(r.content_hash))], ['Submitted', when(r.created_at)]]),
         h('div', { class: 'row', style: 'margin-top:14px' },
           can('maintainer') && !mine ? h('button', { class: 'primary', onclick: guard(async () => { const comment = ask('Comment (optional)', ''); if (comment === null) return; const rel = confirm('Also release this version to the canary channel now?\n\nOK = approve and release to canary. Cancel = approve only.'); await rpc('approve', { slug: s.slug, comment, release: rel ? 'canary' : null }); toast('Approved'); render(); }) }, 'Approve exact bytes') : '',
-          can('maintainer') && mine ? h('span', { class: 'note warn' }, 'You submitted this. A different maintainer must approve it.') : '',
+          can('maintainer') && mine ? h('span', { class: 'note warn' }, 'You wrote, edited or submitted this. A maintainer who did none of these must approve it.') : '',
           can('maintainer') ? h('button', { class: 'danger', onclick: guard(async () => { const reason = ask('Reason for rejecting'); if (!reason) return; await rpc('reject', { slug: s.slug, reason }); toast('Rejected'); render(); }) }, 'Reject') : '',
-          mine || can('maintainer') ? h('button', { onclick: guard(async () => { await rpc('withdraw_review', { slug: s.slug }); toast('Withdrawn'); render(); }) }, 'Withdraw') : ''),
+          r.submitted_by === state.me.handle || can('maintainer') ? h('button', { onclick: guard(async () => { await rpc('withdraw_review', { slug: s.slug }); toast('Withdrawn'); render(); }) }, 'Withdraw') : ''),
         h('p', { class: 'muted small' }, 'Approval stays with these bytes. Editing after approval starts a new draft and a new review.')));
     } else if (s.has_draft && canEdit(s)) {
       const ready = c && c.current && c.passed;

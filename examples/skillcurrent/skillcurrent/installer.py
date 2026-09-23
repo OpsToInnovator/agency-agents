@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import skillfile
-from .errors import Invalid, NotFound
+from .errors import Invalid, NotFound, SkillCurrentError
 from .session import require_identity
 
 SKILL_FILE = "SKILL.md"
@@ -194,7 +194,16 @@ class Installer:
                 if recorded.name != SKILL_FILE or recorded.parent.name != item["slug"]:
                     actions.append({**item, "action": "skipped", "reason": f"recorded path is not {item['slug']}/{SKILL_FILE}; run install again"})
                     continue
-                result = self.install(item["slug"], item["target"], channel=item["channel"], reason=f"sync:{state}", path=recorded)
+                if item["target_version"] is None:
+                    # Installed from a draft or pinned ref, and its channel has nothing to restore from.
+                    actions.append({**item, "action": "skipped", "reason": f"no release on {item['channel']} to restore from; run install again"})
+                    continue
+                try:
+                    result = self.install(item["slug"], item["target"], channel=item["channel"], reason=f"sync:{state}", path=recorded)
+                except SkillCurrentError as exc:
+                    # One copy that can't be repaired must not stop the rest of the run.
+                    actions.append({**item, "action": "skipped", "reason": exc.message})
+                    continue
                 self._drift(item["slug"], item["target"], state, item["installed"], item["target_version"], "forced" if state == "modified" else "repaired")
                 actions.append({**item, "action": "updated", "installed": result["version"]})
         return actions

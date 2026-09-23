@@ -562,14 +562,20 @@ class Store:
             r["details"] = json.loads(r["details"])
         return rows
 
+    # Activity that ends a draft's authorship: an approval (logged as 'skill.published' by the
+    # pre-release team-skills engine, whose databases this store still opens), a discarded draft,
+    # or a deleted never-published skill whose slug may be created again.
+    DRAFT_RESETS = ("skill.approved", "skill.published", "skill.draft_discarded", "skill.deleted")
+
     def draft_authors(self, team_id: int, slug: str) -> set[str]:
-        """Everyone who created or edited the current draft: activity since the skill's last approval or discard."""
+        """Everyone who created or edited the current draft: activity since the last reset for this slug."""
+        marks = ", ".join("?" for _ in self.DRAFT_RESETS)
         rows = self.all(
             "SELECT DISTINCT actor FROM activity WHERE team_id = ? AND skill_slug = ?"
             " AND action IN ('skill.created', 'skill.draft_updated')"
             " AND id > COALESCE((SELECT MAX(id) FROM activity WHERE team_id = ? AND skill_slug = ?"
-            " AND action IN ('skill.approved', 'skill.draft_discarded')), 0)",
-            (team_id, slug, team_id, slug),
+            f" AND action IN ({marks})), 0)",
+            (team_id, slug, team_id, slug, *self.DRAFT_RESETS),
         )
         return {r["actor"] for r in rows}
 

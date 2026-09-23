@@ -134,3 +134,35 @@ def test_a_discarded_draft_no_longer_counts_as_an_edit(service, team):
     service.run_checks("acme", "cai", "release-notes")
     service.submit_review("acme", "cai", "release-notes", bump="patch")
     assert service.approve("acme", "ben", "release-notes")["approved"]["version"] == "1.0.1"
+
+
+def test_deleting_a_skill_resets_who_counts_as_its_author(service, team):
+    """A never-published skill can only start over by deletion; its old authors must not block the new one."""
+    service.create_skill("acme", "ben", skill_text())
+    service.delete_skill("acme", "ben", "release-notes")
+    service.create_skill("acme", "ana", skill_text(body_extra="\n## New\n\nfresh start.\n"))
+    service.run_checks("acme", "ana", "release-notes")
+    service.submit_review("acme", "ana", "release-notes")
+    assert service.approve("acme", "ben", "release-notes")["approved"]["version"] == "1.0.0"
+
+
+def test_approvals_logged_by_the_old_engine_reset_authorship(service, team):
+    """Databases from the pre-release team-skills engine logged approvals as 'skill.published'."""
+    service.create_skill("acme", "cai", skill_text())
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes")
+    service.approve("acme", "ben", "release-notes")
+    service.store.conn.execute("UPDATE activity SET action = 'skill.published' WHERE action = 'skill.approved'")
+    service.update_draft("acme", "ana", "release-notes", skill_text(body_extra="\n## Two\n\nana edits.\n"))
+    service.run_checks("acme", "ana", "release-notes")
+    service.submit_review("acme", "ana", "release-notes", bump="patch")
+    assert service.approve("acme", "ben", "release-notes")["approved"]["version"] == "1.0.1"  # cai's 1.0.0 draft no longer counts
+
+
+def test_review_views_name_who_may_not_approve(service, team):
+    service.create_skill("acme", "cai", skill_text())
+    service.update_draft("acme", "ben", "release-notes", skill_text(body_extra="\n## Fix\n\nben.\n"))
+    service.run_checks("acme", "cai", "release-notes")
+    service.submit_review("acme", "cai", "release-notes")
+    assert service.get_skill("acme", "dee", "release-notes")["pending_review"]["authors"] == ["ben", "cai"]
+    assert service.pending_reviews("acme", "dee")[0]["authors"] == ["ben", "cai"]
