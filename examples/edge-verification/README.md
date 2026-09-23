@@ -7,7 +7,8 @@ change data it could not have seen. That distinction is the entire point. A patt
 is a conversation; a changed output is a fact.
 
 ```
-PROVEN: this strategy reads its own bar (decided at the open, read the close).
+PROVEN: this strategy reads its own bar: something of the bar that had not happened at its
+open -- its close, high, low or volume; the evidence does not say which.
 
   signals[45] = 1 normally, -1 once bar 45 onward was varied within a percent of its
   true value (perturbation probe, horizon 0)
@@ -47,7 +48,11 @@ or it does not, and when it does it is perfectly reproducible, which is exactly 
 finding looks like.
 
 A clean numpy strategy built on that filter was **not** falsely accused on this tape — the
-difference never landed on a crossing. That is luck, not safety.
+difference never landed on a crossing. That is luck, not safety. And a global transform mixes
+every value into every output at the 1e-14 level, so a perturbed *future* bar can flip a
+*past* cell on a knife-edge too: under this contract that is a real, if useless, dependence
+on the future, and it is reported as one. Perturbation removes the *length* artifact; it does
+not make a global transform causal.
 
 So a truncation finding standing alone at a single boundary is filed as `Suspected`, not
 `Proven`. A real dependence on the future shows up wherever you cut; a float artifact is a
@@ -66,7 +71,13 @@ the type, not by a flag someone remembers to set.
 The absence of a divergence proves nothing. A leak on a branch this tape never took will not
 show up, and the report says so in those words rather than issuing a clean bill of health.
 
-Reported *horizon* is a lower bound — "at least this far" — never an exact depth.
+Reported *horizon* is a lower bound — "at least this far" — never an exact depth, and it is
+claimed only when the **perturbation** probe demonstrated it. Truncation also shortens the
+tape, and a strategy that sizes something from `len(bars)` diverges under it without reading
+any future value; a third red team's count-dependent strategy was reported as reading 172
+bars ahead when it read none. A truncation-only conviction now says exactly what it can:
+the output changed when the tape was shortened, a dependence on data after that bar or on
+how much data there is, reach not bounded.
 
 ## The probe compares against the pristine run, and the tape carries no tell
 
@@ -75,9 +86,15 @@ they recognise a probe — one keyed on a seam (opens redrawn independently, so 
 equalled the previous close), one on a fixed one-percent nudge that pushed intrabar moves past
 anything the tape ever showed. Both got `PROVABLE` and a clean report.
 
-Two changes. The perturbed walk is now **re-threaded** — each bar keeps its gap, wick ratios
-and volume; only the move is nudged, on the tape's own realized scale — so it preserves every
-invariant the pristine tape has and there is no seam to find. And every perturbed run is
+Two changes. The perturbed walk is now **re-threaded** so it preserves every invariant the
+pristine tape has — **in distribution, never per bar**. The first re-threading copied each
+pristine bar's own wick ratios and opening gap onto the rebuilt bar and left every timestamp
+alone, so there would be no seam; a third red team read exactly those properties — a bar's
+own wick, the next bar's gap, the next bar's timestamp — and none of them ever moved under a
+probe. Now the rebuilt bar takes its wick ratios, its gap and its time step from random donor
+bars of the pristine tape, and its volume is nudged. On a continuous, regular tape that is
+exactly continuous and regular; on a gappy, irregular one it is as gappy and irregular; and
+everything unknowable at a bar's open varies at that bar. And every perturbed run is
 compared against the **pristine** run: for `i <= k` a causal strategy must reproduce it exactly,
 because nothing it may legitimately read has changed. A strategy that leaked on real data used
 the boundary bar's close there, and no causal fallback can reproduce that value once the close
@@ -101,25 +118,56 @@ Two modes now, and the report states which and what it covered:
 - `probes="sparse"` (default) draws the boundary set from a nonce the strategy never sees. A
   same-bar leak confined to one bar is caught with probability *B / (n − 4)* per audit — 14% on
   a 300-bar tape — and the report prints that number as coverage rather than implying more.
-- `probes="every_bar"` probes every bar, one run each. Complete for a leak of any horizon at
-  any index; ~n runs. This is what a paid report should use.
+- `probes="every_bar"` probes every bar from bar 4 on (bars 0–3 never are, and the report says
+  a leak confined to them would not show up) and truncates at every bar too — a dependence on *how much data there is*
+  shows up only under a cut between the index it moves and the length it keys on, and the
+  four fixed cuts stopped at 0.9n. ~5n runs with the default four draws. This is what a paid
+  report should use.
 
-At a probed bar the boundary bar's move is forced up in one draw and down in the next, so a
-decision on the sign of close − open flips in one of them for certain rather than on a coin
-toss. Volume is varied too: a bar's traded volume is no more known at its open than its close
-is, and a red team read one behind a harmless price term because no probe had ever moved it.
+At a probed bar the boundary bar's move, its wick skew and its volume are each forced up or
+down, and the sign triples an audit tries come from a **covering design under a mask drawn
+from the audit nonce**: every field flips, every pair is pushed apart, the parity of all
+three flips, and eight draws cover every combination. A fifth red team read whether the move
+and the wick *agreed*, which two lockstep draws never changed, and a fixed design is a design
+a leak can be written against. The wick's magnitudes are a donor bar's, with only the skew
+forced — the previous fix had made the size a constant, so a wick-size threshold just below it
+was never crossed.
+
+Forced *against what* matters as much as forced. A sixth red team read `close > previous
+close` at one bar and walked at every bar whose opening gap outweighed a typical move: the
+move was forced against the bar's own open, so the close never crossed the previous close.
+`volume > previous volume` walked at a fifth of bars for the same reason, and a breakout read
+(`high > previous high`, `low < previous low`) at a fifth for the coin toss of whether a
+donor's wick reached the previous extreme. Everything a strategy can compare an unknown
+field against is the bar's own open and the previous bar's fields, so the close is now pushed
+past all of them at once — above the open, the previous close and the previous high, or
+below the open, the previous close and the previous low — by a fresh move of the tape's own
+size measured from that level; the volume to the far side of the previous bar's by a ratio
+drawn from the tape's own bar-to-bar volume ratios; and the range to a higher low on the up
+draws and a lower high on the down draws. Where the open already sits beyond the previous
+extreme, that side is decided by a value the strategy may read, and nothing is claimed.
+Every-bar mode uses four draws by default. The report says how many of the eight sign
+combinations were tried at the bars that did not diverge, that probing of a bar stopped at
+its first divergence, and states the residual: a read of a magnitude rather than a
+direction, or against a level further back than the previous bar, can still go unseen. A
+fourth red team's one-bar wick read was being missed in one audit out of eight while the
+report said "every bar was probed"; the wick was a random donor's, and only the move had
+been mirrored. Volume is varied too: a bar's traded volume is no more known at its open than
+its close is, and a red team read one behind a harmless price term because no probe had
+ever moved it.
 
 ## Nothing is proven until it reproduces
 
 A strategy seeded on a coarse clock passed the same-tape-twice gate — the two runs shared a
 one-second bucket — and was then convicted of a 130-bar lookahead that the clock, not the data,
 had produced. Now every candidate divergence is re-run on both sides, and only an exact
-reproduction becomes `Proven`. Which side fails says what the strategy is: if the pristine run
-does not reproduce, the strategy is nondeterministic and nothing in the report is attributed
-to the data. If the pristine run reproduces and a varied one does not, the strategy is telling
-real data from probe data — a second red team built exactly that, deterministic only on a
-tape it recognised by checksum and random everywhere else — and the report says so instead
-of calling it inconclusive. `precheck` catches the same pattern earlier by checking
+reproduction becomes `Proven`. Which side fails says something, and the report says only what
+it can: if the pristine run does not reproduce (it is replayed three times), the strategy is
+nondeterministic and nothing is attributed to the data. If the pristine run reproduces and a
+varied one does not, then *either* the strategy distinguishes real data from varied data — a
+second red team built exactly that — *or* it is intermittently nondeterministic and the real
+tape got lucky; the report names both, because a fifth red team showed a plain p = 0.2 flake
+being accused of the first. `precheck` catches the same pattern earlier by checking
 determinism on a varied tape as well as the real one.
 
 ## Truncation needs corroboration; perturbation does not
@@ -238,8 +286,14 @@ Two tiers, and the report says which ran:
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
 | network blocked by the kernel — `connect()` and DNS fail, by any route | yes | no |
 | a new root: only `/usr`, `/etc`, the lib and bin trees and the interpreter's prefix, read-only | yes | no |
-| plus a fresh `/proc`, four device nodes, a tmpfs `/tmp` that dies with the process, the run dir | yes | no |
+| plus a fresh `/proc`, four device nodes, and a tmpfs `/tmp` that dies with the process | yes | no |
+| the run directory is a **size-capped tmpfs** too: many files cannot fill the host disk | yes | no |
 | the home directory, `/opt`, `/var`, `/run`, the work root, the source, the repository: absent | yes | no |
+| the strategy runs in one more, unmapped user namespace: no capabilities, every mount locked | yes | no |
+| its own UTS and IPC namespaces: the host's hostname is not the child's to change | yes | no |
+| `/proc/sys` read-only, `sysrq-trigger`, `irq` and `bus` masked: host sysctls are not the child's either | yes | no |
+| `close()` / `with` removes the staged source and an owned work root | yes | yes |
+| the parent bounds what it takes: result and record sizes, run-dir entries and depth; walks and teardown never recurse | yes | yes |
 | the strategy's copy of itself read-only; the run directory deleted after the run | yes | no |
 
 `plain` stops accidents and runaway loops. It is a correctness boundary, not a security one:
@@ -250,11 +304,32 @@ hid a list; a second red team cached through `/opt` and injected a module into t
 own `dist-packages`, because a list can never name every writable directory on a host. Now
 everything the strategy can see is read-only except the run directory and a `/tmp` that does
 not outlive the process, and a test writes to eight places outside the run directory and
-asserts that every write fails and nothing persists. Neither tier is
+asserts that every write fails and nothing persists. Setting that up needs the mapped-root
+capabilities, and a child that kept them could undo it — it would be root in that namespace,
+and a mount the namespace created is a mount it may remount read-write; a third red team did
+exactly that through a `ctypes` `mount()` call. So the strategy runs inside one more user
+namespace, unmapped: no capabilities over anything that exists, every inherited mount locked,
+the remount refused with `EPERM`. The interpreter does not care what uid it is.
+
+**Nothing the child does may crash the parent.** A strategy built a run directory two
+thousand levels deep with nothing but `os.mkdir` and `os.chdir` — single components, so no
+`PATH_MAX` — and the auditor died of a `RecursionError` in its own `Path.rglob` and
+`shutil.rmtree`, producing no verdict on a strategy that was `PROVEN` on its own. The walk
+is now iterative with a ceiling on entries and depth (over it is `ResourceExceeded`, named),
+teardown flattens the tree by renaming subdirectories up to the root with two descriptors
+and no path, and the result and violation pipes are capped: a result larger than the cap is
+`BadOutput`, a flood of violations is recorded up to the cap and then says "and more".
+`RLIMIT_FSIZE` caps one file, and many files at that size through a run directory bound from
+the host would have filled the host disk, so inside the namespace the run directory is a
+tmpfs of a fixed size: the strategy gets `ENOSPC`, the host gets nothing. One consequence,
+stated plainly: in that tier the files-written listing comes from the child, because the
+directory dies with it. That listing was always a hint about caches, never evidence.
+
+Neither tier is
 a boundary against a determined attacker — one running inside the child process can discover
 the result descriptor and forge a payload — and the docs say so rather than imply otherwise.
 
-**What two red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
+**What six red-team rounds got through, and what closed it.** A cache written to `/tmp` and keyed on
 data the probes never move replayed a leaky answer to every probe: the default work root was
 under `/tmp`, and the first version refused to hide any ancestor of it. Now `/tmp` is always
 hidden and only the run directory is bound back in. A strategy rebound the child runner's
@@ -268,7 +343,30 @@ death without consuming CPU; the claim is checked against the kernel's accountin
 second round: a cache in `/opt` (the whitelist root), a leak on every bar but the four fixed
 boundaries (nonce-drawn boundaries, every-bar mode, coverage stated), a same-bar volume read
 (volume varied), and a strategy deterministic only on the real tape (named as such, at the
-gate and in the report).
+gate and in the report). In the third: leaks on a bar's own wick ratio, the next bar's
+gap and the next bar's timestamp (the rebuilt tape now draws those from donor bars), a
+count-dependent strategy convicted with a fabricated reach (reach is claimed from the
+perturbation probe only), a run directory deep enough to crash the auditor (bounded,
+iterative walks; flatten-by-rename teardown), and a `ctypes` remount of the read-only
+system trees (the nested unmapped namespace). In the fourth — the first with nothing of
+verdict-poisoning severity — a one-bar wick read missed in one every-bar audit in eight
+(the boundary bar's wick and volume are now mirrored across the draws like its move), a
+count dependence above 0.9n (every-bar mode truncates at every bar), a `RecursionError` from
+a deeply nested result escaping the parent (caught, reported as malformed), and a child
+that could change the host's hostname through the shared UTS namespace (`--uts --ipc`). In
+the fifth: the agreement of move and wick invariant under two lockstep draws (random sign
+triples after the first two), a constant forced wick size (donor magnitudes, forced skew),
+host sysctls written through the fresh `/proc` (`/proc/sys` read-only), a rare flake accused
+of telling real from varied data (three pristine replays, and the report names both
+possibilities), truncation evidence lines printing a horizon under a headline that claimed
+none, "every bar was probed" while bars 0–3 cannot be, and staged source lingering in `/tmp`
+(`close()`). In the sixth — none of it created by the fifth's fixes; the fourth's code misses
+them identically — one-bar reads of the close, the volume, the high and the low *against the
+previous bar* surviving at gap bars and at a fifth of bars respectively (every unknown field
+is now pushed to both sides of the previous bar's level), a horizon-0 proof described as
+"read the close" whatever was read (the report names the four fields it might have been and
+says the evidence does not distinguish them), and a coverage note claiming four sign
+combinations at every bar while probing of a bar stops at its first divergence (it says so).
 
 Two things measured, not assumed. `unshare --fork` reports rc=1 for a child the kernel
 killed at its CPU limit, indistinguishable from an ordinary failure, so nothing classifies

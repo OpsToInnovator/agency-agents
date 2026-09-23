@@ -43,6 +43,8 @@ class Bar:
 def main(argv: list[str]) -> int:
     run_dir, entry, func = argv[1], argv[2], argv[3]
     out_fd, viol_fd = int(argv[4]), int(argv[5])
+    max_entries = int(argv[6]) if len(argv) > 6 else 20_000
+    max_depth = int(argv[7]) if len(argv) > 7 else 64
     os.set_inheritable(out_fd, False)
     os.set_inheritable(viol_fd, False)
     os.chdir(run_dir)
@@ -99,6 +101,35 @@ def main(argv: list[str]) -> int:
             d = json.loads(line)
             bars.append(Bar(d["ts"], d["open"], d["high"], d["low"], d["close"], d["volume"]))
 
+    def written(limit_entries: int = 20_000, limit_depth: int = 64) -> tuple[list, bool]:
+        """Files under the run directory beyond those we put there. Inside the namespace the
+        run directory is a tmpfs that dies with this process, so the parent cannot look for
+        itself; this listing is a hint about caches, never evidence, and the parent treats it
+        as such. Bounded: an explicit stack, a ceiling on entries and depth."""
+        out, seen, over = [], 0, False
+        stack = [(run_dir, 0)]
+        while stack:
+            d, depth = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        seen += 1
+                        if seen > limit_entries or depth > limit_depth:
+                            return out, True
+                        rel = os.path.relpath(e.path, run_dir)
+                        if rel in ("tape.jsonl", "_child.py") or rel.startswith("strategy"):
+                            continue
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append((e.path, depth + 1))
+                            elif e.is_file(follow_symlinks=False):
+                                out.append(rel)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return out, over
+
     # -- the strategy ------------------------------------------------------------------------------
     sys.path.insert(0, os.path.join(run_dir, "strategy"))
     try:
@@ -111,7 +142,8 @@ def main(argv: list[str]) -> int:
         # {-1, 0, 1}. json.dumps happens inside the try so an unserialisable value is an error,
         # not a half-written result.
         values = [x.item() if hasattr(x, "item") else x for x in out]
-        body = dumps({"ok": True, "signals": values})
+        files, over = written(max_entries, max_depth)
+        body = dumps({"ok": True, "signals": values, "files_written": sorted(files)[:2000], "run_dir_over_limit": over})
     except BaseException as e:  # noqa: BLE001 -- the error IS the report
         # The message is repr'd so a newline inside it cannot smuggle a reassuring last line
         # into the parent's summary; the formatted traceback rides along as an attachment.

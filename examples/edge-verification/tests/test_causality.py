@@ -164,8 +164,10 @@ def test_a_proof_cannot_be_filed_without_its_evidence():
     with pytest.raises(TypeError):
         Proven(summary="reads the future")  # type: ignore[call-arg]
 
-    d = Divergence(index=5, boundary=9, baseline=1, variant=-1, probe="truncation", detail="removed")
+    d = Divergence(index=5, boundary=9, baseline=1, variant=-1, probe="perturbation", detail="varied")
     assert Proven(d, "x").horizon == 4
+    t = Divergence(index=5, boundary=9, baseline=1, variant=-1, probe="truncation", detail="removed")
+    assert Proven(t, "x").horizon is None          # truncation carries no reach
 
 
 def test_a_clean_run_never_claims_innocence(tape):
@@ -191,8 +193,10 @@ def test_a_tape_too_short_to_probe_is_refused():
 
 def test_findings_are_ordered_worst_first(tape):
     report = check_causality(strat("leak_full_sample_zscore").signals, tape)
-    horizons = [p.horizon for p in report.proven]
+    horizons = [p.horizon for p in report.proven if p.horizon is not None]
     assert horizons == sorted(horizons, reverse=True)
+    kinds = [p.evidence.probe for p in report.proven]
+    assert kinds == sorted(kinds, key=lambda k: k != "perturbation")     # perturbation first
 
 
 def test_an_empty_report_is_falsey_about_leaking():
@@ -287,7 +291,7 @@ def test_a_leak_on_one_bar_is_caught_by_every_bar_and_reported_as_coverage_by_sp
     single = strat("leak_single_bar").signals
     complete = check_causality(single, tape, probes="every_bar", seed=1)
     assert complete.leaks and complete.worst_horizon == 0 and complete.coverage == 1.0
-    assert "every bar was probed" in complete.describe()
+    assert "every bar from 4 on was probed" in complete.describe()
 
     sparse = check_causality(single, tape, probes="sparse", seed=1)
     assert 0 < sparse.coverage < 1.0
@@ -327,4 +331,301 @@ def test_a_strategy_that_reproduces_only_on_the_real_tape_is_named_for_it(tape):
     report = check_causality(two_faced, tape, seed=1)
     assert report.recognises_input and not report.nondeterministic
     assert report.proven == ()
-    assert "telling the two apart" in report.describe()
+    assert "distinguishes real data from varied data" in report.describe()
+    assert "intermittently nondeterministic" in report.describe()     # the report never asserts intent
+
+
+@pytest.mark.parametrize("name,kw", [("leak_same_bar_wick", {}),
+                                     ("leak_next_bar_gap", {"gap_prob": 0.15}),
+                                     ("leak_next_bar_ts", {"late_prob": 0.12})])
+def test_a_read_of_a_shape_property_is_a_leak(name, kw):
+    """Wick ratios, gaps and time steps used to be copied per bar onto the rebuilt tape,
+    so a strategy reading exactly those never moved under any probe. They are now drawn
+    from donor bars: same distribution, different values."""
+    tape = bars(200, **kw)
+    report = check_causality(strat(name).signals, tape, probes="every_bar", seed=1)
+    assert report.leaks, f"{name} ({strat(name).LEAKS}) walked out clean"
+    assert any(p.evidence.probe == "perturbation" for p in report.proven)
+
+
+def test_a_rebuilt_tape_keeps_the_shape_of_the_tape_not_of_each_bar():
+    """Distributional invariants: as gappy, as late, as wicky as the pristine tape -- and
+    on a continuous, regular tape, exactly continuous and regular."""
+    import statistics as st
+    tape = bars(300, gap_prob=0.2, late_prob=0.1)
+    p = _perturbed(tape, 100, seed=5, sigma=None)
+    gaps_t = [abs(tape[i].open / tape[i - 1].close - 1) for i in range(101, 300)]
+    gaps_p = [abs(p[i].open / p[i - 1].close - 1) for i in range(101, 300)]
+    assert abs(st.fmean(gaps_p) - st.fmean(gaps_t)) < 0.5 * st.fmean(gaps_t) + 1e-9
+    steps_t = sorted({round(tape[i].ts - tape[i - 1].ts) for i in range(101, 300)})
+    steps_p = sorted({round(p[i].ts - p[i - 1].ts) for i in range(101, 300)})
+    assert set(steps_p) <= set(steps_t)
+    assert [b.ts for b in p[:101]] == [b.ts for b in tape[:101]]
+    assert all(b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high for b in p)
+    # per-bar copying is what let the leaks through: the wick ratio must NOT be preserved per bar
+    same = sum(1 for i in range(100, 300)
+               if abs(p[i].high / max(p[i].open, p[i].close) - tape[i].high / max(tape[i].open, tape[i].close)) < 1e-12)
+    assert same < 20
+
+    regular = bars(200)
+    q = _perturbed(regular, 50, seed=3, sigma=None)
+    assert all(abs(q[i].open - q[i - 1].close) <= 1e-9 * q[i - 1].close for i in range(1, 200))
+    assert all(abs((q[i].ts - q[i - 1].ts) - 60.0) < 1e-6 for i in range(1, 200))
+
+
+def test_a_count_dependent_strategy_is_convicted_without_a_fabricated_reach(tape):
+    """Truncation cannot tell 'reads bar k+172' from 'looked at len(bars)'. Convict, but
+    do not print a reach the evidence cannot support."""
+    report = check_causality(strat("count_dependent").signals, tape, probes="every_bar", seed=1)
+    assert report.leaks
+    assert report.worst_horizon is None
+    text = report.describe()
+    assert "into the future" not in text
+    assert "how much data there is" in text
+
+
+def test_a_single_same_bar_wick_read_is_caught_at_a_probed_bar_every_time(tape):
+    """A fourth red team's one-bar wick read was missed in one every_bar audit out of eight,
+    because the boundary bar's wick came from a random donor and only the move was pushed
+    both ways. The wick and the volume are now pushed both ways too."""
+    AT = 137
+
+    def one_wick(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) > AT:
+            b = bs[AT]
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            out[AT] = -1 if (b.high / top - 1.0) > (1.0 - b.low / bot) else 1
+        return out
+
+    irregular = bars(200, gap_prob=0.1, late_prob=0.1)
+    for seed in range(5011, 5031):
+        r = check_causality(one_wick, irregular, probes="every_bar", seed=seed)
+        assert r.leaks and r.worst_horizon == 0, f"missed at seed {seed}"
+        assert any(p.evidence.index == AT for p in r.proven)
+
+
+def test_a_count_dependence_near_the_tail_is_convicted_in_every_bar(tape):
+    """Truncation's fixed cuts stopped at 0.9n; a flip at index 185 keyed on len >= 190 was
+    never compared. every_bar now truncates at every bar."""
+    def tail_count(bs):
+        out = [0] * len(bs)
+        for i in range(3, len(bs)):
+            out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+        if len(bs) > 185 and len(bs) >= 190:
+            out[185] = -out[185]
+        return out
+
+    r = check_causality(tail_count, bars(200), probes="every_bar", seed=7)
+    assert r.leaks
+    assert r.worst_horizon is None                      # truncation-only: no reach claimed
+    assert "how much data there is" in r.describe()
+
+
+def _momentum(bs):
+    out = [0] * len(bs)
+    for i in range(3, len(bs)):
+        out[i] = 1 if bs[i - 1].close > bs[i - 3].close else -1
+    return out
+
+
+def test_a_read_of_move_and_wick_agreement_is_caught():
+    """A fifth red team read whether the bar's move and its wick skew AGREE. Two lockstep
+    draws (all up, then all down) never changed that. The draws beyond the first two now
+    take a random sign triple from the nonce."""
+    AT = 57
+
+    def agree(bs):
+        out = _momentum(bs)
+        if len(bs) > AT:
+            b = bs[AT]
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            skew = 1 if (b.high / top - 1.0) > (1.0 - b.low / bot) else -1
+            move = 1 if b.close > b.open else -1
+            out[AT] = skew * move
+        return out
+
+    tape = bars(200, gap_prob=0.1, late_prob=0.1)
+    for seed in range(8):
+        r = check_causality(agree, tape, probes="every_bar", seed=seed)
+        assert r.leaks and any(p.evidence.index == AT for p in r.proven), f"missed at seed {seed}"
+
+
+def test_a_wick_size_threshold_is_crossed_by_donor_magnitudes():
+    """The fix that forced the wick's skew made its size a constant, so a threshold just
+    below it was never crossed. The size is a donor's now."""
+    AT, T = 52, 0.0015
+
+    def maxwick(bs):
+        out = _momentum(bs)
+        if len(bs) > AT:
+            b = bs[AT]
+            top, bot = max(b.open, b.close), min(b.open, b.close)
+            out[AT] = -1 if max(b.high / top - 1.0, 1.0 - b.low / bot) > T else 1
+        return out
+
+    tape = bars(200, gap_prob=0.1, late_prob=0.1)
+    caught = sum(1 for seed in range(8) if check_causality(maxwick, tape, probes="every_bar", seed=seed).leaks)
+    assert caught >= 6, f"caught in only {caught} of 8 audits"
+
+
+def test_a_rare_flake_is_not_accused_of_telling_the_two_apart_without_hedging():
+    """Flips one bar with p = 0.2 on any tape, inspecting nothing. Whatever the nonce, the
+    report must never assert that it distinguishes real from varied data."""
+    import random as _r
+
+    def flaky(bs):
+        out = _momentum(bs)
+        if len(out) > 10 and _r.Random().random() < 0.2:
+            out[10] = -out[10]
+        return out
+
+    tape = bars(200)
+    for seed in range(6):
+        r = check_causality(flaky, tape, probes="every_bar", seed=seed)
+        assert r.proven == ()
+        text = r.describe()
+        assert "telling the two apart" not in text
+        if r.recognises_input:
+            assert "intermittently nondeterministic" in text
+
+
+def test_mixed_mechanisms_are_both_named_and_truncation_lines_claim_no_reach(tape):
+    def mixed(bs):
+        out = _momentum(bs)
+        if len(bs) > 100:
+            out[100] = 1 if bs[100].close > bs[100].open else -1      # same-bar read
+        if len(bs) >= 190 and len(bs) > 5:
+            out[5] = -out[5]                                           # count dependence
+        return out
+
+    r = check_causality(mixed, tape, probes="every_bar", seed=1)
+    assert r.leaks and r.worst_horizon == 0
+    text = r.describe()
+    assert "reads its own bar" in text and "how much data there is" in text
+    assert "truncation probe, horizon" not in text and "reach not bounded" in text
+    assert r.proven[0].evidence.probe == "perturbation"
+
+
+def test_the_coverage_note_does_not_claim_bars_it_cannot_probe(tape):
+    r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", seed=1)
+    note = r.coverage_note()
+    assert "from 4 on" in note and "bars 0-3 never are" in note
+    assert "every pair of move, wick and volume pushed apart" in note and "4 of 8" in note
+    assert "stopped at the first divergence" not in note, "nothing diverged, so nothing stopped"
+
+
+def test_the_coverage_note_says_where_probing_stopped(tape):
+    """A sixth red team: the note claimed four combinations at every bar, while the draw loop
+    at a bar stops at its first divergence. It now says so, and only when that happened."""
+    r = check_causality(strat("leak_same_bar_close").signals, tape, probes="every_bar", seed=1)
+    assert r.leaks
+    note = r.coverage_note()
+    assert "that did not diverge" in note and "stopped at the first divergence" in note
+
+
+def test_a_same_bar_proof_does_not_name_a_field_the_evidence_does_not_name(tape):
+    """The same red team: a horizon-0 proof was described as "read the close" whatever was
+    read. A volume-only reader is not accused of reading the close."""
+    r = check_causality(strat("leak_same_bar_volume").signals, tape, probes="every_bar", seed=1)
+    assert r.leaks and r.worst_horizon == 0
+    text = r.describe()
+    assert "read the close" not in text
+    assert "close, high, low or volume" in text and "does not say which" in text
+
+
+def _prev_bar_reader(field: str, at: int):
+    """Decides bar ``at`` on one of its own unknown fields compared with the previous bar's:
+    the close-to-close return, the volume change, a breakout above the previous high or
+    below the previous low. The four most common one-bar reads in real code."""
+    def signals(bs):
+        out = _momentum(bs)
+        if len(bs) > at:
+            b, p = bs[at], bs[at - 1]
+            if field == "close":
+                out[at] = -1 if b.close > p.close else 1
+            elif field == "volume":
+                out[at] = -1 if b.volume > p.volume else 1
+            elif field == "high":
+                out[at] = -1 if b.high > p.high else 1
+            else:
+                out[at] = -1 if b.low < p.low else 1
+        return out
+    return signals
+
+
+@pytest.mark.parametrize("field", ["close", "volume", "high", "low"])
+def test_a_one_bar_read_against_the_previous_bar_is_caught_at_gap_bars(field):
+    """A sixth red team read ``close > previous close`` at one bar and walked at any bar
+    whose opening gap outweighed a typical move: the forced move was applied to the bar's
+    own open, so the close never crossed the previous close. ``volume > previous volume``
+    walked at a fifth of bars for the same reason (the push was relative to the bar's own
+    pristine volume, and clamped), and the breakout reads at a fifth for the coin toss of
+    whether a donor's wick reached the previous extreme. Every unknown field is now pushed
+    to both sides of the previous bar's level. The only bars a breakout read survives are
+    those whose OPEN already sits beyond the previous extreme -- where the read is decided
+    by a value the strategy may see, and there is nothing to catch."""
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    missed = []
+    for at in range(4, 200, 7):
+        b, p = gappy[at], gappy[at - 1]
+        if field == "high" and b.open > p.high:
+            continue
+        if field == "low" and b.open < p.low:
+            continue
+        r = check_causality(_prev_bar_reader(field, at), gappy, probes="every_bar", seed=9001 + at)
+        if not (r.leaks and any(q.evidence.index == at for q in r.proven)):
+            missed.append(at)
+    assert not missed, f"{field} read against the previous bar survived at bars {missed}"
+
+
+def test_a_breakout_read_is_never_charged_where_the_open_decides_it():
+    """The other side of the same fix: where the open is already past the previous high,
+    ``high > previous high`` is a function of the open. No probe can move it, and the
+    detector must not claim it did."""
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    decided = [at for at in range(4, 200) if gappy[at].open > gappy[at - 1].high]
+    assert decided, "the fixture should contain bars that gap above the previous high"
+    at = decided[len(decided) // 2]
+    r = check_causality(_prev_bar_reader("high", at), gappy, probes="every_bar", seed=77)
+    assert not any(p.evidence.index == at for p in r.proven)
+
+
+def test_the_boundary_bar_is_pushed_past_every_level_of_the_previous_bar():
+    """Direct measurement of the design, not of a strategy: over the first four draws of
+    the covering design, the boundary bar's close lands above the previous high and below
+    the previous low, its volume above and below the previous volume, and -- where its open
+    is inside the previous range -- its range makes both a higher low and a lower high."""
+    from edgecheck.causality import sign_design
+    gappy = bars(200, gap_prob=0.3, late_prob=0.1)
+    inside = [k for k in range(4, 200) if gappy[k - 1].low <= gappy[k].open <= gappy[k - 1].high]
+    for k in inside[::9]:
+        p = gappy[k - 1]
+        for nonce in (1, 2, 3):
+            got = [_perturbed(gappy, k, seed=nonce ^ (k * 1_000_003 + i), sigma=None, signs=s)[k]
+                   for i, s in enumerate(sign_design(nonce, k)[:4])]
+            assert any(b.close > p.high for b in got) and any(b.close < p.low for b in got), k
+            assert any(b.volume > p.volume for b in got) and any(b.volume < p.volume for b in got), k
+            assert any(b.high > p.high and b.low >= p.low for b in got), (k, "higher high, higher low")
+            assert any(b.low < p.low and b.high <= p.high for b in got), (k, "lower high, lower low")
+            for b in got:
+                assert b.low <= min(b.open, b.close) <= max(b.open, b.close) <= b.high
+                assert b.open == gappy[k].open and b.ts == gappy[k].ts
+
+
+def test_the_sign_design_covers_what_it_claims():
+    """Every field both ways, every pair apart at least once, the triple parity both ways --
+    for any mask -- and all eight combinations by the eighth draw."""
+    from edgecheck.causality import sign_design
+    for nonce in range(40):
+        d = sign_design(nonce, 57)
+        first4 = d[:4]
+        for f in range(3):
+            assert {c[f] for c in first4} == {1, -1}
+        for i, j in ((0, 1), (0, 2), (1, 2)):
+            assert any(c[i] != c[j] for c in first4)
+        assert {c[0] * c[1] * c[2] for c in first4} == {1, -1}
+        assert d[0] == tuple(-x for x in d[1])
+        assert len(set(d)) == 8

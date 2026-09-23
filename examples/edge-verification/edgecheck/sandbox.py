@@ -38,8 +38,16 @@ What is actually enforced, in two tiers:
                 module into the interpreter's own dist-packages, because the first version
                 hid a LIST of paths and a list can never name every writable directory on
                 a host. Scrubbed environment. rlimits on CPU, memory, processes, file size,
-                open files. Wall-clock kill. Nothing written anywhere but the run directory
-                survives the process, and the run directory is deleted after it.
+                open files. Wall-clock kill. /proc/sys read-only, since a fresh /proc is otherwise a
+                writable window onto host-wide sysctls (a fifth red team set vm.overcommit
+                for the whole host from inside). Nothing written anywhere but the run
+                directory survives the process, and the run directory is deleted after it. The
+                strategy itself runs in one more user namespace, unmapped: no capabilities,
+                every mount locked, so the read-only trees stay read-only even against a
+                ctypes mount() call. And the parent bounds what it will take from the
+                child -- result and record sizes, run-directory entries and depth -- with
+                walks and teardown that never recurse, because a strategy that builds a
+                directory two thousand levels deep must get a verdict, not crash the auditor.
 
     plain       Everything above except the namespaces. The audit hook still records every
                 in-process socket use and every attempt to spawn a process, and refuses
@@ -62,6 +70,7 @@ no CPU consumed is reported as exactly that).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import resource
@@ -72,6 +81,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Sequence
@@ -97,6 +107,18 @@ class Limits:
     nproc: int = 64
     fsize_bytes: int = 256 * 1024 ** 2
     nofile: int = 256
+    # What the PARENT will take from the child. A third red team built a run directory two
+    # thousand levels deep with nothing but os.mkdir and os.chdir, and the auditor died of a
+    # RecursionError in its own recursive walk and teardown -- no verdict at all, on a
+    # strategy that was PROVEN on its own. Nothing the child does may crash the parent.
+    result_bytes: int = 64 * 1024 ** 2
+    violation_bytes: int = 1024 ** 2
+    run_dir_entries: int = 20_000
+    run_dir_depth: int = 64
+    # RLIMIT_FSIZE caps one file. Many files at that size would fill the host disk through a
+    # run directory bound from the host, so inside the namespace the run directory is a
+    # tmpfs of this size: the strategy gets ENOSPC, the host gets nothing.
+    run_dir_bytes: int = 256 * 1024 ** 2
 
 
 class SandboxError(Exception):
@@ -158,9 +180,9 @@ def detect_isolation() -> Isolation:
         try:
             (run / "strategy").mkdir()
             (run / "_child.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
-            cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "--",
+            cmd = [unshare, "--user", "--map-root-user", "--mount", "--net", "--uts", "--ipc", "--pid", "--fork", "--",
                    "sh", "-c", _NS_SCRIPT, "sh", sys.executable, str(run), "x", "x", "1", "2",
-                   Sandbox._shelf(), *Sandbox._bound_roots()]
+                   Sandbox._shelf(), "8", "100", "8", *Sandbox._bound_roots()]
             r = subprocess.run(cmd, cwd=run, env=_scrubbed_env(), capture_output=True, timeout=20)
             ok = r.returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -205,12 +227,20 @@ def _rlimit_installer(limits: Limits):
 # fresh tmpfs: each system root is bound in read-only (or recreated as the same symlink where
 # the host has one), the run directory is bound in writable with the strategy's own copy made
 # read-only, then pivot_root makes it the root and the old root is detached.
+#
+# The last line matters as much as the rest. Setup needs the mapped-root capabilities, but a
+# child that keeps them can undo the setup: it is root in this namespace, and a mount this
+# namespace created is a mount it may remount read-write -- a third red team did exactly
+# that through a ctypes mount() call and wrote into the host's /usr. So the strategy runs
+# inside one more user namespace, unmapped: no capabilities over anything that exists, and
+# every mount inherited from outside is locked. The remount is refused. The interpreter
+# does not care what uid it is.
 _NS_SCRIPT = r'''
 set -e
-py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; shift 7
+py="$1"; run="$2"; entry="$3"; func="$4"; ofd="$5"; vfd="$6"; new="$7"; workmb="$8"; ents="$9"; shift 9; depth="$1"; shift 1
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs "$new"
 cd "$new"
-mkdir -p proc dev tmp work oldroot
+mkdir -p proc dev tmp work src oldroot
 for p in "$@"; do
   if [ -L "$p" ]; then
     mkdir -p "$(dirname "$new$p")"; ln -s "$(readlink "$p")" "$new$p"
@@ -222,30 +252,48 @@ for m in /etc/arbbot; do [ -d "$new$m" ] && mount -t tmpfs -o size=1m,nodev,nosu
 for f in null zero urandom random; do touch "dev/$f"; mount --bind "/dev/$f" "dev/$f"; done
 mount -t tmpfs -o nodev,nosuid,size=64m tmpfs tmp
 mount -t proc proc proc
-mount --bind "$run" work
-mount --bind work/strategy work/strategy
-mount -o remount,bind,ro,nodev,nosuid work/strategy
+mount --bind proc/sys proc/sys
+mount -o remount,bind,ro,nosuid,nodev,noexec proc/sys
+for m in proc/sysrq-trigger proc/irq proc/bus; do
+  if [ -d "$m" ]; then mount -t tmpfs -o size=1m,ro tmpfs "$m"; elif [ -e "$m" ]; then mount --bind dev/null "$m"; fi
+done
+mount --bind "$run" src
+mount -o remount,bind,ro,nodev,nosuid src
+mount -t tmpfs -o nodev,nosuid,size="$workmb"m tmpfs work
+cp -a src/. work/
+chmod -R a-w work/strategy
 pivot_root . oldroot
 umount -l /oldroot
 cd /work
-exec "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd"
+exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd" "$vfd" "$ents" "$depth"
 '''
 
 
-def _drain(fd: int, sink: list[bytes]) -> threading.Thread:
+def _drain(fd: int, sink: list[bytes], cap: int) -> threading.Thread:
+    """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
+    say whether more arrived. A result or a record larger than the cap is not evidence of
+    anything but a strategy trying to exhaust the auditor."""
     def go() -> None:
-        chunks = []
+        chunks: list[bytes] = []
+        kept = 0
+        overflow = False
         try:
             while True:
                 b = os.read(fd, 65536)
                 if not b:
                     break
-                chunks.append(b)
+                if kept < cap:
+                    chunks.append(b[:cap - kept])
+                    kept += len(chunks[-1])
+                if kept >= cap and len(b) > 0 and (kept >= cap):
+                    overflow = overflow or (kept >= cap and (len(b"".join(chunks)) < kept + len(b) - (cap - kept)))
         except OSError:
             pass
         finally:
             os.close(fd)
-        sink.append(b"".join(chunks))
+        data = b"".join(chunks)
+        sink.append(data)
+        sink.append(b"1" if overflow or len(data) >= cap else b"0")
     t = threading.Thread(target=go, daemon=True)
     t.start()
     return t
@@ -266,6 +314,7 @@ class Sandbox:
         self.source_dir = src
         self.entry, self.func, self.limits = entry, func, limits
         self.isolation: Isolation = isolation or detect_isolation()
+        self._owns_work_root = work_root is None
         self.work_root = Path(work_root).resolve() if work_root else Path(tempfile.mkdtemp(prefix="edgecheck-"))
         self.work_root.mkdir(parents=True, exist_ok=True)
         # Staged once. Every run copies from here, never from the source, so a run that
@@ -274,6 +323,28 @@ class Sandbox:
         shutil.copytree(src, self.strategy_dir, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         self.records: list[RunRecord] = []
+        # The staged copy is the customer's source, sitting in a world-readable temp dir for
+        # as long as the host lives unless someone removes it; a long-lived auditor would
+        # also fill the disk one stage at a time. Removed on close(), on leaving a `with`
+        # block, and by the finalizer if neither happened.
+        self._finalizer = weakref.finalize(self, Sandbox._cleanup, self.strategy_dir,
+                                           self.work_root if self._owns_work_root else None)
+
+    def close(self) -> None:
+        """Remove the staged copy, and the work root if this sandbox created it."""
+        self._finalizer()
+
+    def __enter__(self) -> "Sandbox":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    @staticmethod
+    def _cleanup(stage: Path, owned_root: Path | None) -> None:
+        for d in (stage, owned_root):
+            if d is not None and d.exists():
+                Sandbox._remove_tree(d)
 
     @classmethod
     def from_file(cls, path: Path | str, **kw: Any) -> "Sandbox":
@@ -312,7 +383,10 @@ class Sandbox:
         try:
             return self._run(run, tape)
         finally:
-            shutil.rmtree(run, ignore_errors=True)
+            try:
+                self._remove_tree(run)
+            except Exception:  # noqa: BLE001 -- teardown must never take the verdict with it
+                pass
 
     def _run(self, run: Path, tape: Sequence[Any]) -> list[int]:
         shutil.copytree(self.strategy_dir, run / "strategy",
@@ -331,12 +405,14 @@ class Sandbox:
         if self.isolation == "namespace":
             visible = self._bound_roots()
             cmd = [shutil.which("unshare") or "unshare", "--user", "--map-root-user", "--mount",
-                   "--net", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
+                   "--net", "--uts", "--ipc", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
                    sys.executable, str(run), self.entry, self.func,
-                   str(out_w), str(viol_w), self._shelf(), *visible]
+                   str(out_w), str(viol_w), self._shelf(),
+                   str(max(1, self.limits.run_dir_bytes // (1024 ** 2))),
+                   str(self.limits.run_dir_entries), str(self.limits.run_dir_depth), *visible]
         else:
             cmd = [sys.executable, "-s", "-B", str(run / "_child.py"), str(run), self.entry, self.func,
-                   str(out_w), str(viol_w)]
+                   str(out_w), str(viol_w), str(self.limits.run_dir_entries), str(self.limits.run_dir_depth)]
 
         t0 = time.monotonic()
         cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -348,7 +424,9 @@ class Sandbox:
         outs: list[bytes] = []
         viols: list[bytes] = []
         errs: list[bytes] = []
-        drains = [_drain(out_r, outs), _drain(viol_r, viols), _drain(err_r, errs)]
+        drains = [_drain(out_r, outs, self.limits.result_bytes),
+                  _drain(viol_r, viols, self.limits.violation_bytes),
+                  _drain(err_r, errs, 64 * 1024)]
 
         # Wait on the PROCESS, not on the pipes: a helper the strategy started could hold a
         # pipe open long after the strategy returned. Then kill the whole group regardless,
@@ -364,9 +442,15 @@ class Sandbox:
         cpu1 = resource.getrusage(resource.RUSAGE_CHILDREN)
         cpu_used = (cpu1.ru_utime - cpu0.ru_utime) + (cpu1.ru_stime - cpu0.ru_stime)
         rec = self._record(run, t0, cpu_used, proc.returncode if proc.returncode is not None else -9,
-                           visible, before, viols[0] if viols else b"")
+                           visible, before, viols[0] if viols else b"",
+                           truncated=(len(viols) > 1 and viols[1] == b"1"))
         if timed_out:
             raise Timeout(f"strategy exceeded {self.limits.wall_s:.0f}s wall clock")
+        if any(f.startswith("<run directory exceeded") for f in rec.files_written):
+            raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
+                                   f"or depth {self.limits.run_dir_depth}")
+        if len(outs) > 1 and outs[1] == b"1":
+            raise BadOutput(f"result larger than {self.limits.result_bytes} bytes")
 
         network = [v for v in rec.violations if v.startswith("network:")]
         spawns = [v for v in rec.violations if v.startswith("spawn:")]
@@ -388,8 +472,8 @@ class Sandbox:
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("not an object")
-        except ValueError as e:
-            raise StrategyError(f"malformed result from the strategy process: {e}") from None
+        except (ValueError, RecursionError) as e:     # a deeply nested array recurses in the decoder
+            raise StrategyError(f"malformed result from the strategy process: {type(e).__name__}") from None
 
         if not payload.get("ok"):
             if payload.get("reason") == "cpu_limit":
@@ -406,6 +490,15 @@ class Sandbox:
                 raise ResourceExceeded(f"{etype}: {emsg}")
             raise StrategyError(f"{etype}: {emsg}")
 
+        if self.isolation == "namespace":
+            hint = payload.get("files_written")
+            over = bool(payload.get("run_dir_over_limit"))
+            if isinstance(hint, list):
+                self.records[-1] = dataclasses.replace(
+                    rec, files_written=tuple(str(f)[:200] for f in hint[:2000] if isinstance(f, str)))
+            if over:
+                raise ResourceExceeded(f"run directory exceeded {self.limits.run_dir_entries} entries "
+                                       f"or depth {self.limits.run_dir_depth}")
         sig = payload.get("signals")
         if not isinstance(sig, list) or len(sig) != len(tape) or \
                 any(type(s) is not int or s not in (-1, 0, 1) for s in sig):
@@ -416,20 +509,100 @@ class Sandbox:
 
     # -- helpers ------------------------------------------------------------------------------
 
+    def _snapshot(self, run: Path) -> set[str]:
+        """Every regular file under the run directory, walked with an explicit stack and a
+        ceiling on depth and count. Path.rglob and shutil.rmtree both recurse once per level
+        on this interpreter; a tree deeper than the recursion limit killed the auditor."""
+        out: set[str] = set()
+        stack = [(run, 0)]
+        seen = 0
+        while stack:
+            d, depth = stack.pop()
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        seen += 1
+                        if seen > self.limits.run_dir_entries or depth > self.limits.run_dir_depth:
+                            out.add("<run directory exceeded the entry or depth limit>")
+                            return out
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append((Path(e.path), depth + 1))
+                            elif e.is_file(follow_symlinks=False):
+                                out.add(str(Path(e.path).relative_to(run)))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return out
+
     @staticmethod
-    def _snapshot(run: Path) -> set[str]:
-        return {str(p.relative_to(run)) for p in run.rglob("*") if p.is_file()}
+    def _remove_tree(root: Path) -> None:
+        """Remove the run directory however deep it is, with two descriptors and no path.
+
+        A tree built one component at a time with chdir+mkdir is deeper than PATH_MAX long
+        before it is deeper than the recursion limit, so a path-based walk gets
+        ENAMETOOLONG and leaves it standing; and a descriptor-per-level walk runs out of
+        descriptors at a thousand. So the tree is flattened instead: every directory one
+        level down has its files unlinked and its subdirectories RENAMED up to the root,
+        then is removed. Repeat until the root is empty. Each directory is lifted at most
+        once per level it started below, visited once, and needs one descriptor.
+        """
+        try:
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return
+        lifted = 0
+        try:
+            while True:
+                try:
+                    with os.scandir(root_fd) as it:
+                        entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+                except OSError:
+                    break
+                if not entries:
+                    break
+                for name, is_dir in entries:
+                    try:
+                        if not is_dir:
+                            os.unlink(name, dir_fd=root_fd)
+                            continue
+                        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                        try:
+                            with os.scandir(fd) as it:
+                                for c in it:
+                                    try:
+                                        if c.is_dir(follow_symlinks=False):
+                                            lifted += 1
+                                            os.rename(c.name, f".lift-{lifted}", src_dir_fd=fd, dst_dir_fd=root_fd)
+                                        else:
+                                            os.unlink(c.name, dir_fd=fd)
+                                    except OSError:
+                                        continue
+                        finally:
+                            os.close(fd)
+                        os.rmdir(name, dir_fd=root_fd)
+                    except OSError:
+                        continue
+        finally:
+            os.close(root_fd)
+        try:
+            os.rmdir(root)
+        except OSError:
+            pass
 
     def _record(self, run: Path, t0: float, cpu_used: float, rc: int, visible: tuple[str, ...],
-                before: set[str], viol_bytes: bytes) -> RunRecord:
+                before: set[str], viol_bytes: bytes, truncated: bool = False) -> RunRecord:
         written = sorted(self._snapshot(run) - before - {"_child.py"})
         violations: list[str] = []
-        for line in viol_bytes.decode("utf-8", "replace").splitlines():
+        for line in viol_bytes.decode("utf-8", "replace").splitlines()[:1000]:
             try:
                 d = json.loads(line)
                 violations.append(f"{d['kind']}: {d['detail']}")
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, RecursionError):
                 violations.append("unparsed: " + line[:200])
+        if truncated or viol_bytes.count(b"\n") > 1000:
+            violations.append("... and more; the record was capped")
         rec = RunRecord(time.monotonic() - t0, cpu_used, rc, self.isolation, visible,
                         tuple(written), tuple(violations))
         self.records.append(rec)
@@ -471,11 +644,11 @@ class Precheck:
         if self.isolation == "plain":
             lines.append("  plain tier: files written outside the run directory survive between runs, "
                          "so state CAN carry; the namespace tier is what prevents it")
-        lines.append("same tape twice            -> " + ("identical output" if self.deterministic else
+        lines.append("same tape, 3 times         -> " + ("identical output" if self.deterministic else
                      "DIFFERENT output: the strategy is nondeterministic, so no divergence could be attributed to the data"))
-        lines.append("same varied tape twice     -> " + ("identical output" if self.deterministic_on_varied else
-                     "DIFFERENT output: deterministic on the real tape but not on a varied one -- the strategy "
-                     "is telling the two apart, and nothing it does under a probe can be trusted"))
+        lines.append("same varied tape, 3 times  -> " + ("identical output" if self.deterministic_on_varied else
+                     "DIFFERENT output while the real tape reproduced 3 times: either the strategy distinguishes "
+                     "real data from varied data, or it is intermittently nondeterministic; neither can be audited"))
         lines.append(f"bars from {self.first_boundary} on replaced -> " + ("different output" if self.input_dependent else
                      "IDENTICAL output: the output does not change when the bars we can vary change, so nothing can be proved about it"))
         if self.files_written:
@@ -503,14 +676,16 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
     strategy no probe can move.
     """
     varied = continuation(tape, GATE_BOUNDARY, seed=7)
-    a = sandbox(tape)
-    c1 = sandbox(varied)
-    b = sandbox(tape)          # the pairs are interleaved on purpose, to space them in time
-    c2 = sandbox(varied)
-    written = tuple(sorted({f for r in sandbox.records[-4:] for f in r.files_written}))
-    return Precheck(deterministic=(a == b), deterministic_on_varied=(c1 == c2), input_dependent=(a != c1),
-                    isolation=sandbox.isolation, visible=sandbox.records[-1].visible,
-                    files_written=written, first_boundary=GATE_BOUNDARY)
+    # Three of each, interleaved to space them in time. One pair per tape let a strategy that
+    # flips one bar with a small probability, inspecting nothing, pass as deterministic on
+    # the real tape and fail on the varied one -- and be accused of telling the two apart.
+    a = [sandbox(tape)]; c = [sandbox(varied)]
+    a.append(sandbox(tape)); c.append(sandbox(varied))
+    a.append(sandbox(tape)); c.append(sandbox(varied))
+    written = tuple(sorted({f for r in sandbox.records[-6:] for f in r.files_written}))
+    return Precheck(deterministic=(a[0] == a[1] == a[2]), deterministic_on_varied=(c[0] == c[1] == c[2]),
+                    input_dependent=(a[0] != c[0]), isolation=sandbox.isolation,
+                    visible=sandbox.records[-1].visible, files_written=written, first_boundary=GATE_BOUNDARY)
 
 
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:

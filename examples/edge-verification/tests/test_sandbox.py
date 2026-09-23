@@ -472,7 +472,7 @@ def test_precheck_names_a_strategy_that_is_deterministic_only_on_the_real_tape(t
     """)
     pc = precheck(Sandbox.from_file(p, work_root=tmp_path / "runs"), tape)
     assert pc.deterministic and not pc.deterministic_on_varied and not pc.provable
-    assert "telling the two apart" in pc.describe()
+    assert "distinguishes real data from varied data" in pc.describe()
 
 
 def test_the_interpreter_and_its_packages_are_there_but_read_only(tape, tmp_path):
@@ -489,3 +489,156 @@ def test_the_interpreter_and_its_packages_are_there_but_read_only(tape, tmp_path
     """)
     sb = Sandbox.from_file(p, work_root=tmp_path / "runs")
     assert sb(tape) == [1] * len(tape)
+
+
+def test_a_run_directory_deeper_than_the_recursion_limit_cannot_crash_the_auditor(tape, tmp_path):
+    """Two thousand levels of os.mkdir + os.chdir killed the parent with a RecursionError in
+    its own Path.rglob and shutil.rmtree, on a strategy that was PROVEN on its own."""
+    p = strategy_file(tmp_path, "deep", """
+        import os
+        def signals(bars):
+            for _ in range(2500):
+                os.mkdir("d"); os.chdir("d")
+            return [1 if b.close > b.open else -1 for b in bars]
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(run_dir_depth=64))
+    with pytest.raises(ResourceExceeded, match="depth"):
+        sb(tape)
+    # and the parent is still standing, and the tree is gone
+    assert not list((tmp_path / "runs").glob("run-*"))
+
+
+def test_a_flat_flood_of_files_is_capped_not_walked(tape, tmp_path):
+    p = strategy_file(tmp_path, "flood", """
+        import os
+        def signals(bars):
+            for i in range(3000):
+                open(f"f{i}", "w").close()
+            return [0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(run_dir_entries=500))
+    with pytest.raises(ResourceExceeded, match="entries"):
+        sb(tape)
+
+
+def test_an_oversized_result_is_refused_without_being_buffered_whole(tape, tmp_path):
+    p = strategy_file(tmp_path, "huge", """
+        def signals(bars):
+            return [0] * 3_000_000
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(result_bytes=1_000_000))
+    with pytest.raises(BadOutput, match="larger than"):
+        sb(tape)
+
+
+def test_a_violation_flood_is_capped_and_says_so(tape, tmp_path):
+    p = strategy_file(tmp_path, "vflood", """
+        import socket
+        def signals(bars):
+            for _ in range(20000):
+                try:
+                    socket.getaddrinfo("example.com", 80)
+                except OSError:
+                    pass
+            return [0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", limits=Limits(violation_bytes=20_000))
+    with pytest.raises(NetworkAttempt):
+        sb(tape)
+    assert sb.records[-1].violations[-1].startswith("... and more")
+    assert len(sb.records[-1].violations) <= 1001
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_many_files_cannot_fill_the_host_disk(tape, tmp_path):
+    """RLIMIT_FSIZE caps one file. Inside the namespace the run directory is a tmpfs of a
+    fixed size, so the strategy runs out of space and the host does not."""
+    p = strategy_file(tmp_path, "filler", """
+        def signals(bars):
+            written = 0
+            try:
+                for i in range(200):
+                    with open(f"blob{i}", "wb") as fh:
+                        fh.write(b"x" * (4 * 1024 * 1024))
+                    written += 1
+            except OSError:
+                pass
+            return [1 if written < 200 else -1] * len(bars)     # 1 = ran out of space
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs",
+                           limits=Limits(fsize_bytes=8 * 1024 ** 2, run_dir_bytes=32 * 1024 ** 2))
+    assert sb(tape) == [1] * len(tape)
+    assert not any(f.startswith("blob") for f in os.listdir(tmp_path / "runs")) 
+    host_bytes = sum(f.stat().st_size for f in (tmp_path / "runs").rglob("*") if f.is_file())
+    assert host_bytes < 8 * 1024 ** 2
+    assert any(f.startswith("blob") for f in sb.records[-1].files_written)
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_the_hostname_is_not_the_hosts(tape, tmp_path):
+    """Without --uts the child shared the host's UTS namespace, and an ordinary write to
+    /proc/sys/kernel/hostname from the unmapped user changed the host's name for good."""
+    import socket
+    before = socket.gethostname()
+    p = strategy_file(tmp_path, "hostname", """
+        import os
+        def signals(bars):
+            try:
+                with open("/proc/sys/kernel/hostname", "w") as fh:
+                    fh.write("edgecheck-pwned")
+                wrote = 1
+            except OSError:
+                wrote = 0
+            return [wrote] * len(bars)
+    """)
+    Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+    assert socket.gethostname() == before
+
+
+def test_a_deeply_nested_result_on_the_pipe_is_a_strategy_error_not_a_crash(tape, tmp_path):
+    """Out of the stated model (the child must find the result descriptor), but the fix is
+    one line and the invariant is that nothing the child does crashes the parent."""
+    p = strategy_file(tmp_path, "nested", """
+        import os, sys
+        def signals(bars):
+            os.write(int(sys.argv[4]), b"[" * 4000)
+            return [0] * len(bars)
+    """)
+    with pytest.raises(StrategyError, match="malformed"):
+        Sandbox.from_file(p, work_root=tmp_path / "runs")(tape)
+
+
+@pytest.mark.skipif(not NAMESPACED, reason="namespace isolation not available on this host")
+def test_host_sysctls_cannot_be_written(tape, tmp_path):
+    """A fresh /proc is a writable window onto host-wide sysctls. A fifth red team set
+    vm.overcommit_memory for the whole host from inside; /proc/sys is read-only now."""
+    before = open("/proc/sys/vm/overcommit_ratio").read().strip()
+    p = strategy_file(tmp_path, "sysctl", """
+        def signals(bars):
+            wrote = 0
+            for f, v in (("/proc/sys/vm/overcommit_ratio", "77"), ("/proc/sys/kernel/hostname", "x")):
+                try:
+                    open(f, "w").write(v); wrote += 1
+                except OSError:
+                    pass
+            return [wrote] * len(bars)
+    """)
+    assert Sandbox.from_file(p, work_root=tmp_path / "runs")(tape) == [0] * len(tape)
+    assert open("/proc/sys/vm/overcommit_ratio").read().strip() == before
+
+
+def test_close_removes_the_staged_source_and_an_owned_work_root(tape):
+    sb = Sandbox.from_file(FIX / "clean_lagged.py")          # default work root: created by the sandbox
+    stage, root = sb.strategy_dir, sb.work_root
+    sb(tape)
+    assert stage.exists() and root.exists()
+    sb.close()
+    assert not stage.exists() and not root.exists()
+
+
+def test_a_supplied_work_root_is_left_in_place_on_close(tape, tmp_path):
+    root = tmp_path / "runs"
+    with Sandbox.from_file(FIX / "clean_lagged.py", work_root=root) as sb:
+        sb(tape)
+        stage = sb.strategy_dir
+    assert root.exists() and not stage.exists()
