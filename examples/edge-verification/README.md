@@ -273,6 +273,44 @@ limit (a file-size or thread limit is now read from the exception's type and err
 `MemoryError` is reported as the limit's or the strategy's own, with its message, since the
 sandbox cannot tell which).
 
+The sixteenth found the eras' own holes. Binary segmentation missed an era in the middle — a tick
+that went to 0.05 and came back — and one stray cent print in a nickel era moved the cut to the
+print; the eras are now stretches of one label, each bar labelled with the coarsest grid of any
+long, significant run of bars on it (a stray bar or two allowed, significance judged against the
+grid the bars would otherwise have). An 11-for-10 history was fit to a tick of 1/5600, and a 1/32
+tick written to four places was taken for an adjusted 1/96: an adjusted or rounded tick must now
+be at least three of the tape's last places, plain ticks rounded to the tape's places are tried
+first, and the split ratios tried include stock dividends booked as splits and the larger reverse
+splits. The same round found the remaining sandbox misfilings: a network attempt under a record
+cap shorter than one line came back clean (a cut-off line is now read by its kind, and the cap
+must be at least 64 bytes); a strategy's own "can't start new thread" and its own EFBIG were
+reported as the limits (they are now reported as the limit or the strategy's own, and a thread
+that cannot start is named as the process limit or the memory limit, which refuses threads as
+often); numpy's `MemoryError` subclass was filed as the strategy's own error (it is now known by
+what it is, not its name); and a kill at the hard CPU limit that wait4 read 0.23s short of it
+under load (a SIGKILL within half a second of the hard limit is now worded as the kernel's kill or
+the strategy's own). A high set within the largest wick, and past it once its close was set down
+on its level's tick, went unnamed under "the tape's own scale" (wicks are now judged from the body
+as built), and signed volumes are refused by name. A proof line on a tape where no bar traded
+named a floor size nothing used, and an honest 32-worker thread pool could not start under the
+default 2 GiB address-space limit, glibc reserving a 64 MiB malloc arena per thread (the child now
+runs with `MALLOC_ARENA_MAX=2`).
+
+Measured directly — two-sample tests of the rebuilt tail against the real one, over many
+boundaries and seeds — the same round found the tail's own seams. Donor runs started anywhere on
+the tape kept their own clock and level: on a 09:30–15:55 session tape more than half the rebuilt
+tail's bars fell at times of day the tape never prints; on a tape whose volume rose twentyfold,
+or whose volatility woke up partway, the tail took the whole tape's level, with a jump at every
+join; and under a caller's sigma the moves, drawn as normals, lost their clustering and their
+coupling with volume. Runs now start near the bar being rebuilt, from the tape after the probed
+bar, and on a tape that keeps a calendar at the same time of day; a rebuilt timestamp that
+crosses a day, or lands off the calendar, moves to the next time and day of the week the tape
+prints at; and under a caller's sigma each bar keeps its donor's move, scaled to that width. The
+share of tail bars off the session went from 0.58 to 0, the volume seam and the move/volume
+coupling tells from nearly every rebuild to almost none. The cost is stated in the note: a tail
+that keeps the tape's level where it stands varies that level less, so a read of the level of
+volume or volatility further ahead, or of a later bar's exact date, can go unseen.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot

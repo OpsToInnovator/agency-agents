@@ -2141,3 +2141,158 @@ def test_round_fifteen_sentences_say_what_happened():
                                       for f in ("open", "high", "low", "close")}) for b in bars(120, seed=3)]
     huge = [dataclasses.replace(b, high=max(b.high, b.open, b.close), low=min(b.low, b.open, b.close)) for b in huge]
     check_causality(strat("clean_lagged").signals, huge, probes="every_bar", seed=1)
+
+
+# -- round sixteen --------------------------------------------------------------------------
+
+def test_eras_are_found_in_the_middle_past_a_stray_print_and_on_rounded_ticks():
+    """A tick that went to 0.05 and back got no eras; one stray cent print in a nickel era moved its
+    cut to the print; an 11-for-10 history was fit to a tick of 1/5600; and a 1/32 tick written to four
+    places was taken for an adjusted 1/96. Each rebuilt prices the tape never prints then."""
+    from edgecheck.causality import _sizes
+    base = bars(300, seed=5, price=20.0, vol=0.004, gap_prob=0.3, late_prob=0.1)
+    t150, t225 = base[150].ts, base[225].ts
+
+    def build(src, w):
+        out = []
+        for b in src:
+            o, c = w(b.open, b.ts), w(b.close, b.ts)
+            out.append(dataclasses.replace(b, open=o, close=c, high=max(w(b.high, b.ts), o, c),
+                                           low=min(w(b.low, b.ts), o, c), volume=float(round(b.volume))))
+        return out
+
+    def on(x, st):
+        return abs(x / st - round(x / st)) < 1e-6
+
+    def nick(x):
+        return round(round(x / 0.05) * 0.05, 2)
+    twice = build(base, lambda x, ts: nick(x) if t150 <= ts < t225 else round(x, 2))
+    assert _sizes(twice).eras.starts == (150, 225)
+    bad = [x for b in _rebuilt_bars(twice, (60, 160, 200, 240)) for x in (b.open, b.high, b.low, b.close)
+           if not (on(x, 0.05) if t150 <= b.ts < t225 else on(x, 0.01))]
+    assert not bad, bad[:5]
+
+    stray = build(base, lambda x, ts: nick(x) if ts < t150 else round(x, 2))
+    b = stray[40]
+    stray[40] = dataclasses.replace(b, close=min(max(round(b.close + (0.02 if b.close < b.high else -0.02), 2), b.low), b.high))
+    assert _sizes(stray).eras.starts == (150,)
+
+    s11 = build(base, lambda x, ts: round(round(x * 1.1, 2) / 1.1, 4) if ts < t150 else round(x, 2))
+    bad = [x for b in _rebuilt_bars(s11, (60, 140, 200)) for x in (b.open, b.high, b.low, b.close)
+           if not (round(round(x * 1.1, 2) / 1.1, 4) == x if b.ts < t150 else on(x, 0.01))]
+    assert not bad, bad[:5]
+
+    t32 = build(bars(300, seed=9, price=110.0, vol=0.001, gap_prob=0.3, late_prob=0.1),
+                lambda x, ts: round(round(x * 32) / 32, 4))
+    sz = _sizes(t32)
+    assert (sz.price_grid.step, sz.price_grid.scale) == (0.03125, 1.0)
+    bad = [x for b in _rebuilt_bars(t32, (60, 200)) for x in (b.open, b.high, b.low, b.close)
+           if round(round(x * 32) / 32, 4) != x]
+    assert not bad, bad[:5]
+    r = check_causality(strat("clean_lagged").signals, t32, boundaries=[60], draws=4, seed=1)
+    assert "adjusted" not in r.grids
+
+
+def test_round_sixteen_sentences_say_what_happened():
+    """A high inside the largest wick before its close was set down on its level's tick, and past it
+    after, was left unnamed under 'the tape's own scale'; and a tape of signed volumes was probed
+    upward only and told no bar traded."""
+    from edgecheck.causality import _sizes
+
+    def fp(x):
+        return round(x, 4) if x < 1 else round(x, 2)
+    sub = []
+    for b in bars(200, seed=11, price=1.0, vol=0.01, gap_prob=0.3, late_prob=0.1):
+        o, c = fp(b.open), fp(b.close)
+        sub.append(dataclasses.replace(b, open=o, close=c, high=max(fp(b.high), o, c), low=min(fp(b.low), o, c),
+                                       volume=float(round(b.volume * 100))))
+    wick = _sizes(sub).wicks[-1]
+    seen = {}
+
+    def high_reader(bs):
+        out = [0] * len(bs)
+        if len(bs) > 44:
+            b = bs[44]
+            out[44] = 1 if b.high / max(b.open, b.close) - 1 > 0.019 else -1
+            if bs is not sub and len(bs) == len(sub):
+                seen.setdefault(out[44], b)
+        return out
+    for p in check_causality(high_reader, sub, boundaries=[44], draws=4, seed=1).proven:
+        b = seen[p.evidence.variant]
+        assert b.high / max(b.open, b.close) - 1 <= wick + 1e-12 or "past the largest" in p.evidence.detail
+
+    signed = [dataclasses.replace(b, volume=-b.volume) for b in bars(120, seed=5, gap_prob=0.2)]
+    with pytest.raises(ValueError, match="traded size"):
+        check_causality(strat("clean_lagged").signals, signed, boundaries=[60], draws=4, seed=1)
+
+
+def _session_tape(days=6, seed=4, per=78):
+    """5-minute bars 09:30-15:55 over six days, overnight gaps, a U-shaped day of volume."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, p, out = random.Random(seed), 50.0, []
+    day0 = 1_700_006_400.0 - (1_700_006_400.0 % 86400)
+    for d in range(days):
+        for j in range(per):
+            ts = day0 + d * 86400 + 9.5 * 3600 + j * 300
+            o = round(p * math.exp(r.gauss(0, 0.01)), 2) if j == 0 and d else p
+            c = round(o * math.exp(r.gauss(0, 0.0015)), 2)
+            h = round(max(o, c) * (1 + abs(r.gauss(0, 0.0008))), 2)
+            lo = round(min(o, c) * (1 - abs(r.gauss(0, 0.0008))), 2)
+            u = 1 + 3 * ((j - per / 2) / (per / 2)) ** 2
+            out.append(Bar(ts, o, max(h, o, c), min(lo, o, c), c, float(max(100, round(2000 * u * math.exp(r.gauss(0, 0.3)) / 100) * 100))))
+            p = c
+    return out
+
+
+def test_the_rebuilt_tail_keeps_the_tapes_clock_level_and_coupling():
+    """Donor runs started anywhere on the tape put more than half a rebuilt tail's bars outside a
+    09:30-15:55 session; gave a tail on a tape whose volume rose twentyfold the whole tape's level,
+    with a jump at every join; and under a caller's sigma drew moves that had lost their coupling
+    with volume. A sixteenth red team measured each on the rebuilt tail against the real one."""
+    import random
+    import statistics
+    from edgecheck.causality import _sizes, draw_plans
+    tape = _session_tape()
+    sz = _sizes(tape)
+    printed = {b.ts % 86400 for b in tape}
+    days = {int(b.ts // 86400 + 3) % 7 for b in tape}
+    off = 0
+    for k in (100, 249, 380):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            for b in _perturbed(tape, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)[k + 2:]:
+                off += (b.ts % 86400) not in printed or int(b.ts // 86400 + 3) % 7 not in days
+    assert off == 0, off
+
+    r, rows, ts = random.Random(1), [], 1.7e9
+    p = 100.0
+    from edgecheck.fixtures import Bar
+    for i in range(400):
+        o, c = p, p * math.exp(r.gauss(0, 0.002))
+        rows.append(Bar(ts, o, max(o, c) * 1.001, min(o, c) * 0.999, c, float(round(1000 * math.exp(3.0 * i / 400 + r.gauss(0, 0.3))))))
+        p, ts = c, ts + 60
+    sz = _sizes(rows)
+    gaps = []
+    for k in (150, 250):
+        real = statistics.fmean(math.log(b.volume) for b in rows[k + 2:k + 40])
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(rows, k, seed=1 ^ (k * 1_000_003 + i), sigma=None, plan=plan, sizes=sz)
+            gaps.append(abs(statistics.fmean(math.log(b.volume) for b in v[k + 2:k + 40]) - real))
+    assert statistics.fmean(gaps) < 0.35, gaps
+
+    coupled = _coupled_tape(400)
+    sz = _sizes(coupled)
+    sg = realized_sigma(coupled)
+    cors = []
+    for k in (100, 200, 300):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(coupled, k, seed=1 ^ (k * 1_000_003 + i), sigma=sg, plan=plan, sizes=sz)
+            cors.append(_mvcorr(v[k + 2:]))
+    assert statistics.fmean(cors) > 0.5 * _mvcorr(coupled), (statistics.fmean(cors), _mvcorr(coupled))
+
+
+def test_a_tape_with_no_trades_names_no_floor_in_its_proof_line():
+    """No bar traded, so no volume was pushed and no floor size used; the proof line said one was."""
+    idle = [dataclasses.replace(b, volume=0.0) for b in bars(120, seed=2)]
+    r = check_causality(strat("leak_same_bar_close").signals, idle, boundaries=[60], draws=4, seed=1)
+    assert r.proven and all("floor size" not in p.evidence.detail for p in r.proven), [p.evidence.detail for p in r.proven]

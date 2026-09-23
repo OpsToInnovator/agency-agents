@@ -98,7 +98,7 @@ Isolation = Literal["namespace", "plain"]
 CHILD = Path(__file__).with_name("_child.py")
 SYSTEM_ROOTS = ("/usr", "/etc", "/lib", "/lib64", "/bin", "/sbin")   # bound read-only into the new root
 MASKED = ("/etc/arbbot",)                                             # exists on the host; not in the new root
-HARD_TICK = 0.05    # how far under the hard CPU limit wait4's exact figure may read at the kernel's kill
+HARD_MARGIN = 0.5   # how far under the hard CPU limit wait4's figure has read at the kernel's kill, and more
 SHELVES = ("/dev/shm", "/mnt", "/media")   # the new root is a fresh tmpfs mounted here, then pivoted to
 
 
@@ -142,6 +142,10 @@ class Limits:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or not value > 0:
                 raise ValueError(f"Limits.{name} must be a positive whole number, not {value!r}")
+        # A record too short to hold the start of one line could not say a strategy dialled out.
+        if self.violation_bytes < 64:
+            raise ValueError(f"Limits.violation_bytes must be at least 64, enough to name a network or spawn "
+                             f"attempt, not {self.violation_bytes!r}")
         # Each rlimit is set in the child's preexec hook, where setrlimit refuses a value past the
         # auditor's own hard limit -- or, for open files, past the kernel's nr_open -- and the launch
         # died as a bare SubprocessError naming nothing (a thirteenth red team, at nofile=10**7 and
@@ -266,6 +270,10 @@ def _scrubbed_env() -> dict[str, str]:
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
+        # glibc reserves a 64 MiB malloc arena of address space per thread, so under the default
+        # 2 GiB address-space limit an honest 32-worker thread pool could not start (a sixteenth red
+        # team); two arenas are shared by all threads instead
+        "MALLOC_ARENA_MAX": "2",
         "LANG": "C.UTF-8",
         "HOME": "/tmp",
     }
@@ -596,7 +604,8 @@ class Sandbox:
             # soft one, for a strategy that ignored SIGXCPU) or a SIGXCPU at the soft limit is the
             # CPU limit; a twelfth red team's segfault at 1.95s of a 2s limit was reported as
             # having used the limit, because the parent's count includes the namespace setup.
-            tail = " | ".join((errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()[-3:])
+            tail = " | ".join([ln for ln in (errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()
+                               if not ln.startswith("unshare: ")][-3:])
             rc = proc.returncode
             sig = -rc if rc is not None and rc < 0 else None
             hard = self.limits.cpu_enforced + 3
@@ -607,23 +616,26 @@ class Sandbox:
                        else f"rc={rc}")
                 raise SandboxError(f"the sandbox stopped before the strategy was imported ({how}); these Limits "
                                    f"may be too tight for the launcher itself. The launcher's stderr ended: {tail}")
-            # The kernel kills on CPU it samples in scheduler ticks, which can run a few milliseconds
-            # ahead of the exact figure wait4 returns: under load a fifteenth red team's kill at the
-            # hard limit read 4.997s of 5 and was filed as the strategy's own crash. And SIGXCPU at the
-            # soft limit goes unanswered when the strategy ignores it or holds the interpreter in one
-            # long call, where the handler cannot run -- not only when it ignores it.
-            near = hard - HARD_TICK
+            # The kernel kills on CPU it samples in scheduler ticks, and the exact figure wait4 returns
+            # can read well short of it: under load a fifteenth red team's kill read 4.997s of a 5s hard
+            # limit, a sixteenth's 3.77s of 4. So a SIGKILL near the hard limit is worded as what it may
+            # be -- the kernel's kill, or one the strategy sent itself -- not inferred from the figure.
+            # SIGXCPU at the soft limit goes unanswered when the strategy ignores it or holds the
+            # interpreter in one long call, where the handler cannot run.
+            near = hard - HARD_MARGIN
             if sig == signal.SIGKILL and cpu_used >= near:
-                raise ResourceExceeded(f"killed at the hard CPU limit, {hard}s, the SIGXCPU of "
-                                       f"{self.limits.cpu_words()} having gone unanswered ({cpu_used:.3f}s used)")
+                raise ResourceExceeded(f"killed by SIGKILL at {cpu_used:.3f}s of CPU as wait4 counts it, the "
+                                       f"SIGXCPU of {self.limits.cpu_words()} unanswered: the kernel's kill at "
+                                       f"the hard limit of {hard}s by its own clock, or a SIGKILL the strategy "
+                                       f"sent itself -- the sandbox cannot tell which")
             if self.isolation == "namespace" and rc == 1 and cpu_used >= near:
                 # `unshare --fork` reports a SIGKILL as status 1, the status a strategy exiting with
                 # 1 also gets: a thirteenth red team's did so at 4.93s of its own CPU, which with the
                 # setup read past the 5s hard limit, and was told it had been killed there.
                 raise ResourceExceeded(f"ran past {self.limits.cpu_words()}, its SIGXCPU unanswered, and ended with "
-                                       f"no output at {cpu_used:.1f}s of CPU as the process tree counts it: "
-                                       f"killed at the hard limit of {hard}s, or exited with status 1 there -- "
-                                       f"this tier reports both the same way")
+                                       f"no output at {cpu_used:.3f}s of CPU as wait4 counts it: the kernel's "
+                                       f"kill at the hard limit of {hard}s by its own clock, or an exit with "
+                                       f"status 1 -- this tier reports both the same way")
             if sig == signal.SIGXCPU and cpu_used >= self.limits.cpu_enforced:
                 raise ResourceExceeded(f"hit {self.limits.cpu_words()} ({cpu_used:.1f}s used)")
             how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
@@ -662,15 +674,24 @@ class Sandbox:
             # strategy's: a fifteenth red team's ValueError mentioning 'File too large' was reported
             # as the file-size limit. A MemoryError is the limit's or the strategy's own -- the
             # sandbox cannot tell which -- and the report says so, with the strategy's message.
-            if etype == "MemoryError":
-                raise ResourceExceeded(f"MemoryError under a memory limit of {self.limits.memory_bytes} bytes: "
+            # Every one of these the strategy can raise itself, and a sixteenth red team's did -- a
+            # thread pool's own "can't start new thread", an OSError it gave EFBIG -- so each is worded
+            # as the limit or the strategy's own. A MemoryError is known by what it is, not its name:
+            # numpy's _ArrayMemoryError under the limit was filed as the strategy's own error. A
+            # thread that cannot start is refused by the memory limit as often as the process limit.
+            if err.get("memory") is True or etype == "MemoryError":
+                raise ResourceExceeded(f"{etype} under a memory limit of {self.limits.memory_bytes} bytes: "
                                        f"the limit, or a MemoryError the strategy raised itself -- the sandbox "
                                        f"cannot tell which. Its message: {emsg}")
             if err.get("errno") == errno.EFBIG:
-                raise ResourceExceeded(f"{etype}: {emsg} (errno EFBIG, under a file-size limit of "
-                                       f"{self.limits.fsize_bytes} bytes)")
+                raise ResourceExceeded(f"{etype}: {emsg} -- errno EFBIG, under a file-size limit of "
+                                       f"{self.limits.fsize_bytes} bytes: the limit, or an error the strategy "
+                                       f"raised itself -- the sandbox cannot tell which")
             if etype == "RuntimeError" and emsg.strip("'\"").startswith("can't start new thread"):
-                raise ResourceExceeded(f"{etype}: {emsg} (under a limit of {self.limits.nproc} processes)")
+                raise ResourceExceeded(f"{etype}: {emsg} -- the limit of {self.limits.nproc} processes, the "
+                                       f"memory limit of {self.limits.memory_bytes} bytes (each thread reserves "
+                                       f"address space for its stack), or an error the strategy raised itself "
+                                       f"-- the sandbox cannot tell which")
             raise StrategyError(f"{etype}: {emsg}")
 
         if self.isolation == "namespace":
@@ -783,7 +804,11 @@ class Sandbox:
                 d = json.loads(line)
                 violations.append(f"{d['kind']}: {d['detail']}")
             except (ValueError, KeyError, TypeError, RecursionError):
-                violations.append("unparsed: " + line[:200])
+                # a line the cap cut off still says what it was: a network attempt under a record cap
+                # shorter than one line came back clean (a sixteenth red team)
+                kind = next((k for k in ("network", "spawn") if line.startswith('{"kind": "' + k + '"')), None)
+                violations.append(f"{kind}: (the record of it was cut off by the violation cap) {line[:200]}"
+                                  if kind else "unparsed: " + line[:200])
         if truncated or viol_bytes.count(b"\n") > 1000:
             violations.append("... and more; the record was capped")
         rec = RunRecord(time.monotonic() - t0, cpu_used, rc, self.isolation, visible,
