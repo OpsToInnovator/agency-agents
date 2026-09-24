@@ -909,9 +909,11 @@ def test_every_claimed_push_is_delivered_on_the_fixture_tapes(gap_prob):
     down or not gap, and two draws cannot hold three states, so one is repaired at nearly
     every bar. Since round twelve an ungapped next open is a tie at a bar whose real next bar
     gapped, and gets a draw of its own there -- about one repair at three bars in ten on the
-    gappy tape, which is what moved its four-draw share from 7% to 12%."""
+    gappy tape, which is what moved its four-draw share from 7% to 12%. Since round twenty-one the
+    next open is owed past the bar's own high and low as well, which the planned draws reach only
+    where a gap happens to clear a wick: that moved it to 17% (37% at two draws, 11% at eight)."""
     tape = bars(200, gap_prob=gap_prob, late_prob=0.1)
-    for draws, share in ((2, 0.35), (4, 0.15), (8, 0.1)):
+    for draws, share in ((2, 0.40), (4, 0.20), (8, 0.13)):
         r = check_causality(strat("clean_lagged").signals, tape, probes="every_bar", draws=draws, seed=3)
         assert not r.leaks and r.undelivered == (), (draws, r.undelivered)
         assert r.repairs < share * r.probes_run, (draws, r.repairs, r.probes_run)
@@ -966,8 +968,8 @@ def test_a_zero_volume_push_comes_from_the_planned_draws(tape):
     with_zero = check_causality(strat("clean_lagged").signals, zt, probes="every_bar", seed=2)
     assert with_zero.undelivered == ()
     # the same ceiling the gappy fixture tape is held to at four draws; the owed set grew in rounds
-    # ten to twelve, and what this test guards is that zero comes from a planned draw (above)
-    assert with_zero.repairs < 0.15 * with_zero.probes_run
+    # ten to twelve and twenty-one, and what this test guards is that zero comes from a planned draw
+    assert with_zero.repairs < 0.20 * with_zero.probes_run
 
 
 def test_the_one_draw_note_mentions_its_repairs_and_runs_are_named_as_runs(tape):

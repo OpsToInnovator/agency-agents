@@ -399,7 +399,7 @@ above this one's high" walked nine audits in twenty-four, every bar probed. It i
 a gap the tape has made can carry the open past it from a bar with no wick on that side (or a wick
 shorter than the gap), and built so: the close toward it, no wick where the tape prints bars with
 none, the gap sized from the close. The note says so, and repairs on a gappy tape went from 12% of
-runs to 16%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
+runs to 16–17%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
 down still (an epsilon in the rounding), and is now rounded up exactly; a sigma just past 0.5 was
 printed as 0.5 and is printed as given; a level grid fitted to one bad print was named "the tape's
 tick, 2 of its price", and is now "the tick, 1 of its price", the tape's own; a Decimal sigma, a
@@ -414,7 +414,7 @@ float guard is a chance of fit, not a flat hundredth of a step: it had dropped t
 5.5e11 and the lot of one on volumes of 2^46.
 
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
-four draws (the every-bar default), and about 16% on a gappy one, where an ungapped next open
+four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
