@@ -489,7 +489,16 @@ tape's cents, which print half-cents only at a rate: a short stretch now takes i
 only where most of its bars sit on it, and an era keeps a tick its price level prints at a rate. The
 sigma check also named the top prices of a cent tape, even by chance, a tick of 0.02: it now looks at
 the prices its era printed near the close, and where most sit off the level grid it takes the
-tape's.
+tape's. Those rules broke round fourteen's banded tapes once merged: a short stretch was now kept
+as an era wherever its bars were off its neighbours' grid, and a price band is off it too. Sixteen
+sub-dollar bars of a fast drop, kept as an era of four places, carried that tick up to $1.06, where
+the band prints cents. Three bars of a spread table's tape crossing 20 on its 0.05 split an era
+under 20 in two, and the era before them was rebuilt above 20 on 0.02. An era's finer tick is now
+kept only near a price where the era printed it. And a short stretch breaking one era is smoothed
+where most of its bars print as the rest of the tape prints their price levels. The stretch's own
+prints are left out of that reading, since read off them a price level explains any era as a band.
+The rule does not apply at the edge of an era, where cent bars joined to a nickel era put the era
+on cents.
 
 Its tie reviewer found round twenty-three's split of the ties unfinished, and one relation class
 silently left out. A tie on a previous-bar level was still one field for all four levels, so a draw

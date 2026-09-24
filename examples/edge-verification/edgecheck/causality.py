@@ -1324,7 +1324,7 @@ def _covers(fine: Grid, coarse: Grid) -> bool:
     return round(q) >= 1 and abs(q - round(q)) < 1e-6 and abs(r - round(r)) < 1e-6
 
 
-def _joined(era: Grid | None, whole: Grid | None) -> Grid | None:
+def _joined(era: Grid | None, whole: Grid | None, near: Callable[[], bool] | None = None) -> Grid | None:
     """The grid a price is set on where its era and its price level each have one: the coarser,
     where one's points are all the other's; where neither's are, the points on both. Either alone
     let a price through that the other forbids: an era's tick carried to a price level it never
@@ -1338,10 +1338,13 @@ def _joined(era: Grid | None, whole: Grid | None) -> Grid | None:
         return era
     if _covers(whole, era):
         return era
-    if whole.fine is not None and _covers(whole.fine, era):
+    if whole.fine is not None and _covers(whole.fine, era) and (near is None or near()):
         # the price level prints the era's finer tick at a rate, where it was counted by prints: the era
         # printed that tick throughout, and joined to the level's coarser grid a 25-bar half-cent era
-        # was rebuilt on cents at the level's rate (a twenty-fourth red team)
+        # was rebuilt on cents at the level's rate (a twenty-fourth red team). Only where the era
+        # printed that tick near the price (``near``): sixteen sub-dollar bars of four places, kept as
+        # an era, carried their tick to $1.06, where the era and the tape printed only cents (the
+        # round-fourteen test of banded ticks)
         return era
     if _covers(era, whole):
         return whole
@@ -1365,7 +1368,19 @@ class Joint(NamedTuple):
     def at(self, x: float, snap: bool = False) -> Grid | None:
         a = self.era.at(x, snap) if hasattr(self.era, "at") else self.era
         b = self.whole.at(x, snap) if hasattr(self.whole, "at") else self.whole
-        return _joined(a, b)
+        return _joined(a, b, lambda: self._finer_near(x))
+
+    def _finer_near(self, x: float) -> bool:
+        """Whether the era printed, within 5% of ``x``, a price off the grid of its own price level:
+        each price against its own, as a three-bar era across a spread table's 20 printed 20.05,
+        off the 0.02 under it and on the 0.05 of its own band. An era of one grid (a split's
+        adjustment) names no prices, and keeps its tick everywhere."""
+        prices = getattr(self.era, "prices", None)
+        if prices is None:
+            return True
+        lo, hi = bisect.bisect_left(prices, x / 1.05), bisect.bisect_right(prices, x * 1.05)
+        level = self.whole.at if hasattr(self.whole, "at") else lambda p: self.whole
+        return any((g := level(p)) is not None and not _on_grid(g, p) for p in prices[lo:hi])
 
 
 class Eras(NamedTuple):
@@ -1390,7 +1405,7 @@ class Eras(NamedTuple):
         return bisect.bisect_right(self.times, ts)
 
 
-def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int]:
+def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20, by_level: bool = False) -> list[int]:
     """The bars at which the grid the tape prints on changes in time. Every bar is labelled with
     the coarsest grid of any long run of bars on it -- a run of at least ``least`` bars whose prices
     all sit on that grid, a stray bar or two off it allowed, and significant: its distinct prices all
@@ -1451,6 +1466,9 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
     # most of its bars sit on that grid. Where they do not, it is a real era the runs around it ate into
     # across its chance bars: a 25-bar half-cent era shrank to 18 and was taken for strays (a
     # twenty-fourth red team).
+    def most(a: int, b: int, fits: Callable[[float], bool]) -> bool:
+        return 2 * sum(1 for t in range(a, b) if all(fits(v) for v in per_bar[t]
+                                                     if v > 0 and math.isfinite(v))) > b - a
     segs: list[list] = []
     for t in range(n):
         if segs and segs[-1][0] == label[t]:
@@ -1461,8 +1479,16 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
         if b - a >= least or len(segs) == 1:
             continue
         near = [segs[x][0] for x in (j - 1, j + 1) if 0 <= x < len(segs) and segs[x][2] - segs[x][1] >= least]
-        if near and 2 * sum(1 for t in range(a, b) if all(on(v, min(near)) for v in per_bar[t]
-                                                          if v > 0 and math.isfinite(v))) > b - a:
+        if near and (most(a, b, lambda v: on(v, min(near))) or (
+                # ... or where it breaks one era, and most of its bars print as the rest of the tape
+                # prints their price levels: three bars of a spread table's tape crossing 20 on its
+                # 0.05 split an era under 20 on 0.02 in two, and the era before them was rebuilt above
+                # 20 on 0.02 (the round-fourteen test of banded ticks). Not by levels read off the
+                # stretch itself, which explain any era as a band of its own; not at the edge of an
+                # era, where cent bars joined to a nickel era put it on cents
+                by_level and len(near) == 2 and near[0] == near[1]
+                and (rest := _local_grids([v for t in range(n) if not a <= t < b for v in per_bar[t]])) is not None
+                and most(a, b, lambda v: (g := rest.at(v)) is not None and _on_grid(g, v)))):
             to = min(near)
             for t in range(a, b):
                 label[t] = to
@@ -2578,7 +2604,7 @@ def _price_grids(tape: Sequence[Any]) -> tuple:
     sc = _scaled(sp, pg or _grid(sp, 0.9))
     if sc is not None:
         pg, levels = sc, None
-    starts = _era_starts(per_bar)
+    starts = _era_starts(per_bar, by_level=levels is not None)
     own = []
     for a, b in zip([0] + starts, starts + [len(tape)]):
         ev = [x for ps in per_bar[a:b] for x in ps]
