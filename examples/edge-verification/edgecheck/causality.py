@@ -1257,7 +1257,11 @@ def _local_grids(values: Sequence[float], reach: float = 0.05, least: int = 12, 
         if (a, b) not in cache:
             window = u[a:b]
             printed = [v for v in window for _ in range(counts[v])]
-            coarse, every = _grid(printed, share, steps, prints=True), _grid(window, 1.0, steps)
+            every = _grid(window, 1.0, steps)
+            # by prints only where the prices off the grid share one of their own, which the rebuild
+            # prints them on at their rate; raw floats at the end of a cent tape share none, and by
+            # prints were set on cents the tape never printed there (a twenty-third round's own test)
+            coarse = _grid(printed, share, steps, prints=True) if every is not None else _grid(window, share, steps)
             if coarse is not None and every is not None and (every.step, every.off) != (coarse.step, coarse.off):
                 offs = [v for v in window if not _on_grid(coarse, v)]
                 if offs:       # _grid's tolerance and this one can part near 2**53 (a fifteenth red team's crash)
@@ -1488,7 +1492,10 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
         return None
     digits = ref.digits
     unit = 10.0 ** -digits
-    allowed = int(sum(counts.values()) * (1.0 - share) + 1e-9)
+    # prints off the rule only where they share a grid the rebuild can print them on at their rate:
+    # left out, a strategy keyed on their absence would tell the rebuild apart the other way
+    every = _grid(vals)
+    allowed = int(sum(counts.values()) * (1.0 - share) + 1e-9) if every is not None else 0
     best, best_eff, best_off = None, 0.0, ()
     for r in _RATIOS:
         for base in _STEPS:
@@ -1523,7 +1530,6 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
     if best is not None and common is not None and best_eff < common.step / common.scale * (1 - 1e-9):
         return None
     if best is not None and best_off:
-        every = _grid(vals)
         if every is not None:
             span = (best_off[0] - best_eff, best_off[-1] + best_eff)
             inside = sum(counts[v] for v in vals if span[0] <= v <= span[1])
