@@ -70,10 +70,12 @@ no CPU consumed is reported as exactly that).
 """
 from __future__ import annotations
 
+import ctypes
 import dataclasses
 import errno
 import json
 import math
+import numbers
 import os
 import resource
 import shutil
@@ -279,8 +281,30 @@ def _scrubbed_env() -> dict[str, str]:
     }
 
 
+def _plain_number(v: Any) -> int | float:
+    """A tape's field as JSON writes it: a numpy or Fraction number the audit's checks take as a real
+    number, where json.dumps failed with a bare TypeError after they had passed (a twenty-fourth red
+    team)."""
+    if isinstance(v, numbers.Integral):
+        return int(v)
+    if isinstance(v, numbers.Real):
+        return float(v)
+    raise TypeError(f"a bar field of {type(v).__name__} cannot be written for the strategy process")
+
+
+try:                                           # the kernel's parent-death signal, where there is one
+    _PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+except (AttributeError, OSError):
+    _PRCTL = None
+_PR_SET_PDEATHSIG = 1
+
+
 def _rlimit_installer(limits: Limits):
     def install() -> None:
+        # The run dies with the auditor, however the auditor dies: killed by a signal it cannot catch,
+        # its wait loop never reaches the kill (a twenty-fourth red team).
+        if _PRCTL is not None:
+            _PRCTL(_PR_SET_PDEATHSIG, signal.SIGKILL)
         # Soft limit first: SIGXCPU, which the child catches to record the cause. Hard
         # limit a few seconds on: SIGKILL, for a strategy that ignores the first.
         cpu = limits.cpu_enforced                     # the kernel counts whole seconds
@@ -507,7 +531,7 @@ class Sandbox:
         with (run / "tape.jsonl").open("w", encoding="utf-8") as fh:
             for b in tape:
                 fh.write(json.dumps({"ts": b.ts, "open": b.open, "high": b.high, "low": b.low,
-                                     "close": b.close, "volume": b.volume}) + "\n")
+                                     "close": b.close, "volume": b.volume}, default=_plain_number) + "\n")
         before = self._snapshot(run) - {"_child.py"}
 
         out_r, out_w = os.pipe()
@@ -558,27 +582,34 @@ class Sandbox:
         # children's totals, which billed a run for whatever another Sandbox reaped meanwhile: a
         # fourteenth red team's idle run was told it had used five seconds of a neighbour's CPU.
         timed_out, usage = False, None
-        while True:
-            try:
-                pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if pid:
-                proc.returncode = os.waitstatus_to_exitcode(status)
-                break
-            if time.monotonic() - t0 >= self.limits.wall_s:
-                timed_out = True
+        try:
+            while True:
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    _, status, usage = os.wait4(proc.pid, 0)
-                    proc.returncode = os.waitstatus_to_exitcode(status)
+                    pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
                 except ChildProcessError:
-                    pass
-                break
-            time.sleep(0.002)
+                    break
+                if pid:
+                    proc.returncode = os.waitstatus_to_exitcode(status)
+                    break
+                if time.monotonic() - t0 >= self.limits.wall_s:
+                    timed_out = True
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        _, status, usage = os.wait4(proc.pid, 0)
+                        proc.returncode = os.waitstatus_to_exitcode(status)
+                    except ChildProcessError:
+                        pass
+                    break
+                time.sleep(0.002)
+        except BaseException:
+            # interrupted while waiting -- a Ctrl-C, or anything else raised in this process: the run's
+            # process group dies before the interruption goes on. It left a strategy running under
+            # init in both tiers (a twenty-fourth red team).
+            self._kill(proc)
+            raise
         self._kill(proc)
         for d in drains:
             d.join(timeout=5)
@@ -952,6 +983,7 @@ def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, R
     from .causality import _check_arguments
     args, _ = _check_arguments(tape, **kw)
     kw = {**kw, **{k: v for k, v in args.items() if k in kw}}
+    tape = args["tape"]
     pc = precheck(sandbox, tape)
     if pc.provable:
         return pc, check_causality(sandbox, tape, **kw)

@@ -491,13 +491,32 @@ sigma check also named the top prices of a cent tape, even by chance, a tick of 
 the prices its era printed near the close, and where most sit off the level grid it takes the
 tape's.
 
+Its tie reviewer found round twenty-three's split of the ties unfinished, and one relation class
+silently left out. A tie on a previous-bar level was still one field for all four levels, so a draw
+with the low on the previous low was credited where the real low sat on the previous close, and a
+next open on the previous high where the real one sat on this bar's own open: each level now has a
+field of its own. And a high below a level, a low above one, or a range inside the previous bar that
+only a bar with no wick on that side could make was judged by tie-free reach, left out of what was
+owed, never pushed and never counted, so a plain read of it walked at bars that printed no tie at
+all. It is now owed wherever any bar the tape's sizes allow gets there, pushed by the bare bar where
+nothing else does, and counted undelivered where the real bar printed no such tie -- which is most
+bars of a tick tape where the open sits a tick from a level: on the session tape 36-37% of bars now
+come up short, where 4% did; on the tick-and-lot tape 31 of 200 and on the daily tape 19, where 3
+did. Its sandbox reviewer found the parent less sturdy than the note: Ctrl-C on the auditor left the
+strategy running under init in both tiers (the run's process group is now killed on the way out, and
+the child is given the kernel's parent-death signal for a kill the auditor cannot catch); a tape whose
+bars went to zero crashed with ZeroDivisionError after hundreds of runs; a deque tape failed at the
+first cut; a float32 tape failed writing the tape for the strategy process; and a rebuild carried
+across a 1:100 reverse split onto the new era's coarser tick printed bars of 0.0, where an honest
+strategy's log escaped the audit -- a positive price is now never set to zero or below.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are twelve to thirty a bar, and a fifth to nine in ten of its bars still come
-up short, by the tape (43–45% on the eighteenth and nineteenth red teams', 90–91% on the
+one-cent tick they are twelve to forty a bar, and a fifth to nearly all of its bars still come
+up short, by the tape (43–45% on the eighteenth and nineteenth red teams', 97% on the
 twenty-second's at 37 cents, where a cent is about the largest gap the tape makes and most wicks
 are a cent or none): at two cents a doji forces the high and the low onto the open too, and at 37
 cents a next open a cent away lands on a level or on the bar's own high or low, draws carrying ties

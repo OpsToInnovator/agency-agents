@@ -2953,7 +2953,7 @@ def test_a_tie_on_the_bars_own_close_or_open_is_kept_apart_from_one_on_a_previou
     bare = Bar(2.0, 10.1, 10.3, 10.0, 10.3, 6.0)          # its high on its own close
     sz = _sizes(bars(40))
     real, drawn = _tie_fields([prev, on_level], 1, sz), _tie_fields([prev, bare], 1, sz)
-    assert "high" in real and "high_close" not in real and "high_close" in drawn - real
+    assert "high@high" in real and "high_close" not in real and "high_close" in drawn - real
     tape = _intraday_sessions(days=16)
     for k, up, seed in ((185, True, 2), (181, True, 1), (83, True, 2), (6, False, 1), (65, False, 3), (175, False, 1)):
         st = _bare_reader(k, up)
@@ -3160,3 +3160,84 @@ def test_round_twenty_four_grids_rounded_adjusted_eras_and_the_tick_named():
 
     top = _printed(bars(300, seed=6, price=25.0, vol=0.004, gap_prob=0.3), lambda x, ts: round(x, 2))
     assert _check_sigma(top, _sizes(top), 0.0005) == 0.0005
+
+
+def _level_evader(k, rel, stand_down):
+    """Reads whether relation ``rel`` holds at bar k -- of bar k's own high, low or range, or of the next
+    open -- and stands down wherever ``stand_down(bars, k)`` says the draw carries one particular tie."""
+    from edgecheck.causality import _at_bar, _delivered, _sizes
+
+    def st(bs):
+        out = [0] * len(bs)
+        if k + 1 < len(bs):
+            mode = _at_bar(_sizes(bs[:k + 2]), k).step_mode
+            out[k] = int(rel in _delivered(bs, k, bs[k - 1], mode) and not stand_down(bs, k))
+        return out
+    return st
+
+
+def test_round_twenty_four_ties_by_level_and_relations_only_a_bare_bar_makes():
+    """A twenty-fourth red team: one tie field still held all four previous-bar levels, so a draw with the
+    low on the previous low was credited where the real low sat on the previous close, and a next open
+    on the previous high where the real one sat on this bar's own open; and a high below a level or a
+    range inside the previous one that only a bar with no wick that side could make was left out of what
+    was owed, never pushed and never counted, so a plain read of it walked at bars printing no tie."""
+    from edgecheck.causality import _sizes, _tie_fields
+    tape = _intraday_sessions(days=16)
+    assert "low@close" in _tie_fields(tape, 118, _sizes(tape)) and "low@low" not in _tie_fields(tape, 118, _sizes(tape))
+    for k, rel, stand_down, seed in (
+            (118, ("next_rel", "own_low", -1), lambda bs, k: bs[k].low == bs[k - 1].low, 3),
+            (19, ("next_rel", "own_high", 1), lambda bs, k: bs[k + 1].open == bs[k - 1].high, 1)):
+        st = _level_evader(k, rel, stand_down)
+        assert st(tape)[k] == 0
+        r = check_causality(st, tape, boundaries=[k], draws=4, seed=seed)
+        assert r.proven or k in r.undelivered, (k, seed, r.describe()[:160])
+    ticklot = []
+    for b in bars(200, seed=7, gap_prob=0.2):
+        o, c = round(b.open, 2), round(b.close, 2)
+        ticklot.append(dataclasses.replace(b, open=o, close=c, high=max(round(b.high, 2), o, c),
+                                          low=min(round(b.low, 2), o, c), volume=float(max(100, round(b.volume, -2)))))
+    inside = _level_evader(78, ("range", "inside"), lambda bs, k: False)
+    assert inside(ticklot)[78] == 0
+    r = check_causality(inside, ticklot, boundaries=[78], draws=4, seed=1)
+    assert r.proven, r.describe()[:160]
+
+
+def test_round_twenty_four_tapes_the_auditor_took_and_then_crashed_on():
+    """A twenty-fourth red team: a tape whose bars went to zero crashed the auditor with ZeroDivisionError
+    after hundreds of runs; a deque passed every check and failed at the first cut; and a rebuild carried
+    across a 1:100 reverse split onto the new era's coarser tick printed bars of 0.0, where an honest
+    strategy's log escaped the audit as a math domain error."""
+    import collections
+    import random
+    from edgecheck.fixtures import Bar
+
+    def lagged(bs):
+        return [0] + [1 if bs[i - 1].close >= bs[i - 1].open else -1 for i in range(1, len(bs))]
+    tape = bars(60, seed=3, gap_prob=0.3)
+    worthless = [b if i < 40 else dataclasses.replace(b, open=0.0, high=0.0, low=0.0, close=0.0)
+                 for i, b in enumerate(tape)]
+    check_causality(lagged, worthless, probes="every_bar", seed=1)
+    check_causality(lagged, collections.deque(bars(30)), probes="every_bar", seed=1)
+
+    rng, split, p = random.Random(5), [], 0.0042
+    for i in range(160):
+        if i == 80:
+            p *= 100
+        tick = 1e-4 if i < 80 else 1e-2
+
+        def q(x, tick=tick):
+            return round(round(x / tick) * tick, 10)
+        o = q(p)
+        c = q(o * math.exp(rng.gauss(0, 0.01)))
+        c = c if c > 0 else tick
+        hi, lo = q(max(o, c) * (1 + abs(rng.gauss(0, 0.004)))), max(tick, q(min(o, c) * (1 - abs(rng.gauss(0, 0.004)))))
+        split.append(Bar(1.7e9 + 60 * i, o, max(hi, o, c), min(lo, o, c), c, float(rng.randint(1, 50) * 100)))
+        p = c
+    zeros = []
+
+    def logs(bs):
+        zeros.extend(b for b in bs if min(b.open, b.high, b.low, b.close) <= 0)
+        return [0] + [1 if math.log(bs[i - 1].close) >= math.log(bs[i - 1].open) else -1 for i in range(1, len(bs))]
+    check_causality(logs, split, probes="every_bar", seed=1)
+    assert not zeros, zeros[:2]

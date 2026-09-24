@@ -1257,3 +1257,49 @@ def test_the_strategys_own_stderr_is_quoted_as_it_was(tape, tmp_path):
         with pytest.raises(StrategyError) as e:
             Sandbox.from_file(own, work_root=tmp_path / "n")(tape)
         assert "unshare: feed lock held" in str(e.value) or "left out as the launcher's" in str(e.value)
+
+
+def test_an_interrupted_audit_takes_its_strategy_down(tape, tmp_path, monkeypatch):
+    """A twenty-fourth red team: Ctrl-C on the auditor skipped the kill after the wait, and the strategy
+    ran on under init in both tiers. An interruption now kills the run's process group on its way out."""
+    import time
+    pidfile = tmp_path / "pid"
+    p = strategy_file(tmp_path, "sleeper", f"""
+        import os, time
+        def signals(bars):
+            with open({str(pidfile)!r}, "w") as fh:
+                fh.write(str(os.getpid()))
+            time.sleep(30)
+            return [0] * len(bars)
+    """)
+    sb = Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain", limits=Limits(cpu_s=5, wall_s=25))
+    real, t0 = os.wait4, time.monotonic()
+
+    def interrupted(pid, flags):
+        if pidfile.exists() or time.monotonic() - t0 > 15:
+            raise KeyboardInterrupt
+        return real(pid, flags)
+    monkeypatch.setattr(os, "wait4", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        sb(tape)
+    monkeypatch.setattr(os, "wait4", real)
+    pid = int(pidfile.read_text())
+    time.sleep(0.5)
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            alive = fh.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+    except FileNotFoundError:
+        alive = False
+    assert not alive
+
+
+def test_a_tape_of_numpy_numbers_reaches_the_strategy(tmp_path):
+    """A twenty-fourth red team: float32 prices passed every check and prove() then failed writing the
+    tape for the strategy process, a bare JSON TypeError."""
+    import dataclasses
+    np = pytest.importorskip("numpy")
+    tape = [dataclasses.replace(b, open=np.float32(b.open), high=np.float32(b.high), low=np.float32(b.low),
+                                close=np.float32(b.close)) for b in bars(30)]
+    sb = fixture_sandbox("clean_lagged", tmp_path, limits=Limits(cpu_s=5, wall_s=10))
+    pc, report = prove(sb, tape, boundaries=[10, 20])
+    assert pc.deterministic
