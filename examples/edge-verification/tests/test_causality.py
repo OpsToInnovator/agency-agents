@@ -3241,3 +3241,29 @@ def test_round_twenty_four_tapes_the_auditor_took_and_then_crashed_on():
         return [0] + [1 if math.log(bs[i - 1].close) >= math.log(bs[i - 1].open) else -1 for i in range(1, len(bs))]
     check_causality(logs, split, probes="every_bar", seed=1)
     assert not zeros, zeros[:2]
+
+
+# -- round twenty-five ----------------------------------------------------------------------
+
+def test_round_twenty_five_a_band_breaking_an_era_is_smoothed_and_a_real_era_kept():
+    """Round twenty-four kept a short stretch as an era wherever its bars were off its neighbours'
+    grid, and a price band is off it too: the round-fourteen test of banded ticks broke. Smoothed
+    where its price levels explain it, by levels read off the stretch itself an 18-bar half-cent
+    era in a cent tape was a band of its own; and at an era's edge, cent bars joined to a 20-bar
+    nickel era put the era on cents."""
+    import random
+    from edgecheck.causality import _sizes
+    base = bars(400, seed=4, price=20.0, vol=0.004, gap_prob=0.3)
+    cut0, cut1 = base[200].ts, base[218].ts
+    half = _printed(base, lambda x, ts: round(round(x / 0.005) * 0.005, 3) if cut0 <= ts < cut1 else round(x, 2))
+    eras = _sizes(half).eras
+    assert eras is not None and any(195 <= s <= 205 for s in eras.starts), eras
+
+    base = bars(400, seed=1, price=20.0, vol=0.004, gap_prob=0.3)
+    cut0, cut1 = base[300].ts, base[320].ts
+    nickel = _printed(base, lambda x, ts: round(round(x / 0.05) * 0.05, 2) if cut0 <= ts < cut1 else round(x, 2))
+    r = random.Random(1)
+    for i in [i for i in range(1, 400) if r.random() < 0.1]:        # a stray print one bar in ten
+        nickel[i] = dataclasses.replace(nickel[i], high=round(nickel[i].high + r.choice((1, 3, 7)) * 1e-6, 6))
+    eras = _sizes(nickel).eras
+    assert eras is not None and 300 in eras.starts and 320 in eras.starts, eras
