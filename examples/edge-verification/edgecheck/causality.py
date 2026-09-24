@@ -1592,9 +1592,14 @@ def _snap(x: float, grid: Grid | float | None, how: str) -> float:
     if how == "up":
         return _point(grid, _ceil_n(grid, x))
     if how == "down":
-        return _point(grid, _floor_n(grid, x))
-    n = round(_index(grid, x))
-    return min((_point(grid, m) for m in (n - 1, n, n + 1)), key=lambda p: (abs(p - x), p))
+        y = _point(grid, _floor_n(grid, x))
+    else:
+        n = round(_index(grid, x))
+        y = min((_point(grid, m) for m in (n - 1, n, n + 1)), key=lambda p: (abs(p - x), p))
+    # never a positive value set to zero or below: a rebuild carried across a 1:100 reverse split onto
+    # the new era's coarser tick printed bars of 0.0, and an honest strategy's log of them escaped the
+    # audit (a twenty-fourth red team)
+    return y if y > 0 or x <= 0 else _point(grid, _ceil_n(grid, x))
 
 
 def _point(grid: Grid, n: int) -> float:
@@ -1796,19 +1801,25 @@ def _extremes(o: float, sizes: Sizes, sg: float, refs: frozenset, bar: Any = Non
 # field holding two of them let a draw carrying the one the real bar did not print be credited because
 # the real bar printed the other -- a wickless bar where the real bar's high sat on the previous high
 # (a twenty-third red team).
-ALL_TIES = frozenset(("close", "doji", "high", "high_open", "high_close", "low", "low_open", "low_close",
-                      "volume", "next_open", "next_close", "next_edge"))
+PREV_LEVELS = ("open", "close", "high", "low")
+# ... and one per previous-bar level, not one for all four: a field holding the four let a draw with the
+# low on the previous low be credited where the real low sat on the previous close, and a next open
+# on the previous high where the real one sat on this bar's own open (a twenty-fourth red team)
+ALL_TIES = frozenset({f"{f}@{ref}" for f in ("close", "high", "low") for ref in PREV_LEVELS}
+                     | {"doji", "high_open", "high_close", "low_open", "low_close", "volume"}
+                     | {f"next@{ref}" for ref in ("own", *PREV_LEVELS)} | {"next_close", "next_edge"})
 
 
-def _bad_levels(o: float, levels: Sequence[float], avoid: frozenset) -> tuple[frozenset, frozenset, frozenset]:
-    """The prices the probed bar's close, high and low must each stay off: the previous bar's levels
-    where the real bar printed that field on none, and the bar's own open where it printed it not
+def _bad_levels(o: float, prev: Any, avoid: frozenset) -> tuple[frozenset, frozenset, frozenset]:
+    """The prices the probed bar's close, high and low must each stay off: each of the previous bar's
+    levels the real bar did not print that field on, and the bar's own open where it printed it not
     there."""
-    lv = frozenset(x for x in levels if x > 0)
-    own = frozenset((o,)) if o > 0 else frozenset()
-    none: frozenset = frozenset()
-    return tuple((lv if name in avoid else none) | (own if on_open in avoid else none)
-                 for name, on_open in (("close", "doji"), ("high", "high_open"), ("low", "low_open")))
+    def bad(name: str, on_open: str) -> frozenset:
+        out = {lv for ref in PREV_LEVELS if (lv := getattr(prev, ref)) > 0 and f"{name}@{ref}" in avoid}
+        if o > 0 and on_open in avoid:
+            out.add(o)
+        return frozenset(out)
+    return bad("close", "doji"), bad("high", "high_open"), bad("low", "low_open")
 
 
 def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
@@ -1825,12 +1836,11 @@ def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
     with a relation only where it carries no tie the real bar did not print, other than the one
     that relation sets."""
     bar, prev = bars[k], bars[k - 1]
-    levels = {prev.open, prev.close, prev.high, prev.low}
+    named = [(ref, getattr(prev, ref)) for ref in PREV_LEVELS]
     out = set()
     for name in ("close", "high", "low"):
         v = getattr(bar, name)
-        if v in levels:
-            out.add(name)
+        out |= {f"{name}@{ref}" for ref, lv in named if v == lv}
         if v == bar.open:
             out.add("doji" if name == "close" else name + "_open")
     # a high or low on the bar's own close is a tie as much as one on its open: a bar with no wick
@@ -1841,8 +1851,9 @@ def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
         out.add("volume")
     if k + 1 < len(bars) and (sizes.gaps_up or sizes.gaps_dn):
         nxt = bars[k + 1].open
-        if nxt in levels or nxt == bar.open:
-            out.add("next_open")
+        out |= {f"next@{ref}" for ref, lv in named if nxt == lv}
+        if nxt == bar.open:
+            out.add("next@own")
         if nxt == bar.close:
             out.add("next_close")
         if nxt in (bar.high, bar.low):
@@ -1853,12 +1864,13 @@ def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
 def _tie_of(rel: tuple, gapped: bool) -> frozenset | None:
     """The fields a relation sets level, or None for a strict relation."""
     kind = rel[0]
+    on_levels = lambda name: {f"{name}@{ref}" for ref in PREV_LEVELS}    # noqa: E731
     if kind == "move" and rel[1] == 0:
         # on the open, and so on any of the previous bar's levels the open itself is on: one fact
-        return frozenset(("doji", "close"))
+        return frozenset({"doji"} | on_levels("close"))
     if kind == "rel" and rel[3] == 0:
-        # on a level of the previous bar, or on the bar's own open -- both, where the open is one
-        return frozenset((rel[1], "doji" if rel[1] == "close" else rel[1] + "_open"))
+        # on one level: on every other level, and on the bar's own open, only where they are that price
+        return frozenset(on_levels(rel[1]) | {"doji" if rel[1] == "close" else rel[1] + "_open"})
     if rel == ("vol", 0) or (kind == "zero" and rel[1] is True):
         return frozenset(("volume",))          # a zero is a tie only after a bar that did not trade
     if kind == "next_gap" and rel[1] == 0:
@@ -1869,7 +1881,8 @@ def _tie_of(rel: tuple, gapped: bool) -> frozenset | None:
             side = "high_close" if rel[1] == "own_high" else "low_close"
             return frozenset(("next_edge", "next_close", side)) if gapped else frozenset((side,))
         # on a tape that never gaps the next open is the close: the close's tie
-        return frozenset(("next_open",)) if gapped else frozenset(("close", "doji"))
+        return (frozenset({f"next@{ref}" for ref in ("own", *PREV_LEVELS)}) if gapped
+                else frozenset(on_levels("close") | {"doji"}))
     return None
 
 
@@ -2094,7 +2107,10 @@ def _check_arguments(tape: Sequence[Any], *, boundaries: Sequence[int] | None = 
     if sigma is not None:
         sizes = sizes if sizes is not None else _sizes(tape)
         sigma = _check_sigma(tape, sizes, sigma)
-    return dict(boundaries=boundaries, draws=draws, sigma=sigma, probes=probes, seed=seed), sizes
+    # a list, whatever sequence it came as: a deque passed every check and failed at the first cut, tape[:k]
+    # (a twenty-fourth red team)
+    tape = tape if isinstance(tape, list) else list(tape)
+    return dict(boundaries=boundaries, draws=draws, sigma=sigma, probes=probes, seed=seed, tape=tape), sizes
 
 
 def _validate(tape: Sequence[Any]) -> None:
@@ -2831,7 +2847,7 @@ def _forced_bar(tape: Sequence[Any], boundary: int, rng: random.Random, plan: Pl
     levels = _levels(prev)
     refs = frozenset(x for x in (o, *levels) if x > 0)
     none: frozenset = frozenset()
-    bad_c, bad_h, bad_l = _bad_levels(o, levels, avoid)
+    bad_c, bad_h, bad_l = _bad_levels(o, prev, avoid)
     named = {"open": prev.open, "close": prev.close, "high": prev.high, "low": prev.low, "own": o}
     hcons = [(named[n], sd) for n, sd in plan.hi_vs if named[n] > 0] + \
         ([(prev.high, plan.high)] if plan.high and prev.high > 0 else [])
@@ -2927,7 +2943,7 @@ def _next_bar(plan: Plan, sizes: Sizes, rng: random.Random, closed: float | None
             # its own high or low
             edges = {"own_high", "own_low"}
             bad = frozenset(v for key, v in refs.items() if v > 0 and (
-                ("next_edge" if key in edges else "next_open") in avoid))
+                ("next_edge" if key in edges else f"next@{key}") in avoid))
             bad |= {closed} if "next_close" in avoid else frozenset()
 
         def gap_open(side: int, g: float, beyond: float) -> float | None:
@@ -3059,10 +3075,12 @@ def _perturbed(tape: Sequence[Any], boundary: int, seed: int, sigma: float | Non
         top, bot = max(c, o), min(c, o)
 
         def up_wick(x: float) -> bool:
-            return top_wick is not None and x / top - 1 > top_wick
+            # nothing hangs from a body end of zero: a tape of worthless bars crashed here (a
+            # twenty-fourth red team)
+            return top_wick is not None and top > 0 and x / top - 1 > top_wick
 
         def down_wick(x: float) -> bool:
-            return top_wick is not None and x > 0 and 1 - x / bot > top_wick
+            return top_wick is not None and x > 0 and bot > 0 and 1 - x / bot > top_wick
         # the wicks judged from the body as built: a close set down on its level's tick lowers the top
         # the high hangs from, and a sixteenth red team's high, within the largest wick before the
         # close moved, was past it after, under 'the tape's own scale'
@@ -3160,7 +3178,7 @@ def _reach(o: float, p: Any, sizes: Sizes, sg: float, avoid: frozenset = ALL_TIE
     pg = _bar_grid(sizes, o, bar)
     refs = frozenset(x for x in (o, *_levels(p)) if x > 0)
     none: frozenset = frozenset()
-    bad_c, bad_h, bad_l = _bad_levels(o, _levels(p), avoid)
+    bad_c, bad_h, bad_l = _bad_levels(o, p, avoid)
     up, dn = _extremes(o, sizes, sg, refs, bar)
     tw = sizes.wicks[-1] if sizes.wicks else 0.0
     tw_dn = min(tw, 0.99)
@@ -3323,6 +3341,12 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
     if not plans or o <= 0:
         return set()
     r = _reach(o, p, sizes, sg, avoid, b)
+    # Whether the high below a level, the low above one, or the range inside the previous one is owed
+    # is judged blind to ties, as passing a level is: where only a bar with no wick on a side -- a tie
+    # the real bar did not print -- gets there, it is owed all the same and counted where no draw could
+    # make it. Judged by tie-free reach, it was left out of what was owed and never counted, and a read
+    # of it walked at bars that printed no tie at all (a twenty-fourth red team).
+    rb = _reach(o, p, sizes, sg, frozenset(), b)
     ties = sizes.ties
     gapped = bool(sizes.gaps_up or sizes.gaps_dn)
     vol_up = p.volume > 0 or bool(sizes.volumes)
@@ -3344,12 +3368,12 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
         if p.high > 0:
             if pl.high > 0 and r["high_above"](p.high):
                 owed.add(("rel", "high", "high", 1))
-            if pl.high < 0 and r["high_below"](p.high):
+            if pl.high < 0 and rb["high_below"](p.high):
                 owed.add(("rel", "high", "high", -1))
         if p.low > 0:
             if pl.low < 0 and r["low_below"](p.low):
                 owed.add(("rel", "low", "low", -1))
-            if pl.low > 0 and r["low_above"](p.low):
+            if pl.low > 0 and rb["low_above"](p.low):
                 owed.add(("rel", "low", "low", 1))
         if has_next:
             if pl.next_gap and (sizes.gaps_up if pl.next_gap > 0 else sizes.gaps_dn):
@@ -3395,13 +3419,13 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
                 owed.add(("rel", "close", name, 0))                              # on it: a doji
             if r["high_above"](level):
                 owed.add(("rel", "high", name, 1))
-            if r["high_below"](level):
+            if rb["high_below"](level):
                 owed.add(("rel", "high", name, -1))
             if ("own" if level == o else "high") in ties and r["high_on"](level):
                 owed.add(("rel", "high", name, 0))
             if r["low_below"](level):
                 owed.add(("rel", "low", name, -1))
-            if r["low_above"](level):
+            if rb["low_above"](level):
                 owed.add(("rel", "low", name, 1))
             if ("own" if level == o else "low") in ties and r["low_on"](level):
                 owed.add(("rel", "low", name, 0))
@@ -3477,7 +3501,7 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
         # Inside the previous range: always within reach of a small move of the tape's own; on
         # a tape with no moves the close moves by the floor push exactly, and only where that
         # stays inside on one side or the other.
-        if r["inside"]:
+        if rb["inside"]:
             owed.add(("range", "inside"))
         if p.low > 0 and ((r["outside_up"] and r["up"]) or (r["outside_dn"] and r["dn"])):
             owed.add(("range", "outside"))
@@ -3664,7 +3688,7 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
     # a sigma refused after the truncation phase cost a run per bar first (a twentieth red team)
     args, sizes = _check_arguments(tape, boundaries=boundaries, draws=draws, sigma=sigma, probes=probes, seed=seed)
     n = len(tape)
-    boundaries, draws, sigma, seed = args["boundaries"], args["draws"], args["sigma"], args["seed"]
+    boundaries, draws, sigma, seed, tape = args["boundaries"], args["draws"], args["sigma"], args["seed"], args["tape"]
     sizes = sizes if sizes is not None else _sizes(tape)
     nonce = seed if seed is not None else int.from_bytes(os.urandom(8), "big")
     if draws is None:
