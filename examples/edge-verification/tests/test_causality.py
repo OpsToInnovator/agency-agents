@@ -80,7 +80,7 @@ def test_truncation_still_carries_the_leaks_that_run_off_the_end(tape):
     assert all(p.evidence.probe == "truncation" for p in report.proven)
 
 
-@pytest.mark.parametrize("sigma", [0.002, 0.05, 1.5])
+@pytest.mark.parametrize("sigma", [0.002, 0.05, 0.5])      # 0.5: the widest sigma taken (SIGMA_MAX)
 def test_detection_does_not_depend_on_the_size_of_the_nudge(sigma, tape):
     """Measured after the pristine comparison landed, and it overturned an earlier table.
 
