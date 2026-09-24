@@ -465,6 +465,18 @@ are refused for what they are, not as "not a positive finite number"; more than 
 refused before any run; and Decimal prices or a generator of bars are refused with the bar or the
 reason named.
 
+The twenty-fourth found three things the audit took that it could not vary, or read wrongly. A tape of
+negative prices -- a spread, a contract that went below zero -- was rebuilt at 0.0, a price it never
+printed, and told it had made no moves, and an honest strategy dividing by the last close crashed on
+the rebuild: prices are varied by their log moves, which a price below zero does not have, so such a
+tape is now refused before any run, naming the bar, with the advice to shift it above zero. Bars that
+are not dataclasses (namedtuples, tuples, dicts) were refused only after the strategy had run once a
+bar, or crashed naming no bar; they are refused first. And round twenty-three's test for a level grid
+fitted to a stray -- two prints or fewer near the close -- also caught a real band crossed by a fast
+rally, whose nickel then yielded to the tape's cent: a sigma under the band's tick was taken and the
+tail there was 90% dojis under "moves of sigma". A level grid now yields only where chance would also
+put that many of the tape's prices on it.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
