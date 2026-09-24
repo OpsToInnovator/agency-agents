@@ -392,8 +392,29 @@ probed bar. On session tapes the next bar's planned gap is drawn from every gap 
 overnight ones too, so a read that stands down on a gap larger than any at that time of day can
 walk; the note's "how far the next bar gaps" covers it.
 
+The twenty-first found a relation the enumeration had never held: the next bar's open was pushed
+past this bar's open and close and the previous bar's levels, never past this bar's own high or
+low, and on a session tape whose intraday gaps are a tick, a strategy reading "the next bar opens
+above this one's high" walked nine audits in twenty-four, every bar probed. It is now owed wherever
+a gap the tape has made can carry the open past it from a bar with no wick on that side (or a wick
+shorter than the gap), and built so: the close toward it, no wick where the tape prints bars with
+none, the gap sized from the close. The note says so, and repairs on a gappy tape went from 12% of
+runs to 16%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
+down still (an epsilon in the rounding), and is now rounded up exactly; a sigma just past 0.5 was
+printed as 0.5 and is printed as given; a level grid fitted to one bad print was named "the tape's
+tick, 2 of its price", and is now "the tick, 1 of its price", the tape's own; a Decimal sigma, a
+numpy seed and a bad tape given to `prove` failed only after the strategy ran, and are now checked
+first, the integers taken for what they are. On a trending tape the donors' drift, rescaled with
+their moves, took the tail to a cent of dojis under "the given sigma's", or to infinity, which
+crashed the audit and handed an honest strategy an infinite price: moves are now rescaled net of
+the drift around them, and the walk turns back where its prices would leave the range a tick can
+move by the sigma, or e^10 past the tape's own. The note no longer tells a tape of no moves that
+its tail is still, nor a tape of no trades that its volumes are any float, and the grid search's
+float guard is a chance of fit, not a flat hundredth of a step: it had dropped the cent on prices of
+5.5e11 and the lot of one on volumes of 2^46.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
-four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
+four draws (the every-bar default), and about 16% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a

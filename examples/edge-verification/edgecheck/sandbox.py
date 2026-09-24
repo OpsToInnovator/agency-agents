@@ -946,12 +946,12 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:
     """Gates first, probes second, never the other way round. A strategy the gate's
     continuation could not move is still probed, and a proof against it is still a proof;
-    a clean result on it is withheld. The tape and a caller's sigma are checked before the gates run
-    the strategy at all: a sigma refused after them cost every run they made (a twentieth red team)."""
-    if kw.get("sigma") is not None:
-        from .causality import _check_sigma, _sizes, _validate
-        _validate(tape)
-        _check_sigma(tape, _sizes(tape), kw["sigma"])
+    a clean result on it is withheld. The tape and every argument are checked before the gates run
+    the strategy at all: refused after them, a bad sigma or tape cost every run they made (a twentieth
+    and a twenty-first red team)."""
+    from .causality import _check_arguments
+    args, _ = _check_arguments(tape, **kw)
+    kw = {**kw, **{k: v for k, v in args.items() if k in kw}}
     pc = precheck(sandbox, tape)
     if pc.provable:
         return pc, check_causality(sandbox, tape, **kw)

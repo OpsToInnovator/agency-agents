@@ -2700,3 +2700,120 @@ def test_a_sigma_is_checked_before_any_run_and_only_one_that_can_be_honoured_is_
     sz = _sizes(flat)
     v = _perturbed(flat, 60, seed=5, sigma=0.01, plan=draw_plans(1, 60, 4)[0], sizes=sz)
     assert sum(b.close != b.open for b in v[61:]) > 40
+
+
+# ---------------------------------------------------------------- a twenty-first red team
+
+def _intraday_sessions(days=20, per=13, seed=4):
+    """Half-hourly bars from 09:30 UTC on weekdays: intraday gaps of a tick or none, overnight gaps of
+    a normal, and whole-tick wicks that are often zero."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, p, out, d, made = random.Random(seed), 50.0, [], 0, 0
+    day0 = 1_700_006_400.0 - (1_700_006_400.0 % 86400)
+    while made < days:
+        t_day = day0 + d * 86400
+        d += 1
+        if int((t_day // 86400 + 3) % 7) >= 5:
+            continue
+        made += 1
+        for j in range(per):
+            if j == 0 and out:
+                o = round(p * math.exp(r.gauss(0, 0.008)) / 0.01) * 0.01
+                o = o if round(o, 2) != round(p, 2) else p + 0.01 * r.choice((1, -1))
+            elif out and r.random() < 0.12:
+                o = p + 0.01 * r.choice((1, -1))
+            else:
+                o = p
+            o = round(o, 2)
+            c = round(round(o * math.exp(r.gauss(0, 0.002)) / 0.01) * 0.01, 2)
+            h = round(max(o, c) + 0.01 * int(abs(r.gauss(0, 3))), 2)
+            lo = round(min(o, c) - 0.01 * int(abs(r.gauss(0, 3))), 2)
+            out.append(Bar(t_day + 9.5 * 3600 + j * 1800, o, h, lo, c,
+                           float(max(100, round(3000 * math.exp(r.gauss(0, 0.4)) / 100) * 100))))
+            p = c
+    return out
+
+
+def test_the_next_open_is_pushed_past_the_bars_own_high_and_low():
+    """A twenty-first red team: the next open was pushed past this bar's open and close and the
+    previous bar's levels, never past this bar's own high or low; on a session tape whose intraday
+    gaps are a tick, a strategy reading 'the next bar opens above this one's high' walked every_bar."""
+    from edgecheck.causality import _at_bar, _owed, _sizes, draw_plans, realized_sigma
+    tape = _intraday_sessions()
+    sz = _sizes(tape)
+    owed = _owed(tape, 85, _at_bar(sz, 85), draw_plans(1, 85, 4), realized_sigma(tape))
+    assert {("next_rel", "own_high", 1), ("next_rel", "own_low", -1)} <= owed
+
+    def above_high(bs):
+        out = [0] * len(bs)
+        for k in (40, 85, 121):
+            if k + 1 < len(bs):
+                out[k] = int(bs[k + 1].open > bs[k].high)
+        return out
+    for seed in (0, 1, 2):
+        r = check_causality(above_high, tape, boundaries=[40, 85, 121], draws=4, seed=seed)
+        assert {p.evidence.index for p in r.proven} >= {40, 85, 121}, (seed, r.describe()[:200])
+    assert "above this bar's own high and below its own low" in r.coverage_note()
+
+
+def test_round_twenty_one_sentences_and_arguments():
+    """A twenty-first red team: the least sigma a refusal named was refused again (0.00625); 'sigma 0.5
+    is more than ... 0.5'; one bad print was 'the tape's tick, 2 of its price'; a tape of no trades was
+    told its rebuilt volumes were any float, a tape of no moves that its tail was still; a trending
+    tape under a sigma drifted to a cent of dojis, or to infinity; a Decimal sigma, a numpy seed and a
+    bad tape through prove() failed only after the strategy had run."""
+    import decimal
+    import random
+    import re
+    from edgecheck.causality import _ceil_sig, _perturbed, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    from edgecheck.sandbox import prove
+    for x in (0.07 / 11.2, 0.05 / 3906.25, 0.0020000000000005105):
+        assert _ceil_sig(x) >= x, x
+
+    r, p, cents = random.Random(8), 50.0, []
+    for i in range(200):
+        o, h, lo, c = _walk_bar(r, p, 0.004, tick=0.01)
+        cents.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(r.randint(1, 50) * 100)))
+        p = c
+    with pytest.raises(ValueError, match=re.escape("sigma 0.5000000000000001 is more than")):
+        check_causality(strat("clean_lagged").signals, cents, boundaries=[60], draws=4, seed=1, sigma=0.5000000000000001)
+    bad = list(cents)
+    bad[150] = dataclasses.replace(bad[150], low=0.01, close=0.01)
+    with pytest.raises(ValueError, match="the tick at bar 150, 1 of its price"):
+        check_causality(strat("clean_lagged").signals, bad, boundaries=[60], draws=4, seed=1, sigma=0.01)
+
+    runs = []
+    with pytest.raises(ValueError, match="sigma must be"):
+        check_causality(lambda bs: runs.append(1) or [0] * len(bs), cents, boundaries=[60], draws=4, seed=1,
+                        sigma=decimal.Decimal("0.01"))
+    assert not runs
+
+    class Index:                                   # a numpy integer, as far as the audit cares
+        def __index__(self):
+            return 5
+    check_causality(strat("clean_lagged").signals, cents, boundaries=[Index()], draws=4, seed=Index())
+    for tape in (cents[:5], cents[:30] + [dataclasses.replace(cents[30], close=math.inf)] + cents[31:]):
+        with pytest.raises(ValueError, match="need at least 8 bars|finite number"):
+            prove(None, tape)                       # before the gates run anything
+
+    untraded = [dataclasses.replace(b, volume=0.0) for b in cents]
+    note = check_causality(strat("clean_lagged").signals, untraded, boundaries=[60], draws=4, seed=1).coverage_note()
+    assert "no bar of the tape traded, and no rebuilt bar does" in note and "any float" not in note
+    flat = [dataclasses.replace(b, close=b.open, high=b.open * 1.001, low=b.open * 0.999) for b in bars(120, seed=7)]
+    note = check_causality(lambda bs: [0] * len(bs), flat, boundaries=[60], draws=4, seed=1, sigma=0.01).coverage_note()
+    assert "the tape having made no moves" in note and "still where it is still" not in note
+
+    r, p, down = random.Random(5), 3.0, []
+    for i in range(240):
+        o = round(p, 2)
+        c = round(max(0.01, o * math.exp(r.gauss(-0.004, 0.012))), 2)
+        down.append(Bar(1.7e9 + 60 * i, o, max(o, c), min(o, c), c, float(r.randint(1, 50) * 100)))
+        p = c
+    sz = _sizes(down)
+    for i in range(4):
+        v = _perturbed(down, 60, seed=10 + i, sigma=0.2, plan=draw_plans(1, 60, 4)[i], sizes=sz)
+        tail = v[-60:]
+        assert all(math.isfinite(b.close) and b.close > 0 for b in v)
+        assert sum(b.close == b.open for b in tail) < 30, sum(b.close == b.open for b in tail)
