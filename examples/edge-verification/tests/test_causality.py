@@ -2783,7 +2783,7 @@ def test_round_twenty_one_sentences_and_arguments():
         check_causality(strat("clean_lagged").signals, cents, boundaries=[60], draws=4, seed=1, sigma=0.5000000000000001)
     bad = list(cents)
     bad[150] = dataclasses.replace(bad[150], low=0.01, close=0.01)
-    with pytest.raises(ValueError, match="the tick at bar 150, 1 of its price"):
+    with pytest.raises(ValueError, match="the tick at bar 150, about 1 of its price"):
         check_causality(strat("clean_lagged").signals, bad, boundaries=[60], draws=4, seed=1, sigma=0.01)
 
     runs = []
@@ -2818,4 +2818,107 @@ def test_round_twenty_one_sentences_and_arguments():
         v = _perturbed(down, 60, seed=10 + i, sigma=0.2, plan=draw_plans(1, 60, 4)[i], sizes=sz)
         tail = v[-60:]
         assert all(math.isfinite(b.close) and b.close > 0 for b in v)
-        assert sum(b.close == b.open for b in tail) < 30, sum(b.close == b.open for b in tail)
+        # not pinned at a cent, all dojis (60 of 60): above the bound where a tick is the whole sigma
+        # (0.01 / 0.2), with the dojis a walk at a low price and the tape's own prints make
+        assert min(b.close for b in tail) >= 0.05 and sum(b.close == b.open for b in tail) < 45
+
+
+# ---------------------------------------------------------------- a twenty-second red team
+
+def test_the_next_open_past_the_own_high_is_pushed_from_a_bar_with_a_wick_too():
+    """A twenty-second red team: the push of the next open past the bar's own high was only ever built
+    from a bar with no upper wick -- the high on the close, a tie nothing tracked -- so a strategy that
+    reads the next open unless it sees that shape walked. The push now keeps a wick first, a high on
+    the close counts as a tie, and a next open on the bar's own high is pushed where the tape prints one."""
+    from edgecheck.causality import _at_bar, _owed, _sizes, _tie_fields, draw_plans, realized_sigma
+    from edgecheck.fixtures import Bar
+    prev, bare = Bar(1.0, 10.0, 10.2, 9.9, 10.1, 5.0), Bar(2.0, 10.1, 10.3, 10.0, 10.3, 6.0)
+    assert "high" in _tie_fields([prev, bare], 1, _sizes(bars(40)))
+    tape = _intraday_sessions()
+
+    def reads_past_a_wick(k):
+        def st(bs):
+            out = [0] * len(bs)
+            if k + 1 < len(bs):
+                b, nb = bs[k], bs[k + 1]
+                out[k] = int(nb.open > b.high and b.high > max(b.open, b.close))
+            return out
+        return st
+    for k in (30, 41, 94, 136):
+        for seed in (1, 2, 3, 4):
+            assert check_causality(reads_past_a_wick(k), tape, boundaries=[k], draws=4, seed=seed).proven, (k, seed)
+    sz = _sizes(tape)
+    edges = [k for k in range(20, 200) if ("next_rel", "own_high", 0) in
+             _owed(tape, k, _at_bar(sz, k), draw_plans(1, k, 4), realized_sigma(tape))]
+    assert edges and "edge" in sz.ties
+    note = check_causality(strat("clean_lagged").signals, tape, boundaries=edges[:2], draws=4, seed=1).coverage_note()
+    assert "a next open on the bar's own high or low" in note
+
+
+def _stray_tape(tick, bad, p0, seed=5, n=160):
+    """A tape on ``tick`` with one high carrying ``bad`` more: a stray print of seven places."""
+    import random
+    from edgecheck.fixtures import Bar
+    rng, p, out, ts = random.Random(seed), p0, [], 1.7e9
+
+    def r(x):
+        return round(round(x / tick) * tick, 10)
+    for _ in range(n):
+        o = p
+        c = r(o * (1 + rng.gauss(0, 0.003)))
+        hi, lo = r(max(o, c) * (1 + abs(rng.gauss(0, 0.001)))), r(min(o, c) * (1 - abs(rng.gauss(0, 0.001))))
+        out.append(Bar(ts, o, max(hi, o, c), min(lo, o, c), c, float(1000 + int(rng.gauss(0, 100)))))
+        p, ts = c, ts + 60
+    out[40] = dataclasses.replace(out[40], high=out[40].high + bad)
+    return out
+
+
+def test_one_stray_print_hides_no_tick_and_adopts_no_adjustment():
+    """A twenty-second red team: the step cap four decades above the finest step all prices share let
+    one high of seven places hide a nickel tick, and the same print let a 0.9-adjusted step of 3.125e-7
+    fit every cent price; rebuilt prices left the tick either way."""
+    from edgecheck.causality import _grid_at, _sizes
+    for tick, bad, p0 in ((0.05, 1e-7, 40.0), (1.0, 1e-6, 3000.0)):
+        sz = _sizes(_stray_tape(tick, bad, p0))
+        g = _grid_at(sz.price_grids or sz.price_grid, p0)
+        assert abs(g.step / g.scale - tick) < 1e-9, (tick, g.step, g.scale)
+    sz = _sizes(_stray_tape(0.01, 3e-7, 100.0))
+    assert all(g is None or g.scale == 1.0 for g in (sz.price_grid, *(sz.price_grids.grids if sz.price_grids else ())))
+
+
+def test_round_twenty_two_sigma_and_arguments():
+    """A twenty-second red team: the sigma check yielded a real era's nickel tick to the whole tape's
+    cent and took a sigma that made the tail dojis; the rescale jittered before removing the drift, so
+    a trend's tail moved at 4.6 times the sigma; a tape where nothing traded was owed a push away from
+    zero at every bar; and a huge sigma or a lone boundary raised the wrong kind of error."""
+    import random
+    import statistics
+    from edgecheck.causality import _perturbed, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    r, p, eras = random.Random(3), 40.0, []
+    for i in range(200):
+        tick = 0.05 if i < 100 else 0.01
+        o = round(round(p / tick) * tick, 2)
+        c = round(round(o * math.exp(r.gauss(0, 0.004)) / tick) * tick, 2)
+        eras.append(Bar(1.7e9 + 60 * i, o, max(o, c) + tick, min(o, c) - tick, c, float(r.randint(1, 50) * 100)))
+        p = c
+    with pytest.raises(ValueError, match="below the tick at bar"):
+        check_causality(strat("clean_lagged").signals, eras, boundaries=[150], draws=4, seed=1, sigma=0.0006)
+
+    r, p, trend = random.Random(9), 50.0, []
+    for i in range(300):
+        c = p * math.exp(0.002 + r.gauss(0, 5e-5))
+        trend.append(Bar(1.7e9 + 60 * i, p, c * 1.0005, p * 0.9995, c, float(r.randint(1, 50) * 100)))
+        p = c
+    sz, sizes = _sizes(trend), []
+    for i in range(4):
+        v = _perturbed(trend, 40, seed=10 + i, sigma=0.02, plan=draw_plans(1, 40, 4)[i], sizes=sz)
+        sizes += [math.log(b.close / b.open) for b in v[42:]]
+    rms = math.sqrt(statistics.fmean(x * x for x in sizes))
+    assert 0.016 < rms < 0.025, rms
+
+    untraded = [dataclasses.replace(b, volume=0.0) for b in bars(60)]
+    assert check_causality(strat("clean_lagged").signals, untraded, boundaries=[20, 30, 40], draws=4, seed=1).undelivered == ()
+    for kw in ({"sigma": 10 ** 400}, {"boundaries": 30}):
+        with pytest.raises(ValueError):
+            check_causality(strat("clean_lagged").signals, bars(60), draws=4, seed=1, **kw)

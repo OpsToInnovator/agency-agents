@@ -399,7 +399,7 @@ above this one's high" walked nine audits in twenty-four, every bar probed. It i
 a gap the tape has made can carry the open past it from a bar with no wick on that side (or a wick
 shorter than the gap), and built so: the close toward it, no wick where the tape prints bars with
 none, the gap sized from the close. The note says so, and repairs on a gappy tape went from 12% of
-runs to 16–17%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
+runs to 17–18%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
 down still (an epsilon in the rounding), and is now rounded up exactly; a sigma just past 0.5 was
 printed as 0.5 and is printed as given; a level grid fitted to one bad print was named "the tape's
 tick, 2 of its price", and is now "the tick, 1 of its price", the tape's own; a Decimal sigma, a
@@ -413,13 +413,37 @@ its tail is still, nor a tape of no trades that its volumes are any float, and t
 float guard is a chance of fit, not a flat hundredth of a step: it had dropped the cent on prices of
 5.5e11 and the lot of one on volumes of 2^46.
 
+The twenty-second found the new push built only one way. The next open past the bar's own high
+came only from a bar with no wick there -- its high on its close, a tie nothing tracked -- so a
+strategy that read the next open unless it saw that shape walked, 9 audits in 16. The push now
+keeps a wick of the tape's own first and builds the wickless bar only after; a high or low on the
+bar's own close counts as a tie, as one on its open always did, so such a draw is credited only
+where the real bar printed the same; and a next open exactly on the bar's own high or low is
+pushed where the tape prints one, as the note's list of ties now says. The cost is a few bars more
+where a tight inside range has no price between its close and the previous bar's range, which the
+report counts (four of two hundred on a session tape). The step cap round twenty-one added, four
+decades above the finest step every price shares, let one high of seven places hide a nickel tick;
+it is now four decades above the grid nine prices in ten share. The same stray print let a
+0.9-adjusted step of 3.125e-7 fit every cent price, which is older: an adjusted grid is now taken
+only where it is no finer than the grid most prices share. Round twenty-one's sigma had three more
+edges. The check yielded a real era's or band's tick to the whole tape's, so it named a nickel era's
+tick at a fifth of itself and took a sigma under a band's cent that made the tail all dojis: it now
+yields only for a level grid of a print or two. Its lower bound came from a coarser grid than the
+check priced and held a tail 3.6 times above the tape: it is never above the tape's lowest close,
+and an open set back inside it is set on the grid. And the rescale jittered each move before
+removing the drift, so a trend's tail moved at up to 5.6 times the sigma: moves are now
+standardized first, over the bars around the donor that moved, and jittered after -- 1.0 times the
+sigma on the same tapes. A tape where nothing traded is no longer owed a push away from zero at
+every bar, and a sigma too large for a float or a lone boundary is refused as the others are.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are about twelve a bar, and a fifth to a half of its bars still come up short,
-by the tape (43–45% on the last two red teams'): at two
+one-cent tick they are about twelve a bar, and a fifth to two thirds of its bars still come up
+short, by the tape (43–45% on the eighteenth and nineteenth red teams', 63% on the twenty-second's
+at 37 cents): at two
 cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
 did not print, which is not counted. The report counts every such bar. A tick that is coarse
 for its price level costs the same way: a stock just above a dollar on cents came up short at

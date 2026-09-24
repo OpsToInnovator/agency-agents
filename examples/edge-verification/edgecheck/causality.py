@@ -205,6 +205,8 @@ class Report:
             words.append("an ungapped next open")
         if "next" in self.ties:
             words.append("a next open on one of those levels")
+        if "edge" in self.ties:
+            words.append("a next open on the bar's own high or low")
         return ("; each of these also set level with its reference where the tape prints that kind of "
                 "tie -- " + ", ".join(words))
 
@@ -849,7 +851,9 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
         if cl:
             (lc, lts), hc = min(cl), max(c for c, _ in cl)
             g = _grid_at(by_bar(lts) if callable(by_bar) else by_bar, lc)
-            lo_b = max(g.step / g.scale / sigma if isinstance(g, Grid) else 0.0, lc * math.exp(-10.0))
+            # never above the tape's own lowest close: taken from a coarser grid than the check priced,
+            # the bound held a tail 3.6 times above the tape (a twenty-second red team)
+            lo_b = min(max(g.step / g.scale / sigma if isinstance(g, Grid) else 0.0, lc * math.exp(-10.0)), lc)
             hi_b = hc * math.exp(10.0)
     top_move, top_wick, top_up, top_dn, top_volume = (tuple(caps) + (None,) * 5)[:5]
 
@@ -936,7 +940,10 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
                     opened = _on_level(pgrid, opened, "round")
         if not lo_b <= opened <= hi_b:
             opened = prev_close if lo_b <= prev_close <= hi_b else min(max(opened, lo_b), hi_b)
-        own = _jitter(math.log(donor.close / donor.open), rng) if donor.open > 0 and donor.close > 0 else 0.0
+            if pgrid is not None:
+                opened = _on_level(pgrid, opened, "round")
+        raw = math.log(donor.close / donor.open) if donor.open > 0 and donor.close > 0 else 0.0
+        own = _jitter(raw, rng) if raw else 0.0
         if top_move is not None and sigma is None:
             own = max(-top_move, min(top_move, own))        # jittered, never past the tape's largest
         if sigma is not None:
@@ -951,13 +958,19 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
             local = rms[d] if 0 <= d < len(rms) else tape_sigma
             m_d = mu[d] if 0 <= d < len(mu) else 0.0
             spread = math.sqrt(max(local * local - m_d * m_d, 0.0))
-            # net of the drift around the donor: rescaled with the moves, a trend became the sigma's
-            if moving:
-                # a donor that did not move stays still: net of the drift around it, an untraded bar at
-                # the edge of a still stretch came back moving (the round-nineteen test)
-                move = (own - m_d) * sigma / spread if spread > 0 and own != 0.0 else 0.0
-            else:
+            # Net of the drift around the donor, standardized, and only then jittered: jittered first,
+            # a trend's drift came through as moves of up to 5.6 times the sigma (a twenty-second red
+            # team). A donor that did not move stays still (an untraded bar at the edge of a still
+            # stretch came back moving); one from a stretch that moves steadily, by the same amount
+            # each bar, is moved by the sigma, not frozen or blown up.
+            if not moving:
                 move = rng.gauss(0.0, sigma)
+            elif raw == 0.0:
+                move = 0.0
+            elif spread <= 1e-3 * local:
+                move = rng.gauss(0.0, sigma)
+            else:
+                move = (raw - m_d) / spread * sigma * math.exp(rng.gauss(0.0, JITTER) - JITTER * JITTER / 2)
             move = max(-50.0, min(50.0, move))     # never past what a float's exp can hold
             if not lo_b <= opened * math.exp(move) <= hi_b:
                 move = -move                       # the walk turned back at its bounds
@@ -1220,7 +1233,11 @@ def _local_grids(values: Sequence[float], reach: float = 0.05, least: int = 12, 
     if base is None:
         return None                  # no grid anywhere on the tape, and none by price level either
     # every local grid is a whole multiple of the finest the tape's prices share
-    steps = [st for st in _STEPS if base.step * (1 - 1e-9) <= st <= min(u[-1], base.step * 1e4)
+    # four decades above the grid most prices share, not the finest all of them do: one stray print
+    # of seven places set that, and a nickel tick was dropped from the candidates (a twenty-second
+    # red team)
+    common = _grid(u, 0.9) or base
+    steps = [st for st in _STEPS if base.step * (1 - 1e-9) <= st <= min(u[-1], max(base.step, common.step) * 1e4)
              and abs(st / base.step - round(st / base.step)) < 1e-6]
     cache: dict[tuple[int, int], Grid | None] = {}
 
@@ -1365,7 +1382,8 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
     if base is None:
         return []
     # no step past the largest price: a tolerance that grows with the step put every price on one
-    steps = [st for st in _STEPS if base.step * (1 + 1e-9) < st <= min(flat[-1], base.step * 1e4)
+    common = _grid(flat, 0.9) or base
+    steps = [st for st in _STEPS if base.step * (1 + 1e-9) < st <= min(flat[-1], max(base.step, common.step) * 1e4)
              and abs(st / base.step - round(st / base.step)) < 1e-6]
 
     def on(v: float, st: float) -> bool:
@@ -1446,6 +1464,12 @@ def _scaled(values: Sequence[float], grid: Grid | None) -> Grid | None:
             else:
                 best, best_eff = Grid(base, 0.0, points, grid.digits, True, scale=r), eff
                 break
+    # never finer than the grid nine prices in ten share: one stray print of seven places let a
+    # step of 3.125e-7 at 0.9 fit every cent price, and rebuilt prices left the cent (a
+    # twenty-second red team)
+    common = _grid(vals, 0.9)
+    if best is not None and common is not None and best_eff < common.step / common.scale * (1 - 1e-9):
+        return None
     return best
 
 
@@ -1685,10 +1709,15 @@ def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
     that relation sets."""
     bar, prev = bars[k], bars[k - 1]
     refs = {bar.open, prev.open, prev.close, prev.high, prev.low}
-    out = {name for name in ("close", "high", "low") if getattr(bar, name) in refs}
+    out = {"close"} if bar.close in refs else set()
+    # a high or low on the bar's own close is a tie as much as one on its open: a bar with no wick
+    # that side. Built only by the repair of the next open past its own high, it was a shape no
+    # other draw printed and a strategy standing down on it walked (a twenty-second red team)
+    out |= {name for name in ("high", "low") if getattr(bar, name) in refs | {bar.close}}
     if bar.volume == prev.volume:
         out.add("volume")
-    if k + 1 < len(bars) and (sizes.gaps_up or sizes.gaps_dn) and bars[k + 1].open in refs | {bar.close}:
+    if k + 1 < len(bars) and (sizes.gaps_up or sizes.gaps_dn) and \
+            bars[k + 1].open in refs | {bar.close, bar.high, bar.low}:
         out.add("next_open")
     return frozenset(out)
 
@@ -1731,7 +1760,7 @@ def _tie_kind(item: tuple, gapped: bool) -> str | None:
     if item == ("next_gap", 0):
         return "ungapped" if gapped else None
     if item[0] == "next_rel" and item[2] == 0:
-        return "next"
+        return "edge" if item[1] in ("own_high", "own_low") else "next"
     return None
 
 
@@ -1805,7 +1834,11 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
     # arithmetic after the strategy had run (a twenty-first red team)
     if isinstance(sigma, bool) or not isinstance(sigma, numbers.Real):
         raise ValueError(f"sigma must be a positive finite number, not {sigma!r}")
-    given, sigma = sigma, float(sigma)
+    given = sigma
+    try:
+        sigma = float(sigma)
+    except (OverflowError, TypeError, ValueError):
+        raise ValueError(f"sigma must be a positive finite number, not {given!r}") from None
     if not (math.isfinite(sigma) and sigma > 0):
         raise ValueError(f"sigma must be a positive finite number, not {given!r}")
     by, whole = _prices_by_bar(sizes), sizes.price_grid
@@ -1818,15 +1851,19 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
         h = g.at(x) if hasattr(g, "at") else g
         if isinstance(h, Grid):
             share, kind = h.step / h.scale / x, "tick"
-            if isinstance(whole, Grid) and whole.step / whole.scale < h.step / h.scale and _on_grid(whole, x):
-                # a level grid fitted to one repeated print is no tick the tape keeps there: its whole grid
+            if (isinstance(whole, Grid) and len(h.vals) <= 2 and whole.step / whole.scale < h.step / h.scale
+                    and _on_grid(whole, x)):
+                # a level grid fitted to a print or two is no tick the tape keeps there: its whole grid.
+                # A real era's or band's is: yielding to the whole grid there, the check misnamed a
+                # nickel era's tick and took a sigma that made a band's tail all dojis (a
+                # twenty-second red team)
                 share = whole.step / whole.scale / x
         else:
             share, kind = 1e3 * math.ulp(x) / x, "float"
         if worst is None or share > worst[0]:
             worst, why = (share, i), kind
     least = _ceil_sig(worst[0]) if worst is not None else 0.0
-    what = (f"the tick at bar {worst[1]}, {least:g} of its price" if why == "tick" else
+    what = (f"the tick at bar {worst[1]}, about {least:g} of its price" if why == "tick" else
             f"what a float can move a price by at bar {worst[1]}, {least:g} of it") if worst else ""
     if worst is not None and least > SIGMA_MAX:
         raise ValueError(f"no sigma can be taken on this tape: {what}, is more than the largest sigma taken "
@@ -1865,7 +1902,11 @@ def _check_arguments(tape: Sequence[Any], *, boundaries: Sequence[int] | None = 
     draws = None if draws is None else whole("draws", draws)
     if draws is not None and draws < 0:
         raise ValueError(f"draws must be zero or more, not {draws}")
-    boundaries = None if boundaries is None else [whole("a boundary", b) for b in boundaries]
+    if boundaries is not None:
+        try:
+            boundaries = [whole("a boundary", b) for b in boundaries]
+        except TypeError:
+            raise ValueError(f"boundaries must be a sequence of whole numbers, not {boundaries!r}") from None
     if sigma is not None:
         sizes = sizes if sizes is not None else _sizes(tape)
         sigma = _check_sigma(tape, sizes, sigma)
@@ -2195,18 +2236,20 @@ def _sizes(tape: Sequence[Any]) -> Sizes:
             if two_back is not None and b.open in (before.open, two_back.open, two_back.close,
                                                    two_back.high, two_back.low):
                 ties.add("next")                 # an open on a level of the bar before, or two back
+            if b.open in (before.high, before.low) and b.open != before.close:
+                ties.add("edge")                 # an open on the bar before's own high or low
             step = b.ts - before.ts
             steps[step] = steps.get(step, 0) + 1
         two_back, before = before, b
     mode = max(steps, key=lambda st: (steps[st], -st)) if steps else None
     pg, vg, levels, eras, widths = _price_grids(tape)
     cal = _calendar(tape)
-    rms = _local_rms(tape)
+    mu, rms = _local_stats(tape)
     signed = tuple(math.log(b.close / b.open) for b in tape if b.open > 0 and b.close > 0)
     return Sizes(sorted(moves), sorted(wicks), sorted(ratios), sorted(volumes), zero,
                  sorted(gaps_up), sorted(gaps_dn), gap0, sorted(steps), wick0,
                  pg.step if pg else None, vg.step if vg else None, frozenset(ties), mode, pg, vg, signed,
-                 levels, eras, widths, _timing(tape, cal), cal, rms, _donor_index(tape, cal, rms), _local_mean(tape))
+                 levels, eras, widths, _timing(tape, cal), cal, rms, _donor_index(tape, cal, rms), mu)
 
 
 def _caps(sizes: Sizes) -> tuple:
@@ -2216,26 +2259,30 @@ def _caps(sizes: Sizes) -> tuple:
                                                    sizes.volumes))
 
 
-def _local_mean(tape: Sequence[Any], half: int = 32) -> tuple:
-    """Per bar, the mean log move of the bars within ``half`` of it: the drift around it."""
+def _local_stats(tape: Sequence[Any], half: int = 32) -> tuple[tuple, tuple]:
+    """Per bar, the mean and the root mean square log move of the bars within ``half`` of it that
+    moved: the drift and the size of a move around it. Over every bar, still ones too, a tape where
+    one bar in five moves gave its moving donors 2.3 times the sigma (a twenty-second red team). Zero
+    where nothing around it moved."""
     mv = [math.log(b.close / b.open) if b.open > 0 and b.close > 0 else 0.0 for b in tape]
-    pre = [0.0]
+    s1, s2, cnt = [0.0], [0.0], [0]
     for x in mv:
-        pre.append(pre[-1] + x)
+        s1.append(s1[-1] + x)
+        s2.append(s2[-1] + x * x)
+        cnt.append(cnt[-1] + (x != 0.0))
     n = len(tape)
-    return tuple((pre[min(n, i + half + 1)] - pre[max(0, i - half)]) / (min(n, i + half + 1) - max(0, i - half))
-                 for i in range(n))
+    mean, rms = [], []
+    for i in range(n):
+        a, b = max(0, i - half), min(n, i + half + 1)
+        c = cnt[b] - cnt[a]
+        mean.append((s1[b] - s1[a]) / c if c else 0.0)
+        rms.append(math.sqrt((s2[b] - s2[a]) / c) if c else 0.0)
+    return tuple(mean), tuple(rms)
 
 
-def _local_rms(tape: Sequence[Any], half: int = 32) -> tuple:
-    """Per bar, the root mean square log move of the bars within ``half`` of it."""
-    sq = [math.log(b.close / b.open) ** 2 if b.open > 0 and b.close > 0 else 0.0 for b in tape]
-    pre = [0.0]
-    for x in sq:
-        pre.append(pre[-1] + x)
-    n = len(tape)
-    return tuple(math.sqrt((pre[min(n, i + half + 1)] - pre[max(0, i - half)]) / (min(n, i + half + 1) - max(0, i - half)))
-                 for i in range(n))
+def _local_mean(tape: Sequence[Any], half: int = 32) -> tuple:
+    """Per bar, the mean log move of the bars around it that moved (``_local_stats``)."""
+    return _local_stats(tape, half)[0]
 
 
 def _price_grids(tape: Sequence[Any]) -> tuple:
@@ -2556,7 +2603,8 @@ def _forced_bar(tape: Sequence[Any], boundary: int, rng: random.Random, plan: Pl
 
     hi0, lo0 = max(o, closed), min(o, closed)
     if lo0 > 0:
-        high, low = _range_of(plan, hi0, lo0, o, hcons, lcons, tw, tw_dn, sizes, rng, bad_h, bad_l, b)
+        high, low = _range_of(plan, hi0, lo0, o, hcons, lcons, tw, tw_dn, sizes, rng,
+                              bad_h | {closed} if bad_h else bad_h, bad_l | {closed} if bad_l else bad_l, b)
     else:                                        # a tape that prints a zero price: left as it was
         high, low = max(hi0, b.high), min(lo0, b.low)
 
@@ -3050,7 +3098,9 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
     if p.volume > 0 and "volume" in ties:
         owed.add(("vol", 0))
     if sizes.zero:
-        owed |= {("zero", True), ("zero", False)}
+        # away from zero only where some bar traded: on a tape where none did, every bar was owed it
+        # and none could deliver it (a twenty-second red team)
+        owed |= {("zero", True)} | ({("zero", False)} if sizes.volumes else set())
     if r["up"] or r["dn"]:
         for name in LEVELS:
             level = getattr(p, name)
@@ -3114,14 +3164,31 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
             # and the previous bar's levels, a read of the next open against this bar's own high
             # walked every_bar on a session tape (a twenty-first red team).
             bare = sizes.wick0 or bool(sizes.wicks and sizes.wicks[0] > 0)
-            if r["up"] and sizes.gaps_up and (sizes.wick0 or (sizes.wicks and sizes.wicks[0] < sizes.gaps_up[-1])):
+            pg = _bar_grid(sizes, o, tape[k])
+            tick = pg.step / pg.scale / o if isinstance(pg, Grid) and o > 0 else 0.0
+            thin = next((w for w in sizes.wicks if w > 0), None) if sizes.wicks else None
+
+            def clears(pool: list) -> bool:
+                # a gap the tape has made past a wick it has made, and past a step of the grid there:
+                # on a penny tape a cent was past every gap, and the push was owed at 80 bars in 95
+                # that could never deliver it (a twenty-second red team)
+                if not pool or pool[-1] < tick * (1 - 1e-9):
+                    return False
+                return sizes.wick0 or (thin is not None and thin < pool[-1])
+            if r["up"] and clears(sizes.gaps_up):
                 owed.add(("next_rel", "own_high", 1))
-            if r["dn"] and sizes.gaps_dn and (sizes.wick0 or (sizes.wicks and sizes.wicks[0] < sizes.gaps_dn[-1])):
+            if r["dn"] and clears(sizes.gaps_dn):
                 owed.add(("next_rel", "own_low", -1))
             if r["dn"] and (sizes.gaps_dn or sizes.gap0) and bare:
                 owed.add(("next_rel", "own_high", -1))
             if r["up"] and (sizes.gaps_up or sizes.gap0) and bare:
                 owed.add(("next_rel", "own_low", 1))
+            if "edge" in ties:
+                # level with it, where the tape prints a next open on its bar's own high or low
+                if r["up"] and (sizes.gaps_up or (sizes.gap0 and sizes.wick0)):
+                    owed.add(("next_rel", "own_high", 0))
+                if r["dn"] and (sizes.gaps_dn or (sizes.gap0 and sizes.wick0)):
+                    owed.add(("next_rel", "own_low", 0))
         if sizes.step_mode is not None:
             owed.add(("next_step", 0))
             if any(st > sizes.step_mode for st in sizes.steps):
@@ -3235,10 +3302,16 @@ def _repair(item: tuple, tape: Sequence[Any], k: int, sizes: Sizes, sg: float, c
     if kind == "next_rel":
         _, ref, side = item
         if ref in ("own_high", "own_low"):
-            # the close toward it with no wick that side (where the next open must clear it), the gap
-            # sized from the close as built
-            clear = (ref == "own_high") == (side > 0)
-            return Plan(move=side, band="random", bare=side if clear else 0, next_past=(ref, side))
+            # the close toward it and the gap sized from the bar as built: first with a short wick that
+            # side, of the tape's own; with none (where the tape prints bars with none) only after. A
+            # repair that only ever built the wickless bar was a shape a strategy could stand down on
+            # (a twenty-second red team).
+            toward = 1 if ref == "own_high" else -1
+            clear = side == toward
+            if side == 0:
+                return Plan(move=toward, band="random", bare=toward if attempt % 2 else 0, next_past=(ref, 0))
+            return Plan(move=side, band="random", wick=-toward if clear and not attempt % 2 else 0,
+                        bare=side if clear and attempt % 2 else 0, next_past=(ref, side))
         if side == 0:
             # by a gap of the tape's own where it gaps, the close near the level; else ungapped,
             # the close on it
@@ -3455,7 +3528,7 @@ def check_causality(strategy: Strategy, tape: Sequence[Any], *, boundaries: Sequ
                 # A tape with no wicks gets no wick push at all (none is claimed); moves and volume
                 # changes fall back to a floor size, which the note names.
                 floors=floors,
-                ties=tuple(t for t in ("doji", "close", "high", "low", "own", "volume", "ungapped", "next")
+                ties=tuple(t for t in ("doji", "close", "high", "low", "own", "volume", "ungapped", "next", "edge")
                            if t in tie_kinds),
                 grids=tuple(g for g, found in (
                     ("tick", sizes.price_grid or sizes.price_grids), ("lot", sizes.vol_grid),
