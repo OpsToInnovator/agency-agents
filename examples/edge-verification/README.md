@@ -448,9 +448,11 @@ tie-free price at most bars: nine in ten of its bars at 37 cents now come up sho
 three did, and the report counts them. One stray print still hid a tick round twenty-two meant to
 keep: a rounded or adjusted grid (1/32 written to four places, a 3-for-2 adjusted cent) had to fit
 every price at the stray's places. It is now fitted at the places most prints are written to, with
-a tenth of the prints allowed off it, and those kept as its finer grid at the rate they print. The
-grid the step cap and each price level's grid are judged by now counts prints, not distinct prices
--- fifteen strays printed once each were a tenth of a nickel tape's 77 prices -- and a run of one
+a tenth of the prints allowed off it where they share a grid of their own, kept as its finer grid
+at the rate they print. The grid the step cap and each price level's grid are judged by now counts
+prints, not distinct prices, where the prints off it share such a grid -- fifteen strays printed
+once each were a tenth of a nickel tape's 77 prices -- while raw floats, which share none, still
+leave their level off any grid, as they did; and a run of one
 grid in time is no longer cut by a stray bar in ten. Evaders keyed on the resulting off-rule prices,
 which walked every bar probed on those tapes, are proven. Under a sigma each donor's move was
 standardized against its window's mean: on a tape climbing a cent a bar every donor sat at that

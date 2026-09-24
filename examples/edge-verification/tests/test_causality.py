@@ -2415,7 +2415,9 @@ def test_the_tail_clause_says_what_each_tape_got():
     assert "at the times of day" not in flat.coverage_note()
     wide = check_causality(strat("clean_lagged").signals, bars(200), boundaries=[100], draws=4, seed=1, sigma=0.05)
     assert ", of volatility, which is the given sigma's" in wide.coverage_note()
-    assert "of where the price is far ahead, which the rebuild takes from the tape's own moves near it, rescaled" in wide.coverage_note()
+    # net of the trend they follow since round twenty-three, whose ramp tail froze at 0.3 times the sigma
+    assert ("of where the price is far ahead, which the rebuild takes from the tape's own moves near it, net of the "
+            "trend they follow and rescaled to the sigma") in wide.coverage_note()
     assert "of where the price is far ahead, which strays from the tape's own less than a walk of its own would" in flat.coverage_note()
     sess = check_causality(strat("clean_lagged").signals, _session_tape(), boundaries=[100], draws=4, seed=1)
     assert "at the times of day and on the days it prints" in sess.coverage_note()
