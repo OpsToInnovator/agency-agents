@@ -2595,7 +2595,7 @@ def test_a_still_stretch_stays_still_under_a_sigma_and_a_sigma_below_the_tick_is
         two.append(Bar(1.7e9 + 60 * i, o, round(max(o, c) + r.choice((0, 0.01)), 2),
                        round(min(o, c) - r.choice((0, 0.01)), 2), c, float(r.randint(1, 50) * 100)))
         p = c
-    with pytest.raises(ValueError, match="below the tape's tick"):
+    with pytest.raises(ValueError, match="below the tick at bar"):
         check_causality(strat("clean_lagged").signals, two, boundaries=[100], draws=4, seed=1, sigma=0.0005)
     for bad in (0.0, -0.01, float("nan")):
         with pytest.raises(ValueError, match="sigma"):

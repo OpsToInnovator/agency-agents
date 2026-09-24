@@ -953,7 +953,9 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
             spread = math.sqrt(max(local * local - m_d * m_d, 0.0))
             # net of the drift around the donor: rescaled with the moves, a trend became the sigma's
             if moving:
-                move = (own - m_d) * sigma / spread if spread > 0 else 0.0
+                # a donor that did not move stays still: net of the drift around it, an untraded bar at
+                # the edge of a still stretch came back moving (the round-nineteen test)
+                move = (own - m_d) * sigma / spread if spread > 0 and own != 0.0 else 0.0
             else:
                 move = rng.gauss(0.0, sigma)
             move = max(-50.0, min(50.0, move))     # never past what a float's exp can hold
