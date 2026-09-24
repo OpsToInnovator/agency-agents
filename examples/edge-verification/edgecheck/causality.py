@@ -1964,7 +1964,12 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
         if isinstance(h, Grid):
             share, kind = h.step / h.scale / x, "tick"
             near = sum(1 for v in h.vals.values() if abs(v - x) <= 0.05 * x)
-            if (isinstance(whole, Grid) and h.vals and near <= 2 and whole.step / whole.scale < h.step / h.scale
+            # ... and only where chance would put that many prices on it: a band crossed by a fast rally
+            # has a print or two near each close, and its nickel yielded to the tape's cent, taking a
+            # sigma that made the tail 90% dojis there (a twenty-fourth red team)
+            chance = (len(h.vals) * math.log((h.step / h.scale) / (whole.step / whole.scale))
+                      if isinstance(whole, Grid) and whole.step / whole.scale < h.step / h.scale else math.inf)
+            if (isinstance(whole, Grid) and h.vals and near <= 2 and chance <= math.log(1e6)
                     and _on_grid(whole, x)):
                 # a level grid with a print or two at this price is no tick the tape keeps there: its
                 # whole grid. A real era's or band's is: yielding to the whole grid there, the check
@@ -2054,7 +2059,15 @@ def _validate(tape: Sequence[Any]) -> None:
     the builder with a bare math domain error (a twelfth red team); a NaN compares false with
     everything and made relations silently meaningless."""
     for i, b in enumerate(tape):
+        # a bar the audit can vary: namedtuple bars were refused only after the truncation phase had run
+        # the strategy once a bar, and tuples or dicts crashed with an AttributeError naming no bar (a
+        # twenty-fourth red team)
+        if not dataclasses.is_dataclass(b) or isinstance(b, type):
+            raise ValueError(f"bar {i} is of type {type(b).__name__}, not a bar: every bar must be a dataclass with ts, "
+                             f"open, high, low, close and volume (the audit varies bars with dataclasses.replace)")
         for name in ("ts", "open", "high", "low", "close", "volume"):
+            if not hasattr(b, name):
+                raise ValueError(f"bar {i} has no {name}; every bar needs ts, open, high, low, close and volume")
             v = getattr(b, name)
             if not isinstance(v, numbers.Real) or isinstance(v, bool):
                 # a Decimal is finite and passed, and the audit then crashed on its first sum with a
@@ -2068,6 +2081,14 @@ def _validate(tape: Sequence[Any]) -> None:
             if not ok:
                 raise ValueError(f"bar {i} has a {name} of {_shown(v)}; every timestamp, price and volume "
                                  f"must be a finite number")
+        # Prices are varied by log moves, which a price below zero has none of: a tape of negative prices
+        # was rebuilt at 0.0, a price it never printed, told it had made no moves, and an honest strategy
+        # dividing by the last close crashed on it (a twenty-fourth red team).
+        for name in ("open", "high", "low", "close"):
+            if getattr(b, name) < 0:
+                raise ValueError(f"bar {i} has a {name} of {_shown(getattr(b, name))}; the audit varies prices by "
+                                 f"their log moves, which a price below zero does not have: shift the series above "
+                                 f"zero to audit it (a spread, or a contract that went negative)")
         # Every volume relation, floor and zero rule reads volume as traded size. A signed volume --
         # net delta, say -- was probed upward only and told no bar traded (a sixteenth red team).
         if b.volume < 0:

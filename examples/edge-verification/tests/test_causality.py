@@ -3066,3 +3066,51 @@ def test_round_twenty_three_sigma_walk_and_refusals():
     assert not runs
     note = check_causality(counted, cents, boundaries=[60], draws=4, seed=1, sigma=0.01).coverage_note()
     assert "its gaps kept at the tape's own sizes" in note and "net of the trend they follow" in note
+
+
+# ---------------------------------------------------------------- a twenty-fourth red team
+
+def test_round_twenty_four_tapes_refused_and_a_bands_tick_kept():
+    """A twenty-fourth red team: a tape of negative prices was rebuilt at 0.0, told it had made no
+    moves, and an honest strategy dividing by the last close crashed on it; namedtuple bars were refused
+    only after the strategy had run once a bar, tuples and dicts with a bare AttributeError; and a band
+    crossed by a fast rally, a print or two near each close, yielded its nickel to the tape's cent, so a
+    sigma under the band's tick was taken and the tail there was 90% dojis under 'moves of sigma'."""
+    import collections
+    import random
+    import re
+    from edgecheck.causality import _check_sigma, _sizes
+    from edgecheck.fixtures import Bar
+    runs = []
+
+    def counted(bs):
+        runs.append(1)
+        return [0] * len(bs)
+    base = bars(80, seed=3)
+    negative = [dataclasses.replace(b, open=-b.open, high=-b.low, low=-b.high, close=-b.close) for b in base]
+    mid = sorted(b.close for b in base)[40]
+    crossing = [dataclasses.replace(b, open=b.open - mid, high=b.high - mid, low=b.low - mid, close=b.close - mid)
+                for b in base]
+    T = collections.namedtuple("T", "ts open high low close volume")
+    for tape, said in ((negative, "below zero"), (crossing, "below zero"),
+                       ([T(b.ts, b.open, b.high, b.low, b.close, b.volume) for b in base], "not a bar"),
+                       ([(b.ts, b.open, b.high, b.low, b.close, b.volume) for b in base], "not a bar"),
+                       ([dataclasses.asdict(b) for b in base], "not a bar")):
+        with pytest.raises(ValueError, match=said):
+            check_causality(counted, tape, probes="every_bar", seed=1)
+    assert not runs
+
+    def q(p):
+        tick = 0.01 if p < 20 else 0.05
+        return round(round(p / tick) * tick, 2)
+    r, rally, p = random.Random(1), [], 12.0
+    for i in range(240):
+        m = r.gauss(0, 0.01) if not 120 <= i < 150 else 0.06 + r.gauss(0, 0.005)
+        o, c = p, q(p * math.exp(m))
+        h, lo = q(max(o, c) * (1 + abs(r.gauss(0, 0.002)))), q(min(o, c) * (1 - abs(r.gauss(0, 0.002))))
+        rally.append(Bar(1.7e9 + 60 * i, o, max(h, o, c), min(lo, o, c), c, 100.0 * r.randint(5, 50)))
+        p = c
+    with pytest.raises(ValueError) as e:
+        _check_sigma(rally, _sizes(rally), 1e-9)
+    least = float(re.search(r"at least ([0-9.e+-]+)$", str(e.value)).group(1))
+    assert least >= 0.05 / 21.5, str(e.value)          # the band's own nickel, near its bottom
