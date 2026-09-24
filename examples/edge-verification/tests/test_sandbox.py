@@ -1212,3 +1212,48 @@ def test_an_honest_thread_pool_runs_under_the_default_limits(tape, tmp_path):
             return [0] * len(bars)
     """)
     assert Sandbox.from_file(pool, work_root=tmp_path / "p")(tape) == [0] * len(tape)
+
+
+# -- round seventeen ------------------------------------------------------------------------
+
+@pytest.mark.skipif(not NAMESPACED, reason="the namespace tier is where the namespace dies with its launcher")
+def test_a_strategy_that_leaves_its_process_group_dies_with_the_run(tape, tmp_path):
+    """In the namespace tier the wall-clock kill reached only the launcher's process group: a strategy
+    that called setsid and blocked survived it, reparented to init, and held the run's pipes open,
+    so the parent took eighteen seconds to return from a three-second limit."""
+    import subprocess
+    import time
+    hang = strategy_file(tmp_path, "setsid17", """
+        import os, threading
+        def signals(bars):
+            os.setsid()
+            threading.Event().wait(40)
+            return [0] * len(bars)
+    """)
+    t0 = time.monotonic()
+    with pytest.raises(Timeout):
+        Sandbox.from_file(hang, work_root=tmp_path / "r", limits=Limits(wall_s=3))(tape)
+    assert time.monotonic() - t0 < 10
+    time.sleep(0.5)
+    # the child runs as `python -s -B /work/_child.py /work <entry> ...`; match that, not this test
+    left = subprocess.run(["pgrep", "-f", r"_child\.py /work setsid17 "], capture_output=True, text=True).stdout.split()
+    assert not left, left
+
+
+def test_the_strategys_own_stderr_is_quoted_as_it_was(tape, tmp_path):
+    """Every stderr line starting 'unshare: ' was dropped as the launcher's, in both tiers, without a
+    word -- a strategy's own last line among them."""
+    own = strategy_file(tmp_path, "err17", """
+        import os, sys
+        def signals(bars):
+            print("loading", file=sys.stderr)
+            print("unshare: feed lock held by another worker; aborting", file=sys.stderr, flush=True)
+            os._exit(2)
+    """)
+    with pytest.raises(StrategyError) as e:
+        Sandbox.from_file(own, work_root=tmp_path / "p", isolation="plain")(tape)
+    assert "unshare: feed lock held" in str(e.value)
+    if NAMESPACED:
+        with pytest.raises(StrategyError) as e:
+            Sandbox.from_file(own, work_root=tmp_path / "n")(tape)
+        assert "unshare: feed lock held" in str(e.value) or "left out as the launcher's" in str(e.value)

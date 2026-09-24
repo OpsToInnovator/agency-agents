@@ -342,6 +342,21 @@ exec unshare --user -- "$py" -s -B /work/_child.py /work "$entry" "$func" "$ofd"
 _START_LINE = b'{"kind": "start", "detail": ""}\n'     # the child's first record line, exactly
 
 
+def _kill_child() -> list[str]:
+    """``--kill-child`` where this unshare has it: the kernel then kills the namespace's first process,
+    and with it every process in the namespace, when the launcher dies. Without it a strategy that
+    left the launcher's process group (setsid) outlived the wall-clock kill, reparented to init, and
+    held the run's pipes open for a quarter of a minute (a seventeenth red team)."""
+    if "kc" not in _ISOLATION_CACHE:
+        try:
+            out = subprocess.run([shutil.which("unshare") or "unshare", "--help"], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _ISOLATION_CACHE["kc"] = ["--kill-child"] if "--kill-child" in out else []
+    return _ISOLATION_CACHE["kc"]
+
+
 def _drain(fd: int, sink: list[bytes], cap: int, *, tail: bool = False) -> threading.Thread:
     """Read to EOF so the child never blocks on a full pipe, keep at most ``cap`` bytes, and
     say whether more than that arrived -- exactly ``cap`` is within it. A result or a record larger than the cap is not
@@ -502,7 +517,7 @@ class Sandbox:
         if self.isolation == "namespace":
             visible = self._bound_roots()
             cmd = [shutil.which("unshare") or "unshare", "--user", "--map-root-user", "--mount",
-                   "--net", "--uts", "--ipc", "--pid", "--fork", "--", "sh", "-c", _NS_SCRIPT, "sh",
+                   "--net", "--uts", "--ipc", "--pid", "--fork", *_kill_child(), "--", "sh", "-c", _NS_SCRIPT, "sh",
                    sys.executable, str(run), self.entry, self.func,
                    str(out_w), str(viol_w), self._shelf(),
                    str(max(1, self.limits.run_dir_bytes // (1024 ** 2))),
@@ -604,8 +619,14 @@ class Sandbox:
             # soft one, for a strategy that ignored SIGXCPU) or a SIGXCPU at the soft limit is the
             # CPU limit; a twelfth red team's segfault at 1.95s of a 2s limit was reported as
             # having used the limit, because the parent's count includes the namespace setup.
-            tail = " | ".join([ln for ln in (errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()
-                               if not ln.startswith("unshare: ")][-3:])
+            lines = (errs[0] if errs else b"").decode("utf-8", "replace").strip().splitlines()
+            launcher_tail = " | ".join(lines[-3:])
+            # In the namespace tier the launcher's own 'unshare:' lines share the pipe; they are left
+            # out of the strategy's, and the report says so -- a strategy's own line that starts the
+            # same way was dropped without a word (a seventeenth red team)
+            own = [ln for ln in lines if not ln.startswith("unshare: ")] if self.isolation == "namespace" else lines
+            tail = " | ".join(own[-3:]) + (" (lines starting 'unshare: ' left out as the launcher's)"
+                                           if len(own) != len(lines) else "")
             rc = proc.returncode
             sig = -rc if rc is not None and rc < 0 else None
             hard = self.limits.cpu_enforced + 3
@@ -615,7 +636,7 @@ class Sandbox:
                 how = (f"killed by {signal.Signals(sig).name}" if sig is not None and sig in signal.valid_signals()
                        else f"rc={rc}")
                 raise SandboxError(f"the sandbox stopped before the strategy was imported ({how}); these Limits "
-                                   f"may be too tight for the launcher itself. The launcher's stderr ended: {tail}")
+                                   f"may be too tight for the launcher itself. The launcher's stderr ended: {launcher_tail}")
             # The kernel kills on CPU it samples in scheduler ticks, and the exact figure wait4 returns
             # can read well short of it: under load a fifteenth red team's kill read 4.997s of a 5s hard
             # limit, a sixteenth's 3.77s of 4. So a SIGKILL near the hard limit is worded as what it may
@@ -688,10 +709,12 @@ class Sandbox:
                                        f"{self.limits.fsize_bytes} bytes: the limit, or an error the strategy "
                                        f"raised itself -- the sandbox cannot tell which")
             if etype == "RuntimeError" and emsg.strip("'\"").startswith("can't start new thread"):
-                raise ResourceExceeded(f"{etype}: {emsg} -- the limit of {self.limits.nproc} processes, the "
-                                       f"memory limit of {self.limits.memory_bytes} bytes (each thread reserves "
-                                       f"address space for its stack), or an error the strategy raised itself "
-                                       f"-- the sandbox cannot tell which")
+                # the kernel exempts root from the process limit, so under a root auditor it cannot
+                # be the cause (a seventeenth red team)
+                procs = "" if os.geteuid() == 0 else f"the limit of {self.limits.nproc} processes, "
+                raise ResourceExceeded(f"{etype}: {emsg} -- {procs}the memory limit of {self.limits.memory_bytes} "
+                                       f"bytes (each thread reserves address space for its stack), or an error the "
+                                       f"strategy raised itself -- the sandbox cannot tell which")
             raise StrategyError(f"{etype}: {emsg}")
 
         if self.isolation == "namespace":
@@ -923,7 +946,12 @@ def precheck(sandbox: Sandbox, tape: Sequence[Any]) -> Precheck:
 def prove(sandbox: Sandbox, tape: Sequence[Any], **kw: Any) -> tuple[Precheck, Report | None]:
     """Gates first, probes second, never the other way round. A strategy the gate's
     continuation could not move is still probed, and a proof against it is still a proof;
-    a clean result on it is withheld."""
+    a clean result on it is withheld. The tape and every argument are checked before the gates run
+    the strategy at all: refused after them, a bad sigma or tape cost every run they made (a twentieth
+    and a twenty-first red team)."""
+    from .causality import _check_arguments
+    args, _ = _check_arguments(tape, **kw)
+    kw = {**kw, **{k: v for k, v in args.items() if k in kw}}
     pc = precheck(sandbox, tape)
     if pc.provable:
         return pc, check_causality(sandbox, tape, **kw)

@@ -296,6 +296,25 @@ named a floor size nothing used, and an honest 32-worker thread pool could not s
 default 2 GiB address-space limit, glibc reserving a 64 MiB malloc arena per thread (the child now
 runs with `MALLOC_ARENA_MAX=2`).
 
+The seventeenth found what round sixteen's tail opened. Drawn again and again from a window of
+sixty-odd bars, half a rebuilt tail came from donors used twice, and it repeated its own runs as
+no real tape does: donors are now drawn without replacement within a rebuild. One set of times
+of day per weekday, merged across a change of clock, gave every rebuilt day both sessions' bars
+(90 where every real day had 78): each real day now keeps its own open and close, and a day past
+the tape's ends takes the nearest real day of its weekday's. A bar the calendar moved — across a
+weekend, a holiday — took a donor from after an ordinary night, so Mondays lost their gaps: such a
+bar now takes a donor that came after the same kind of gap. The next bar's early and late were
+planned from every step the tape makes, so a late bar in the middle of a session was an
+overnight gap long and ended the rebuilt day at ten in the morning: they are now planned from the
+steps the tape makes after a bar at that time of day. Tail moves and wicks, jittered and set on a
+coarse tick, went up to twice the largest the tape made under a proof line that said "the tape's
+own scale": they are capped at it. The note said the tail kept the tape's times of day on tapes
+with no calendar, and its volatility under a caller's sigma; it now says what each tape got. And
+the sandbox: a strategy that left its process group outlived the wall-clock kill in the namespace
+tier; the process limit counted every process the user ran elsewhere; a thread that could not
+start was blamed on a process limit the kernel does not apply to root; and a strategy's own stderr
+line that started "unshare:" was dropped as the launcher's without a word.
+
 Measured directly — two-sample tests of the rebuilt tail against the real one, over many
 boundaries and seeds — the same round found the tail's own seams. Donor runs started anywhere on
 the tape kept their own clock and level: on a 09:30–15:55 session tape more than half the rebuilt
@@ -311,20 +330,158 @@ coupling tells from nearly every rebuild to almost none. The cost is stated in t
 that keeps the tape's level where it stands varies that level less, so a read of the level of
 volume or volatility further ahead, or of a later bar's exact date, can go unseen.
 
+The eighteenth found what round seventeen's tail opened. Made of every later bar once, in runs,
+a rebuilt tail was the real tail reshuffled and ended where the real tape did, so a strategy that
+read the direction from its bar to the tape's last bar was caught in none of twelve audits. About
+one rebuilt bar in three is now a single bar from near it, standing in for its run's next bar,
+which the run passes by: at the same time of day, traded or not as that bar, close to its volume
+and from a stretch as volatile; no two donors ever follow each other twice, so no run repeats. The
+spread of a rebuilt tail's end around the real one went from 0.1–0.3 of a walk's spread over the
+same bars to 0.4–0.95, by tape, and the same reader was caught in 10 to 17 of 24 one-bar audits,
+by seed (14 on a GARCH tape, 6 on one whose volume trends); the clustering
+the runs keep stayed where it was (lag-one autocorrelation of log volume on a GARCH tape: real
+0.33, before 0.30, now 0.29–0.30). The note says what is left: the price far ahead strays from the
+tape's own less than a walk of its own would. A tail too short for runs, under eight bars, had been
+rebuilt from runs of the bars before the probed one, copies of what the strategy had already seen;
+it is now made of single bars only. The calendar looked twenty days ahead for the next day and
+past a longer halt stepped blindly through weekends; it now takes the next day from the tape's own
+days. A step a donor made across its own night was judged by the UTC date, so a session that
+crosses midnight UTC took its breaks at the wrong times; a rebuilt step is now kept only where the
+tape makes that step from that time of day and weekday. Under a caller's sigma, donor moves were
+scaled by the whole tape's volatility, so on a tape loud and then quiet the tail moved 0.0007 a
+bar under a sigma of 0.01; each is now scaled by the volatility around its donor. The calendar was found again for
+every rebuild, at a cost that grew with the square of the tape; it is now found once per audit,
+and a tape of event bars, whose times keep no step, has none. Rebuilt gaps and volumes went up to
+1.16 times the largest the tape printed; they are capped at it, as moves and wicks were.
+
+The nineteenth found four holes in those changes. Scaled by the volatility around its donor, a bar
+from a still stretch had nothing to scale, and was given a normal move of the caller's sigma: an
+untraded bar that moved, which the tape never prints, and a strategy reading the next bar unless it
+saw one walked. A still stretch now stays still; only a tape with no moves at all is moved by the
+sigma alone. A sigma below the tape's tick at a $2 stock's price rounded every rebuilt move to
+nothing under a proof line that said "moves of sigma 0.0005", and a strategy keyed on the dojis
+walked: a sigma below the tick, as a share of the price, at any price the tape closed at is now
+refused, naming the bar and the least sigma that would do. The next bar's planned open was not held
+to the tape's largest gap, as the later bars' were, and went 1.19 times past it on a sub-dollar
+tape under "the tape's own scale": it is now, set the other way on the grid where that fits and
+named in the proof line where it does not. And two changes of tick, each with only its two printed
+prices, were joined by the least common multiple of their float-noise widths into a grid of one
+reachable point, which a snap up returned below its input: a wick 1.03 times the largest. Such
+grids are no longer joined, and a snap's tolerance is a billionth of the price where the step is
+wider. Under a caller's sigma the note now says the price far ahead is the tape's own later moves,
+rescaled, rather than comparing it with a walk: on a trending tape it strayed three times farther
+than a walk at that sigma.
+
+The twentieth found two print rules the grid search could not reach, and the edges of round
+nineteen's sigma. Candidate steps ran from 1e-9 to 5,000, so a volume lot of 100,000 was taken for
+5,000 and a token's 1e-10 tick for no grid at all; a volume read made only on the real lot, and a
+close read made only where the close is written to ten places, walked under a note that said
+"volumes on its own lot", or said nothing of the prices. The steps now run from 1e-18 to 5e15, as
+far as the floats can hold them at the tape's size, and the note says "the lot found in it", and
+says so where no price grid or lot was found. The least sigma a refusal named was rounded down and
+refused again; it is now rounded up. A tape of no moves at all was never moved by the sigma, since
+its realized volatility is floored above zero: it now is, as the note said. A float tape took a
+sigma of 1e-17 over a tail of dojis; a sigma of five hung the snap on prices of 1e21, and one of a
+million overflowed. A sigma is now refused below a thousand units in the float's last place at any
+close, and above 0.5, and a snap on floats too coarse for the step returns at once. The refusal
+comes before the strategy runs at all, in `check_causality` and in `prove`, where it came after a
+run a bar. One bad print at a cent can leave no sigma a tape can take; the refusal says so. Under a
+sigma the note now says the tail is still where the tape is still, and that the price far ahead is
+the tape's own moves near it, rescaled: near the end of a tape most of them came from before the
+probed bar. On session tapes the next bar's planned gap is drawn from every gap the tape made,
+overnight ones too, so a read that stands down on a gap larger than any at that time of day can
+walk; the note's "how far the next bar gaps" covers it.
+
+The twenty-first found a relation the enumeration had never held: the next bar's open was pushed
+past this bar's open and close and the previous bar's levels, never past this bar's own high or
+low, and on a session tape whose intraday gaps are a tick, a strategy reading "the next bar opens
+above this one's high" walked nine audits in twenty-four, every bar probed. It is now owed wherever
+a gap the tape has made can carry the open past it from a bar with no wick on that side (or a wick
+shorter than the gap), and built so: the close toward it, no wick where the tape prints bars with
+none, the gap sized from the close. The note says so, and repairs on a gappy tape went from 12% of
+runs to 17–18%. And round twenty's sigma had edges of its own: the least a refusal named was rounded
+down still (an epsilon in the rounding), and is now rounded up exactly; a sigma just past 0.5 was
+printed as 0.5 and is printed as given; a level grid fitted to one bad print was named "the tape's
+tick, 2 of its price", and is now "the tick, 1 of its price", the tape's own; a Decimal sigma, a
+numpy seed and a bad tape given to `prove` failed only after the strategy ran, and are now checked
+first, the integers taken for what they are. On a trending tape the donors' drift, rescaled with
+their moves, took the tail to a cent of dojis under "the given sigma's", or to infinity, which
+crashed the audit and handed an honest strategy an infinite price: moves are now rescaled net of
+the drift around them, and the walk turns back where its prices would leave the range a tick can
+move by the sigma, or e^10 past the tape's own. The note no longer tells a tape of no moves that
+its tail is still, nor a tape of no trades that its volumes are any float, and the grid search's
+float guard is a chance of fit, not a flat hundredth of a step: it had dropped the cent on prices of
+5.5e11 and the lot of one on volumes of 2^46.
+
+The twenty-second found the new push built only one way. The next open past the bar's own high
+came only from a bar with no wick there -- its high on its close, a tie nothing tracked -- so a
+strategy that read the next open unless it saw that shape walked, 14 audits in 16. The push now
+keeps a wick of the tape's own first and builds the wickless bar only after; a high or low on the
+bar's own close counts as a tie, as one on its open always did, so such a draw is credited only
+where the real bar printed the same; and a next open exactly on the bar's own high or low is
+pushed where the tape prints one, as the note's list of ties now says. The cost is a few bars more
+where a tight inside range has no price between its close and the previous bar's range, which the
+report counts (four to eleven of two hundred on a session tape, by the seed). The step cap round twenty-one added, four
+decades above the finest step every price shares, let one high of seven places hide a nickel tick;
+it is now four decades above the grid nine prices in ten share. The same stray print let a
+0.9-adjusted step of 3.125e-7 fit every cent price, which is older: an adjusted grid is now taken
+only where it is no finer than the grid most prices share. Round twenty-one's sigma had three more
+edges. The check yielded a real era's or band's tick to the whole tape's, so it named a nickel era's
+tick at a fifth of itself and took a sigma under a band's cent that made the tail all dojis: it now
+yields only for a level grid of a print or two. Its lower bound came from a coarser grid than the
+check priced and held a tail 3.6 times above the tape: it is never above the tape's lowest close,
+and an open set back inside it is set on the grid. And the rescale jittered each move before
+removing the drift, so a trend's tail moved at up to 5.6 times the sigma: moves are now
+standardized first, over the bars around the donor that moved, and jittered after -- 1.0 times the
+sigma on the same tapes. A tape where nothing traded is no longer owed a push away from zero at
+every bar, and a sigma too large for a float or a lone boundary is refused as the others are.
+
+The twenty-third found round twenty-two's tie in the wrong place. A high or low on the bar's own
+close had gone into the field that already held a high or low on its open or on a previous-bar
+level, so at a bar whose real high sat on the previous high a wickless draw was credited, and the
+round-twenty-two evader walked there, a third of the audits at such bars on a session tape. Each
+tie now has a field of its own -- the close, high or low on a previous-bar level, on the bar's own
+open, and the high or low on its own close; the next open on a level or the bar's open, on its
+close, and on its own high or low -- and those bars are proven in every audit measured (114 of 114
+on the session and tick-and-lot tapes). The cost falls on the penny tape, where a cent leaves no
+tie-free price at most bars: nine in ten of its bars at 37 cents now come up short, where two in
+three did, and the report counts them. One stray print still hid a tick round twenty-two meant to
+keep: a rounded or adjusted grid (1/32 written to four places, a 3-for-2 adjusted cent) had to fit
+every price at the stray's places. It is now fitted at the places most prints are written to, with
+a tenth of the prints allowed off it, and those kept as its finer grid at the rate they print. The
+grid the step cap and each price level's grid are judged by now counts prints, not distinct prices
+-- fifteen strays printed once each were a tenth of a nickel tape's 77 prices -- and a run of one
+grid in time is no longer cut by a stray bar in ten. Evaders keyed on the resulting off-rule prices,
+which walked every bar probed on those tapes, are proven. Under a sigma each donor's move was
+standardized against its window's mean: on a tape climbing a cent a bar every donor sat at that
+mean, and the tail moved at 0.3 times the sigma, 83% dojis. It is now standardized against a
+quadratic through the moves around it, and where those are all trend a normal draw of the sigma
+stands in: 1.0 times the sigma on those tapes, 0.97 to 1.07 on the others measured; the note says
+the gaps keep the tape's own sizes, which a sigma does not rescale. A bad close at 25 on a tape at
+50 no longer names a grid of 0.02 as its tick; 10**400, a sigma under the least float and a Decimal
+are refused for what they are, not as "not a positive finite number"; more than a thousand draws is
+refused before any run; and Decimal prices or a generator of bars are refused with the bar or the
+reason named.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
-four draws (the every-bar default), and about 12% on a gappy one, where an ungapped next open
+four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are about twelve a bar, and a third of its bars still come up short: at two
-cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
-did not print, which is not counted. The report counts every such bar. A tick that is coarse
+one-cent tick they are twelve to thirty a bar, and a fifth to nine in ten of its bars still come
+up short, by the tape (43–45% on the eighteenth and nineteenth red teams', 90–91% on the
+twenty-second's at 37 cents, where a cent is about the largest gap the tape makes and most wicks
+are a cent or none): at two cents a doji forces the high and the low onto the open too, and at 37
+cents a next open a cent away lands on a level or on the bar's own high or low, draws carrying ties
+the real bar did not print, which are not counted. The report counts every such bar. A tick that is coarse
 for its price level costs the same way: a stock just above a dollar on cents came up short at
 60 of 196 bars, a three-band spread table at 51 of 296, a tick that changed from 0.05 to 0.01
 at 24 of 296. The same round found that zero volume had
 never been pushed at all: after an untraded bar every push was a multiple of zero, so "does
 this bar trade" never moved. Zero is now a level like the others — pushed to and away from,
-where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar.
+where the tape prints zeros — and rebuilt bars take whether they traded from a donor bar. An
+every-bar audit rebuilds the tail at every bar, so its time grows with the square of the tape:
+about eight minutes at 2,000 daily bars on the machine measured.
 
 Every-bar mode uses four draws by default. The report says what was pushed where at the
 bars that did not diverge, that probing of a bar stopped at its first divergence, how many
@@ -469,8 +626,9 @@ Two tiers, and the report says which ran:
 |---|---|---|
 | fresh interpreter per run, `-s -B` | yes | yes |
 | child's environment built from scratch — no inherited keys or proxies | yes | yes |
-| rlimits: CPU, memory, processes, file size, open files, no core | yes | yes |
-| wall-clock kill of the whole process group, always, after every run | yes | yes |
+| rlimits: CPU, memory, file size, open files, no core | yes | yes |
+| a process limit over the run's own tasks (added to what the user already runs; the kernel exempts a root auditor from it, and threads are then bounded by the memory limit alone) | yes | yes |
+| wall-clock kill after every run: the whole process group, and in the namespace tier the whole namespace with its launcher, so a strategy that leaves its group dies too (`unshare --kill-child`; on a host whose `unshare` lacks it, the group only, as in the plain tier) | yes | group only |
 | audit hook that **records** every socket use and spawn, then refuses it — `multiprocessing`'s and `os.forkpty`'s included | yes | yes |
 | the **kernel** refuses every new process — `execve`, `fork`, any clone that is not a thread — by any route, `ctypes` included (seccomp, x86-64 and arm64; the report says whether it was on) | yes | yes |
 | results and the record travel over parent-owned pipes; child `_exit`s on write | yes | yes |
