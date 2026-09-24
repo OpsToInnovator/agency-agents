@@ -2833,7 +2833,7 @@ def test_the_next_open_past_the_own_high_is_pushed_from_a_bar_with_a_wick_too():
     from edgecheck.causality import _at_bar, _owed, _sizes, _tie_fields, draw_plans, realized_sigma
     from edgecheck.fixtures import Bar
     prev, bare = Bar(1.0, 10.0, 10.2, 9.9, 10.1, 5.0), Bar(2.0, 10.1, 10.3, 10.0, 10.3, 6.0)
-    assert "high" in _tie_fields([prev, bare], 1, _sizes(bars(40)))
+    assert "high_close" in _tie_fields([prev, bare], 1, _sizes(bars(40)))
     tape = _intraday_sessions()
 
     def reads_past_a_wick(k):
@@ -2922,3 +2922,145 @@ def test_round_twenty_two_sigma_and_arguments():
     for kw in ({"sigma": 10 ** 400}, {"boundaries": 30}):
         with pytest.raises(ValueError):
             check_causality(strat("clean_lagged").signals, bars(60), draws=4, seed=1, **kw)
+
+
+# ---------------------------------------------------------------- a twenty-third red team
+
+def _bare_reader(k, up):
+    """Reads whether the next bar opens past bar k's own high (``up``) or low -- the future at k --
+    and stands down where the bar has no wick that side: the shape the repair builds second."""
+    def st(bs):
+        out = [0] * len(bs)
+        if k + 1 < len(bs):
+            b, nb = bs[k], bs[k + 1]
+            wick = b.high - max(b.open, b.close) if up else min(b.open, b.close) - b.low
+            out[k] = int(wick > 0 and (nb.open > b.high if up else nb.open < b.low))
+        return out
+    return st
+
+
+def test_a_tie_on_the_bars_own_close_or_open_is_kept_apart_from_one_on_a_previous_level():
+    """A twenty-third red team: round twenty-two's tie of a high or low on the bar's own close shared a
+    field with a high or low on its open or on a previous-bar level, so at a bar whose real high sat
+    on the previous high a wickless draw was credited, and the round-twenty-two evader walked there,
+    a third of the audits on a session tape."""
+    from edgecheck.causality import _sizes, _tie_fields
+    from edgecheck.fixtures import Bar
+    prev = Bar(1.0, 10.0, 10.2, 9.9, 10.1, 5.0)
+    on_level = Bar(2.0, 10.1, 10.2, 10.0, 10.05, 6.0)     # its high on the previous high, a wick above its close
+    bare = Bar(2.0, 10.1, 10.3, 10.0, 10.3, 6.0)          # its high on its own close
+    sz = _sizes(bars(40))
+    real, drawn = _tie_fields([prev, on_level], 1, sz), _tie_fields([prev, bare], 1, sz)
+    assert "high" in real and "high_close" not in real and "high_close" in drawn - real
+    tape = _intraday_sessions(days=16)
+    for k, up, seed in ((185, True, 2), (181, True, 1), (83, True, 2), (6, False, 1), (65, False, 3), (175, False, 1)):
+        st = _bare_reader(k, up)
+        assert st(tape)[k] == 0 and (tape[k].high > max(tape[k].open, tape[k].close) if up
+                                     else tape[k].low < min(tape[k].open, tape[k].close))
+        r = check_causality(st, tape, boundaries=[k], draws=4, seed=seed)
+        assert r.proven, (k, up, seed, r.describe()[:160])
+
+
+def _printed(base, rule):
+    """A raw walk printed by ``rule``: each price rounded by it, the range holding the body."""
+    out = []
+    for b in base:
+        o, c = rule(b.open, b.ts), rule(b.close, b.ts)
+        out.append(dataclasses.replace(b, open=o, close=c, high=max(rule(b.high, b.ts), o, c),
+                                       low=min(rule(b.low, b.ts), o, c), volume=float(round(b.volume))))
+    return out
+
+
+def test_stray_prints_hide_no_rounded_adjusted_or_coarse_tick():
+    """A twenty-third red team: one high or low of six places still hid a 1/32 tick written to four
+    places and a 3-for-2 adjusted cent, because the rounded grid had to fit every price at the stray's
+    places; and fifteen strays on a nickel tape of 77 prices -- a tenth of its distinct prices, a
+    hundredth of its prints -- set the grid under the step cap, cut one-bar eras, and rebuilt prices
+    off the nickel. A strategy standing down on such a price walked every bar probed."""
+    import random
+    from edgecheck.causality import _perturbed, _sizes, draw_plans
+
+    def r32(x, ts=None):
+        return round(round(x * 32) / 32, 4)
+    t32 = _printed(bars(300, seed=12, price=101.0, vol=0.002, gap_prob=0.3), r32)
+    t32[122] = dataclasses.replace(t32[122], low=round(t32[122].low - 3e-6, 6))
+    assert _sizes(t32).price_grid.step == 0.03125
+
+    base = bars(300, seed=8, price=20.0, vol=0.004, gap_prob=0.3)
+    cut = base[150].ts
+    split = _printed(base, lambda x, ts: round(round(x * 1.5, 2) / 1.5, 4) if ts < cut else round(x, 2))
+    split[122] = dataclasses.replace(split[122], low=round(split[122].low - 3e-6, 6))
+    assert _sizes(split).price_grid.scale != 1.0
+
+    nickel = _printed(bars(300, seed=5, price=40.0, vol=0.004, gap_prob=0.3), lambda x, ts: round(round(x / 0.05) * 0.05, 2))
+    r = random.Random(3)
+    for i in r.sample(range(1, 300), 15):
+        nickel[i] = dataclasses.replace(nickel[i], high=round(nickel[i].high + r.choice((1, 3, 7)) * 1e-6, 7))
+    sz = _sizes(nickel)
+    assert sz.eras is None
+    short_off = []
+    for k in (60, 150, 220):
+        for i, plan in enumerate(draw_plans(1, k, 4)):
+            v = _perturbed(nickel, k, seed=k + i, sigma=None, plan=plan, sizes=sz)
+            short_off += [x for b in v[k:] for x in (b.open, b.high, b.low, b.close)
+                          if round(x, 4) == x and abs(x / 0.05 - round(x / 0.05)) > 1e-6]
+    assert not short_off, short_off[:5]
+
+
+def test_round_twenty_three_sigma_walk_and_refusals():
+    """A twenty-third red team: on a tape that climbs a cent a bar, each donor sat at its own window's
+    mean, and the tail under a sigma moved at 0.3 times it, 83% dojis, under 'moves of sigma'; one bad
+    close at 25 on a tape at 50 shared a grid of 0.02 with three real prices and the refusal named twice
+    the cent; 10**400, a sigma under the least float and a Decimal were each told they 'must be a
+    positive finite number'; ten million draws took the auditor's own memory; Decimal prices and a
+    generator of bars crashed with bare TypeErrors."""
+    import decimal
+    import random
+    import re
+    from fractions import Fraction
+    from edgecheck.causality import _perturbed, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    ramp, p = [], 100.0
+    for i in range(300):
+        c = round(p + 0.01, 2)
+        ramp.append(Bar(1.7e9 + 60 * i, p, c, p, c, 1000.0))
+        p = c
+    sz, moves = _sizes(ramp), []
+    for seed in range(6):
+        v = _perturbed(ramp, 100, seed=seed, sigma=0.01, plan=draw_plans(seed, 100, 4)[seed % 4], sizes=sz)
+        moves += [math.log(b.close / b.open) for b in v[102:]]
+    rms = math.sqrt(sum(m * m for m in moves) / len(moves))
+    assert 0.8 < rms / 0.01 < 1.25 and sum(m == 0 for m in moves) < 0.3 * len(moves), (rms, len(moves))
+
+    bad = _printed(bars(300, seed=4, price=50.0, vol=0.004, gap_prob=0.3, late_prob=0.0), lambda x, ts: round(x, 2))
+    b = bad[150]
+    bad[150] = dataclasses.replace(b, low=min(b.low, 25.0), high=max(b.high, 25.0), close=25.0)
+    with pytest.raises(ValueError, match=re.escape("the tick at bar 150, about 0.000401 of its price")):
+        check_causality(strat("clean_lagged").signals, bad, boundaries=[60], draws=4, seed=1, sigma=1e-12)
+
+    r, p, cents = random.Random(8), 50.0, []
+    for i in range(200):
+        o, h, lo, c = _walk_bar(r, p, 0.004, tick=0.01)
+        cents.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(r.randint(1, 50) * 100)))
+        p = c
+
+    runs = []
+
+    def counted(bs):
+        runs.append(1)
+        return [0] * len(bs)
+    for sigma, said in ((10 ** 400, "is more than the largest sigma taken"), (Fraction(1, 10 ** 400), "is below"),
+                        (decimal.Decimal("0.01"), "must be an int or a float"), (-(10 ** 400), "more than zero")):
+        with pytest.raises(ValueError, match=said) as e:
+            check_causality(counted, cents, boundaries=[60], draws=4, seed=1, sigma=sigma)
+        assert len(str(e.value)) < 300 and "positive finite" not in str(e.value)
+    with pytest.raises(ValueError, match="draws must be at most"):
+        check_causality(counted, cents, boundaries=[60], draws=10 ** 7, seed=1)
+    with pytest.raises(ValueError, match="bar 0 has a close of Decimal"):
+        check_causality(counted, [dataclasses.replace(b, close=decimal.Decimal(str(b.close))) for b in cents],
+                        boundaries=[60], draws=4, seed=1)
+    with pytest.raises(ValueError, match="sequence of bars"):
+        check_causality(counted, (b for b in cents), boundaries=[60], draws=4, seed=1)
+    assert not runs
+    note = check_causality(counted, cents, boundaries=[60], draws=4, seed=1, sigma=0.01).coverage_note()
+    assert "its gaps kept at the tape's own sizes" in note and "net of the trend they follow" in note

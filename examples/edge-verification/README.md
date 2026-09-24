@@ -415,13 +415,13 @@ float guard is a chance of fit, not a flat hundredth of a step: it had dropped t
 
 The twenty-second found the new push built only one way. The next open past the bar's own high
 came only from a bar with no wick there -- its high on its close, a tie nothing tracked -- so a
-strategy that read the next open unless it saw that shape walked, 9 audits in 16. The push now
+strategy that read the next open unless it saw that shape walked, 14 audits in 16. The push now
 keeps a wick of the tape's own first and builds the wickless bar only after; a high or low on the
 bar's own close counts as a tie, as one on its open always did, so such a draw is credited only
 where the real bar printed the same; and a next open exactly on the bar's own high or low is
 pushed where the tape prints one, as the note's list of ties now says. The cost is a few bars more
 where a tight inside range has no price between its close and the previous bar's range, which the
-report counts (four of two hundred on a session tape). The step cap round twenty-one added, four
+report counts (four to eleven of two hundred on a session tape, by the seed). The step cap round twenty-one added, four
 decades above the finest step every price shares, let one high of seven places hide a nickel tick;
 it is now four decades above the grid nine prices in ten share. The same stray print let a
 0.9-adjusted step of 3.125e-7 fit every cent price, which is older: an adjusted grid is now taken
@@ -436,16 +436,44 @@ standardized first, over the bars around the donor that moved, and jittered afte
 sigma on the same tapes. A tape where nothing traded is no longer owed a push away from zero at
 every bar, and a sigma too large for a float or a lone boundary is refused as the others are.
 
+The twenty-third found round twenty-two's tie in the wrong place. A high or low on the bar's own
+close had gone into the field that already held a high or low on its open or on a previous-bar
+level, so at a bar whose real high sat on the previous high a wickless draw was credited, and the
+round-twenty-two evader walked there, a third of the audits at such bars on a session tape. Each
+tie now has a field of its own -- the close, high or low on a previous-bar level, on the bar's own
+open, and the high or low on its own close; the next open on a level or the bar's open, on its
+close, and on its own high or low -- and those bars are proven in every audit measured (114 of 114
+on the session and tick-and-lot tapes). The cost falls on the penny tape, where a cent leaves no
+tie-free price at most bars: nine in ten of its bars at 37 cents now come up short, where two in
+three did, and the report counts them. One stray print still hid a tick round twenty-two meant to
+keep: a rounded or adjusted grid (1/32 written to four places, a 3-for-2 adjusted cent) had to fit
+every price at the stray's places. It is now fitted at the places most prints are written to, with
+a tenth of the prints allowed off it, and those kept as its finer grid at the rate they print. The
+grid the step cap and each price level's grid are judged by now counts prints, not distinct prices
+-- fifteen strays printed once each were a tenth of a nickel tape's 77 prices -- and a run of one
+grid in time is no longer cut by a stray bar in ten. Evaders keyed on the resulting off-rule prices,
+which walked every bar probed on those tapes, are proven. Under a sigma each donor's move was
+standardized against its window's mean: on a tape climbing a cent a bar every donor sat at that
+mean, and the tail moved at 0.3 times the sigma, 83% dojis. It is now standardized against a
+quadratic through the moves around it, and where those are all trend a normal draw of the sigma
+stands in: 1.0 times the sigma on those tapes, 0.97 to 1.07 on the others measured; the note says
+the gaps keep the tape's own sizes, which a sigma does not rescale. A bad close at 25 on a tape at
+50 no longer names a grid of 0.02 as its tick; 10**400, a sigma under the least float and a Decimal
+are refused for what they are, not as "not a positive finite number"; more than a thousand draws is
+refused before any run; and Decimal prices or a generator of bars are refused with the bar or the
+reason named.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
 own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
-one-cent tick they are about twelve a bar, and a fifth to two thirds of its bars still come up
-short, by the tape (43–45% on the eighteenth and nineteenth red teams', 63% on the twenty-second's
-at 37 cents): at two
-cents a doji forces the high and the low onto the open too, a draw carrying ties the real bar
-did not print, which is not counted. The report counts every such bar. A tick that is coarse
+one-cent tick they are twelve to thirty a bar, and a fifth to nine in ten of its bars still come
+up short, by the tape (43–45% on the eighteenth and nineteenth red teams', 90–91% on the
+twenty-second's at 37 cents, where a cent is about the largest gap the tape makes and most wicks
+are a cent or none): at two cents a doji forces the high and the low onto the open too, and at 37
+cents a next open a cent away lands on a level or on the bar's own high or low, draws carrying ties
+the real bar did not print, which are not counted. The report counts every such bar. A tick that is coarse
 for its price level costs the same way: a stock just above a dollar on cents came up short at
 60 of 196 bars, a three-band spread table at 51 of 296, a tick that changed from 0.05 to 0.01
 at 24 of 296. The same round found that zero volume had
