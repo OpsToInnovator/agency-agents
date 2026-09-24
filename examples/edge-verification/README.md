@@ -477,6 +477,20 @@ rally, whose nickel then yielded to the tape's cent: a sigma under the band's ti
 tail there was 90% dojis under "moves of sigma". A level grid now yields only where chance would also
 put that many of the tape's prices on it.
 
+The same round's grid reviewer found three of round twenty-three's grid changes too loose, each
+proven on round twenty-two's code and missed on round twenty-three's. With prints off a rounded rule
+allowed first, the coarsest rule that fit nine prints in ten won: a tape quoted in 64ths was rebuilt
+on 32nds. A rule every price fits is now taken first, and prints off a rule are allowed only where
+none fits them all, and never for a plain decimal step. A cent tape dipping under a dollar was fit a
+10-for-9 split it never had, every cent being a point of 0.001/0.9: only a price off every coarser
+decimal grid a rule refines now counts as evidence for it. And a 25-bar half-cent era, whose last
+bars printed cents by chance, was smoothed away as strays, and where found was joined to the whole
+tape's cents, which print half-cents only at a rate: a short stretch now takes its neighbours' grid
+only where most of its bars sit on it, and an era keeps a tick its price level prints at a rate. The
+sigma check also named the top prices of a cent tape, even by chance, a tick of 0.02: it now looks at
+the prices its era printed near the close, and where most sit off the level grid it takes the
+tape's.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot

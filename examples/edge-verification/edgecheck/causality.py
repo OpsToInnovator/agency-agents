@@ -1164,6 +1164,9 @@ _STEPS = sorted({m * 10.0 ** p for p in range(-18, 16) for m in (5.0, 2.5, 2.0, 
                 | {10.0 ** p / 2 ** j for p in range(-6, 4) for j in range(3, 9)}, reverse=True)
 
 
+_DECIMALS = sorted({m * 10.0 ** p for p in range(-18, 16) for m in (5.0, 2.5, 2.0, 1.0)}, reverse=True)
+
+
 def _grid(values: Sequence[float], share: float = 1.0, steps: Sequence[float] | None = None,
           prints: bool = False) -> Grid | None:
     """The coarsest grid at least ``share`` of the values sit on, at the offset they share, or None:
@@ -1335,6 +1338,11 @@ def _joined(era: Grid | None, whole: Grid | None) -> Grid | None:
         return era
     if _covers(whole, era):
         return era
+    if whole.fine is not None and _covers(whole.fine, era):
+        # the price level prints the era's finer tick at a rate, where it was counted by prints: the era
+        # printed that tick throughout, and joined to the level's coarser grid a 25-bar half-cent era
+        # was rebuilt on cents at the level's rate (a twenty-fourth red team)
+        return era
     if _covers(era, whole):
         return whole
     if era.scale == 1.0 and whole.scale == 1.0 and abs(era.off - whole.off) < 1e-12:
@@ -1439,7 +1447,10 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
                 for t in range(a, b):
                     label[t] = st
     # A stretch shorter than a run -- bars left between two runs of one grid by strays more than a
-    # run lets by -- is not an era of its own: it takes its neighbours' grid, or the finer of two.
+    # run lets by -- is not an era of its own: it takes its neighbours' grid, or the finer of two, where
+    # most of its bars sit on that grid. Where they do not, it is a real era the runs around it ate into
+    # across its chance bars: a 25-bar half-cent era shrank to 18 and was taken for strays (a
+    # twenty-fourth red team).
     segs: list[list] = []
     for t in range(n):
         if segs and segs[-1][0] == label[t]:
@@ -1450,7 +1461,8 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int
         if b - a >= least or len(segs) == 1:
             continue
         near = [segs[x][0] for x in (j - 1, j + 1) if 0 <= x < len(segs) and segs[x][2] - segs[x][1] >= least]
-        if near:
+        if near and 2 * sum(1 for t in range(a, b) if all(on(v, min(near)) for v in per_bar[t]
+                                                          if v > 0 and math.isfinite(v))) > b - a:
             to = min(near)
             for t in range(a, b):
                 label[t] = to
@@ -1492,48 +1504,66 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
         return None
     digits = ref.digits
     unit = 10.0 ** -digits
-    # prints off the rule only where they share a grid the rebuild can print them on at their rate:
-    # left out, a strategy keyed on their absence would tell the rebuild apart the other way
+
+    def search(allowed: int, decimal_at_one: bool) -> tuple:
+        best, best_eff, best_off = None, 0.0, ()
+        for r in _RATIOS:
+            for base in _STEPS:
+                eff = base / r
+                if eff <= max(ref.step * 1.5, 3 * unit) or eff <= best_eff * (1 + 1e-9):
+                    break
+                decimal = any(abs(eff / st - 1) < 1e-9 for st in _DECIMALS)
+                if r != 1.0 and any(abs(eff / st - 1) < 1e-9 for st in _STEPS):
+                    continue                   # a decimal or binary tick: tried unscaled, at r == 1
+                if r == 1.0 and decimal and not decimal_at_one:
+                    continue                   # a decimal tick with prints off it: _grid's and _local_grids' job
+                if len(vals) * math.log(eff / unit) <= math.log(1e6):
+                    continue
+                points: dict[int, float] = {}
+                off: list[float] = []
+                missed = 0
+                for v in vals:
+                    k = round(v * r / base)
+                    if round(k * base / r, digits) != v:
+                        off.append(v)
+                        missed += counts[v]
+                        if missed > allowed:
+                            break
+                        continue
+                    points.setdefault(k, v)
+                else:
+                    # and not by chance: only a fitted price off every coarser decimal grid this one
+                    # refines is evidence for it -- every cent is a point of 0.001/0.9, and a cent tape
+                    # with a few sub-dollar prints was fit a 10-for-9 split it never had (a
+                    # twenty-fourth red team) -- less the ways of choosing the prices that do not fit
+                    coarse = next((d for d in reversed(_DECIMALS) if d >= 1.5 * eff
+                                   and abs(d / eff - round(d / eff)) < 1e-6), None)
+                    gone = set(off)
+                    fits = [v for v in vals if v not in gone]
+                    evidence = sum(1 for v in fits if coarse is None or abs(v / coarse - round(v / coarse)) > 1e-6)
+                    if evidence * math.log(eff / unit) - _log_choose(len(vals), len(off)) <= math.log(1e6):
+                        continue
+                    best, best_eff, best_off = Grid(base, 0.0, points, digits, True, scale=r), eff, tuple(off)
+                    break
+        return best, best_eff, best_off
+    # A rule every price fits first, as round twenty-two took it; prints off a rule only where none fits
+    # them all: with strays allowed first, the coarsest rule that fit nine prints in ten won, and a tape
+    # quoted in 64ths was rebuilt on 32nds (a twenty-fourth red team). Strays only where they share a
+    # grid the rebuild can print them on at their rate: left out, a strategy keyed on their absence
+    # would tell the rebuild apart the other way.
+    best, best_eff, best_off = search(0, True)
     every = _grid(vals)
-    allowed = int(sum(counts.values()) * (1.0 - share) + 1e-9) if every is not None else 0
-    best, best_eff, best_off = None, 0.0, ()
-    for r in _RATIOS:
-        for base in _STEPS:
-            eff = base / r
-            if eff <= max(ref.step * 1.5, 3 * unit) or eff <= best_eff * (1 + 1e-9):
-                break
-            if r != 1.0 and any(abs(eff / st - 1) < 1e-9 for st in _STEPS):
-                continue                       # a decimal tick: tried unscaled, at r == 1
-            if len(vals) * math.log(eff / unit) <= math.log(1e6):
-                continue
-            points: dict[int, float] = {}
-            off: list[float] = []
-            missed = 0
-            for v in vals:
-                k = round(v * r / base)
-                if round(k * base / r, digits) != v:
-                    off.append(v)
-                    missed += counts[v]
-                    if missed > allowed:
-                        break
-                    continue
-                points.setdefault(k, v)
-            else:
-                # and not by chance: every price that fits, less the ways of choosing those that do not
-                if (len(vals) - len(off)) * math.log(eff / unit) - _log_choose(len(vals), len(off)) <= math.log(1e6):
-                    continue
-                best, best_eff, best_off = Grid(base, 0.0, points, digits, True, scale=r), eff, tuple(off)
-                break
+    if best is None and every is not None:
+        best, best_eff, best_off = search(int(sum(counts.values()) * (1.0 - share) + 1e-9), False)
     # never finer than the grid nine prices in ten share: one stray print of seven places let a
     # step of 3.125e-7 at 0.9 fit every cent price, and rebuilt prices left the cent (a
     # twenty-second red team)
     if best is not None and common is not None and best_eff < common.step / common.scale * (1 - 1e-9):
         return None
-    if best is not None and best_off:
-        if every is not None:
-            span = (best_off[0] - best_eff, best_off[-1] + best_eff)
-            inside = sum(counts[v] for v in vals if span[0] <= v <= span[1])
-            best = best._replace(fine=every, rate=sum(counts[v] for v in best_off) / max(1, inside), span=span)
+    if best is not None and best_off and every is not None:
+        span = (best_off[0] - best_eff, best_off[-1] + best_eff)
+        inside = sum(counts[v] for v in vals if span[0] <= v <= span[1])
+        best = best._replace(fine=every, rate=sum(counts[v] for v in best_off) / max(1, inside), span=span)
     return best
 
 
@@ -1955,6 +1985,10 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
         raise ValueError(f"sigma must be more than zero, not {shown}")
     by, whole = _prices_by_bar(sizes), sizes.price_grid
     worst, why = None, ""
+    # the prices each era printed, for what the tape prints near a close
+    cuts = [0, *(sizes.eras.starts if sizes.eras else ()), len(tape)]
+    printed = [sorted({v for bb in tape[a:z] for v in (bb.open, bb.high, bb.low, bb.close) if v > 0})
+               for a, z in zip(cuts, cuts[1:])]
     for i, b in enumerate(tape):
         x = b.close
         if x <= 0:
@@ -1964,13 +1998,22 @@ def _check_sigma(tape: Sequence[Any], sizes: Sizes, sigma: float) -> None:
         if isinstance(h, Grid):
             share, kind = h.step / h.scale / x, "tick"
             near = sum(1 for v in h.vals.values() if abs(v - x) <= 0.05 * x)
+            # the tape's own prices near the close, in its era: where most sit off the level grid and
+            # on the whole one, the level grid is no tick the tape keeps there -- the top four prices
+            # of a cent tape, even by chance, were named a tick of 0.02 at 28.6 while the tape printed
+            # 28.59 beside it (a twenty-fourth red team)
+            era = printed[bisect.bisect_right(cuts, i) - 1]
+            lo_i, hi_i = bisect.bisect_left(era, x / 1.05), bisect.bisect_right(era, x * 1.05)
+            around = era[lo_i:hi_i]
+            finer = (isinstance(whole, Grid) and around and 2 * sum(1 for v in around if not _on_grid(h, v)
+                                                                   and _on_grid(whole, v)) > len(around))
             # ... and only where chance would put that many prices on it: a band crossed by a fast rally
             # has a print or two near each close, and its nickel yielded to the tape's cent, taking a
             # sigma that made the tail 90% dojis there (a twenty-fourth red team)
             chance = (len(h.vals) * math.log((h.step / h.scale) / (whole.step / whole.scale))
                       if isinstance(whole, Grid) and whole.step / whole.scale < h.step / h.scale else math.inf)
-            if (isinstance(whole, Grid) and h.vals and near <= 2 and chance <= math.log(1e6)
-                    and _on_grid(whole, x)):
+            if (isinstance(whole, Grid) and whole.step / whole.scale < h.step / h.scale and _on_grid(whole, x)
+                    and ((h.vals and near <= 2 and chance <= math.log(1e6)) or finer)):
                 # a level grid with a print or two at this price is no tick the tape keeps there: its
                 # whole grid. A real era's or band's is: yielding to the whole grid there, the check
                 # misnamed a nickel era's tick and took a sigma that made a band's tail all dojis (a

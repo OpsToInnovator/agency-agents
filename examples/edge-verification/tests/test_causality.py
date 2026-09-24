@@ -3114,3 +3114,49 @@ def test_round_twenty_four_tapes_refused_and_a_bands_tick_kept():
         _check_sigma(rally, _sizes(rally), 1e-9)
     least = float(re.search(r"at least ([0-9.e+-]+)$", str(e.value)).group(1))
     assert least >= 0.05 / 21.5, str(e.value)          # the band's own nickel, near its bottom
+
+
+def test_round_twenty_four_grids_rounded_adjusted_eras_and_the_tick_named():
+    """A twenty-fourth red team, on round twenty-three's grids: a tape quoted in 64ths was fit 32nds with
+    its odd 64ths as strays, the coarsest rule nine prints in ten fit winning over the one all fit; a cent
+    tape dipping under a dollar was fit a 10-for-9 split it never had, every cent being a point of
+    0.001/0.9; a 25-bar half-cent era was smoothed away as strays, and where found, joined to the whole
+    tape's cents at a price level that prints half-cents only at a rate; and the top prices of a cent
+    tape, even by chance, were named a tick of 0.02 while the tape printed the odd cents beside them."""
+    import random
+    from edgecheck.causality import _all_price_grids, _check_sigma, _perturbed, _sizes, draw_plans
+    from edgecheck.fixtures import Bar
+    r = random.Random(7)
+
+    def by_64ths(x, ts=None):
+        k = round(x * 64)
+        if k % 2 and r.random() > 0.11:
+            k += 1 if x * 64 > k else -1
+        return round(k / 64, 4)
+    t64 = _printed(bars(300, seed=12, price=101.0, vol=0.002, gap_prob=0.3), by_64ths)
+    assert _sizes(t64).price_grid.step == 0.015625
+
+    rr, walk, prev = random.Random(3), [], 1.1
+    for i in range(800):
+        target = 1.1 * math.exp(0.09 * math.sin(2 * math.pi * i / 100))
+        o = prev * math.exp(rr.gauss(0, 0.01 / 3)) if rr.random() < 0.3 else prev
+        c = o * math.exp(0.3 * math.log(target / o) + rr.gauss(0, 0.01))
+        h, lo = max(o, c) * math.exp(abs(rr.gauss(0, 0.005))), min(o, c) * math.exp(-abs(rr.gauss(0, 0.005)))
+        walk.append(Bar(1.7e9 + 60 * i, o, h, lo, c, float(rr.randint(1, 50) * 100)))
+        prev = c
+    dips = _printed(walk, lambda x, ts: round(x, 4) if x < 1 else round(x, 2))
+    assert all(g.scale == 1.0 for g in _all_price_grids(_sizes(dips)) if g is not None)
+
+    base = bars(400, seed=1, price=20.0, vol=0.004, gap_prob=0.3)
+    cut0, cut1 = base[200].ts, base[225].ts
+    era = _printed(base, lambda x, ts: round(round(x / 0.005) * 0.005, 3) if cut0 <= ts < cut1 else round(x, 2))
+    sz = _sizes(era)
+    assert sz.eras is not None and any(195 <= s <= 205 for s in sz.eras.starts), sz.eras
+    off_cent = []
+    for i, plan in enumerate(draw_plans(1, 203, 4)):
+        v = _perturbed(era, 203, seed=i, sigma=None, plan=plan, sizes=sz)
+        off_cent.append(sum(abs(x * 100 - round(x * 100)) > 1e-6 for b in v[203:215] for x in (b.open, b.high, b.low, b.close)))
+    assert max(off_cent) >= 16, off_cent               # the real era prints 22 of 48 off the cent there
+
+    top = _printed(bars(300, seed=6, price=25.0, vol=0.004, gap_prob=0.3), lambda x, ts: round(x, 2))
+    assert _check_sigma(top, _sizes(top), 0.0005) == 0.0005
