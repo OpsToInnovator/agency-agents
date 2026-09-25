@@ -3245,12 +3245,12 @@ def test_round_twenty_four_tapes_the_auditor_took_and_then_crashed_on():
 
 # -- round twenty-five ----------------------------------------------------------------------
 
-def test_round_twenty_five_a_band_breaking_an_era_is_smoothed_and_a_real_era_kept():
+def test_round_twenty_five_real_short_eras_are_kept():
     """Round twenty-four kept a short stretch as an era wherever its bars were off its neighbours'
-    grid, and a price band is off it too: the round-fourteen test of banded ticks broke. Smoothed
-    where its price levels explain it, by levels read off the stretch itself an 18-bar half-cent
-    era in a cent tape was a band of its own; and at an era's edge, cent bars joined to a 20-bar
-    nickel era put the era on cents."""
+    grid, and a price band is off it too: the round-fourteen test of banded ticks broke. Rules that
+    smoothed such a stretch where its price levels explained it erased real eras: read off the
+    stretch itself, an 18-bar half-cent era in a cent tape was a band of its own; at an era's edge,
+    cent bars joined to a 20-bar nickel era put the era on cents."""
     import random
     from edgecheck.causality import _sizes
     base = bars(400, seed=4, price=20.0, vol=0.004, gap_prob=0.3)
@@ -3267,3 +3267,239 @@ def test_round_twenty_five_a_band_breaking_an_era_is_smoothed_and_a_real_era_kep
         nickel[i] = dataclasses.replace(nickel[i], high=round(nickel[i].high + r.choice((1, 3, 7)) * 1e-6, 6))
     eras = _sizes(nickel).eras
     assert eras is not None and 300 in eras.starts and 320 in eras.starts, eras
+
+
+def _by_index(base, a, z, inner, outer, stray=0.0, seed=0):
+    """``base`` printed by ``inner`` over bars a..z-1 and ``outer`` elsewhere; with ``stray``, a
+    share of the bars carrying one high a few millionths off every tick."""
+    out = [dataclasses.replace(b, open=(f := inner if a <= i < z else outer)(b.open), close=f(b.close),
+                               high=max(f(b.high), f(b.open), f(b.close)), low=min(f(b.low), f(b.open), f(b.close)),
+                               volume=float(round(b.volume))) for i, b in enumerate(base)]
+    import random
+    r = random.Random(seed)
+    for i in [i for i in range(1, len(out)) if r.random() < stray]:
+        out[i] = dataclasses.replace(out[i], high=round(out[i].high + r.choice((1, 3, 7)) * 1e-6, 6))
+    return out
+
+
+def test_round_twenty_five_split_adjusted_cents_and_rare_64ths_found():
+    """A 4/3-adjusted cent's step took a float with no fraction left, 2e13, for the decimal it refines,
+    so no fitted price counted as evidence: 4/3, 2/3, 1/3 and 10/7 adjusted cents were rebuilt on a
+    plain 0.0025, two points in three no adjusted cent. And a tape of 64ths whose odd 64ths print
+    one time in twenty never tried 1/64, floored by the 32nds nine prints in ten share."""
+    import random
+    from edgecheck.causality import _grid, _scaled
+    for ratio in (4 / 3, 2 / 3, 1 / 3, 10 / 7):
+        r, vals, p = random.Random(1), [], 20.0
+        for _ in range(800):
+            p *= math.exp(r.gauss(0, 0.004))
+            vals.append(round(round(p * ratio, 2) / ratio, 4))
+        g = _scaled(vals, _grid(vals) or _grid(vals, 0.9))
+        assert g is not None and g.scale != 1.0 and abs(g.step / g.scale - 0.01 / ratio) < 1e-9, (ratio, g)
+    r, vals, p = random.Random(2), [], 101.0
+    for _ in range(800):
+        p *= math.exp(r.gauss(0, 0.002))
+        k = round(p * 64)
+        if k % 2 and r.random() > 0.05:
+            k += 1 if p * 64 > k else -1
+        vals.append(round(k / 64, 5))
+    g = _scaled(vals, _grid(vals) or _grid(vals, 0.9))
+    assert g is not None and abs(g.step / g.scale - 1 / 64) < 1e-12, g
+
+
+def test_round_twenty_five_an_era_keeps_its_tick_where_it_printed_it():
+    """A found half-cent era was rebuilt on cents at its own lowest print: its prints were judged
+    against the whole tape's level grids, which they help set. A real 22-bar half-cent era was
+    smoothed into cents where the tape printed half-cents at its level later. And a 30-bar nickel
+    era with four stray bars, over the one in ten a run allowed, was not found."""
+    import random
+    from edgecheck.causality import _sizes
+    from edgecheck.fixtures import Bar
+
+    def cent(x):
+        return round(x, 2)
+
+    def half(x):
+        return round(round(x / 0.005) * 0.005, 3)
+
+    def nickel(x):
+        return round(round(x / 0.05) * 0.05, 2)
+    t = _by_index(bars(400, seed=4, price=20.0, vol=0.004, gap_prob=0.3), 200, 230, half, cent)
+    eras = _sizes(t).eras
+    assert eras is not None and any(198 <= s <= 202 for s in eras.starts), eras
+    joint = eras.joints[eras.of(215)]
+    prices = sorted({x for b in t[201:230] for x in (b.open, b.high, b.low, b.close)})
+    for x in (prices[0] - 0.03, prices[0], prices[-1], prices[-1] + 0.03):
+        assert abs(joint.at(x).step - 0.005) < 1e-12, (x, joint.at(x))
+
+    r, out, p = random.Random(4), [], 20.0
+    for i in range(500):
+        o = p * math.exp(r.gauss(0, 0.0005))
+        c = o * math.exp(0.05 * math.log(20.0 / p) + r.gauss(0, 0.003))
+        h, lo = max(o, c) * (1 + abs(r.gauss(0, 0.001))), min(o, c) * (1 - abs(r.gauss(0, 0.001)))
+        out.append(Bar(1.7e9 + 60 * i, o, h, lo, c, 100.0 * r.randint(5, 50)))
+        p = c
+    back = [dataclasses.replace(b, open=(f := half if 100 <= i < 122 or 250 <= i < 400 else cent)(b.open),
+                                high=f(b.high), low=f(b.low), close=f(b.close)) for i, b in enumerate(out)]
+    eras = _sizes(back).eras
+    assert eras is not None and any(95 <= s <= 105 for s in eras.starts), eras
+
+    t = _by_index(bars(400, seed=5, price=20.0, vol=0.004, gap_prob=0.3), 200, 230, nickel, cent, 0.05, seed=5)
+    eras = _sizes(t).eras
+    assert eras is not None and any(198 <= s <= 202 for s in eras.starts) and any(228 <= s <= 232 for s in eras.starts), eras
+
+
+def _walk(n, seed, p0, s, gap, q, vol):
+    """A minute-bar walk printed by ``q``: the open a gap from the last close, the close a move from it."""
+    import random
+    from edgecheck.fixtures import Bar
+    r, out, p, t = random.Random(seed), [], p0, 1_700_000_000.0
+    while len(out) < n:
+        o = q(p * math.exp(r.gauss(0, gap)))
+        c = q(o * math.exp(r.gauss(0, s)))
+        h = max(q(max(o, c) * math.exp(abs(r.gauss(0, s / 2)))), o, c)
+        lo = min(q(min(o, c) * math.exp(-abs(r.gauss(0, s / 2)))), o, c)
+        out.append(Bar(t, o, h, lo, c, vol(r)))
+        p, t = c, t + 60.0
+    return out
+
+
+def test_round_twenty_five_a_bar_keeps_the_number_types_the_tape_prints():
+    """Every rebuilt field came back a Python float. On a tape of ints or numpy float32s, bar k's own
+    open kept its value and changed its type: a strategy that read only its own open was PROVEN, a
+    read of its close gated on the close being an int walked, and honest integer indexing crashed."""
+    import numpy as np
+    base = bars(120, seed=3, price=100.0, vol=0.004, gap_prob=0.3)
+    ints = [dataclasses.replace(b, ts=int(b.ts), open=int(round(b.open * 100)), close=int(round(b.close * 100)),
+                                high=int(round(max(b.high, b.open, b.close) * 100)),
+                                low=int(round(min(b.low, b.open, b.close) * 100)), volume=int(round(b.volume)))
+            for b in base]
+
+    def own_open(bs):
+        return [1 if isinstance(b.open, int) and b.open % 10 == 0 else 0 for b in bs]
+    assert not check_causality(own_open, ints, probes="every_bar", seed=1).proven
+
+    def ladder(bs):
+        return [[0, 1, 0][b.open % 3] for b in bs]
+    assert not check_causality(ladder, ints, probes="every_bar", seed=1).proven
+
+    def gated(bs):
+        return [(1 if b.close > b.open else 0) if type(b.close) is int else 0 for b in bs]
+    assert check_causality(gated, ints, probes="every_bar", seed=1).proven
+
+    f32 = [dataclasses.replace(b, open=np.float32(round(b.open, 1)), close=np.float32(round(b.close, 1)),
+                               high=np.float32(round(max(b.high, b.open, b.close), 1)),
+                               low=np.float32(round(min(b.low, b.open, b.close), 1)), volume=np.float32(round(b.volume)))
+           for b in base]
+
+    def rounded(bs):
+        return [1 if round(float(b.open), 1) == b.open else 0 for b in bs]
+    assert not check_causality(rounded, f32, probes="every_bar", seed=1).proven
+
+
+def test_round_twenty_five_every_split_ratio_tried_is_found():
+    """An 8-for-5 history's step, 0.01/1.6, is 1/160: taken for a binary tick and tried only unscaled,
+    where its halfway prices rounded the other way. A 30-for-1's 0.3 at one place and a 10-for-3's
+    0.003 at three sat on the floor of three places and were never tried. Every ratio tried whose step
+    is at least three of the tape's places is now found (40-for-1's 0.00025 at four places is not)."""
+    import random
+    from edgecheck.causality import _RATIOS, _grid, _scaled
+    missed = []
+    for ratio in _RATIOS[1:]:
+        r, vals, p = random.Random(1), [], 20.0
+        for _ in range(600):
+            p *= math.exp(r.gauss(0, 0.004))
+            vals.append(round(round(p * ratio, 2) / ratio, 4))
+        whole = _grid(vals) or _grid(vals, 0.9)
+        g = _scaled(vals, whole)
+        eff = 0.01 / ratio
+        if not ((g is not None and abs(g.step / g.scale - eff) < 1e-9)
+                or (whole is not None and whole.scale == 1.0 and abs(whole.step - eff) < 1e-12)):
+            missed.append(ratio)
+    assert missed == [40.0], missed
+
+
+def test_round_twenty_five_ties_on_the_next_bars_edges():
+    """A next open on the bar's own low and one on its own high were one tie, so a real low-side tie
+    credited every draw on the high side; on a gappy tape a next open on the own low was credited
+    with the close on the low and the next open on the close, ties the real bar never printed; and
+    with one draw, a close that could pass its open only onto a previous level was owed nothing, so a
+    plain read of it walked."""
+    from edgecheck.causality import _credited, _sizes, _tie_fields
+    from edgecheck.fixtures import Bar
+    prev = Bar(1.0, 4001.5, 4001.75, 4001.25, 4001.5, 10.0)
+    real = [prev, Bar(61.0, 4001.75, 4001.75, 4001.25, 4001.25, 12.0), Bar(121.0, 4001.25, 4001.5, 4001.0, 4001.5, 9.0)]
+    tape = _walk(60, 13, 4000.0, 0.00012, 0.00005, lambda x: round(round(x / 0.25) * 0.25, 2), lambda r: 10.0) + real
+    k = len(tape) - 2
+    sz = _sizes(tape)
+    seen = _tie_fields(tape, k, sz)
+    high = tape[:k] + [dataclasses.replace(tape[k], close=4002.75, high=4003.25), dataclasses.replace(tape[k + 1], open=4003.25)]
+    extra = _tie_fields(high, k, sz) - seen
+    assert extra and not _credited({("next_rel", "open", 1)}, extra, True), (seen, extra)
+
+    plain = [prev, Bar(61.0, 4002.25, 4002.75, 4002.0, 4002.5, 12.0), Bar(121.0, 4003.0, 4003.25, 4002.75, 4003.0, 9.0)]
+    tape = tape[:-3] + plain
+    seen = _tie_fields(tape, k, sz)
+    assert not seen, seen
+    low = tape[:k] + [dataclasses.replace(tape[k], close=4002.0), dataclasses.replace(tape[k + 1], open=4002.0)]
+    extra = _tie_fields(low, k, sz) - seen
+    assert not _credited({("next_rel", "own_low", 0)}, extra, True), (seen, extra)
+
+    q = lambda x: round(round(x / 0.25) * 0.25, 2)    # noqa: E731
+    one = _walk(200, 22, 4000.0, 0.00005, 0.00004, q, lambda r: float(max(1, round(50 * math.exp(r.gauss(0, .6))))))
+
+    def reader(bs):
+        out = [0] * len(bs)
+        if len(bs) > 18:
+            out[18] = 1 if bs[18].close < bs[17].close else 0
+        return out
+    for seed in (1, 2):
+        r = check_causality(reader, one, probes="every_bar", draws=1, seed=seed)
+        assert r.proven or 18 in r.undelivered, (seed, r.describe().splitlines()[0])
+
+
+def test_round_twenty_five_bars_the_audit_cannot_remake_are_refused_first():
+    """A close that was a property, or a field made with init=False, passed the checks, and the
+    audit crashed with a bare dataclasses error after the strategy had run; and the note said a
+    push not made in three repair draws could not be made."""
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class Mid:
+        ts: float
+        open: float
+        high: float
+        low: float
+        volume: float
+
+        @property
+        def close(self):
+            return (self.high + self.low) / 2
+
+    @dataclass
+    class Late:
+        ts: float
+        open: float
+        high: float
+        low: float
+        volume: float
+        close: float = field(init=False, default=0.0)
+    calls = []
+
+    def strat(bs):
+        calls.append(1)
+        return [0] * len(bs)
+    base = bars(40)
+    mids = [Mid(b.ts, b.open, max(b.high, b.open), min(b.low, b.open), b.volume) for b in base]
+    late = [Late(b.ts, b.open, b.high, b.low, b.volume) for b in base]
+    for i, b in enumerate(base):
+        late[i].close = b.close
+    for tape in (mids, late):
+        with pytest.raises(ValueError, match="bar 0's close is not a field"):
+            check_causality(strat, tape)
+    assert not calls
+    from edgecheck.causality import Report
+    note = Report(proven=(), suspected=(), probes_run=1, bars_tested=40, nondeterministic=False,
+                  recognises_input=False, boundaries=(10,), undelivered=(10,)).coverage_note()
+    assert "was not made with sizes the tape has made" in note and "up to three repair draws" in note
+    assert "could not be made" not in note

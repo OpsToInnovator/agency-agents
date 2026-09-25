@@ -276,8 +276,9 @@ class Report:
                              "where its tick changed in time, split-adjusted where it sits on an adjusted tick, "
                              "and at float32 where it is stored so -- and a read of whether a price is one the "
                              "data source could print under a rule not found in the tape (an adjustment by a "
-                             "factor other than the split ratios it tries, a change of tick lasting under twenty "
-                             "bars or at some price levels only) can go unseen")
+                             "factor other than the split ratios it tries, or to a tick finer than three of the "
+                             "places the tape writes, a change of tick lasting under twenty bars or at some price "
+                             "levels only) can go unseen")
         else:
             # a twentieth red team: with no grid found, the note said nothing of the prices at all
             tie_residual += ("; no price grid was found in the tape, so a rebuilt price is any float, and a read "
@@ -366,9 +367,11 @@ class Report:
             # floor ratio; none moved
             far += "; no bar of the tape traded, so no volume was pushed"
         if self.undelivered:
-            far += (f"; at {len(self.undelivered)} of the probed bars a push listed here could not be made "
-                    f"with sizes the tape has made and without a tie the real bar did not print, even on a "
-                    f"repair draw, and was not counted")
+            # was not made, not could not be: three repair draws on random coins miss what a fourth
+            # would make, and a bar counted on one seed was delivered on the next (a twenty-fifth red team)
+            far += (f"; at {len(self.undelivered)} of the probed bars a push listed here was not made with "
+                    f"sizes the tape has made and without a tie the real bar did not print, on the planned "
+                    f"draws or on up to three repair draws, and was not counted")
         if self.coverage >= 1.0:
             return (f"every bar from {MIN_BOUNDARY} on was probed (bars 0-{MIN_BOUNDARY - 1} never are, so a "
                     f"leak confined to them would not show up here), {combos}, at the bars that did not "
@@ -1013,7 +1016,51 @@ def _rethread(tape: Sequence[Any], boundary: int, rng: random.Random, donors: _D
             b = out[i]
             out[i] = _replace(b, open=pw(b.open), high=pw(b.high), low=pw(b.low), close=pw(b.close),
                               volume=vw(b.volume))
+    return _typed(tape, out, boundary)
+
+
+def _typed(tape: Sequence[Any], out: list, boundary: int) -> list:
+    """The rebuilt bars in the tape's own number types: each field the tape prints in one type
+    throughout set back in it -- an int where the tape's are ints and the value is whole, a numpy
+    float32 where it stores those -- and the probed bar's time and open the tape's own. Left as
+    Python floats, bar k's own open changed type though not value: a strategy that read only its
+    own open was PROVEN on an int or float32 tape, a read gated on an int close walked, and honest
+    integer indexing crashed (a twenty-fifth red team)."""
+    kinds = {}
+    for f in ("ts", "open", "high", "low", "close", "volume"):
+        seen = {type(getattr(b, f, None)) for b in tape}
+        if len(seen) == 1 and (t := seen.pop()) is not float and issubclass(t, numbers.Real) and t is not bool:
+            kinds[f] = t
+    real = tape[boundary] if boundary < len(tape) else None
+    for i in range(boundary, len(out)):
+        b = out[i]
+        kw = {}
+        for f, t in kinds.items():
+            v = getattr(b, f)
+            if type(v) is not t and (w := _as_kind(t, v)) is not None:
+                kw[f] = w
+        if i == boundary and real is not None:
+            for f in ("ts", "open"):
+                if getattr(b, f) == getattr(real, f):
+                    kw[f] = getattr(real, f)
+        if kw:
+            out[i] = _replace(b, **kw)
     return out
+
+
+def _as_kind(t: Any, v: Any) -> Any:
+    """``v`` as a ``t`` of the same value, or None where it has none: an int only for a whole value,
+    and a float32 or Fraction from the decimal the float writes (20.01, not its binary expansion)."""
+    try:
+        if issubclass(t, numbers.Integral):
+            return t(int(v)) if math.isfinite(v) and float(v).is_integer() else None
+        try:
+            w = t(repr(float(v)))
+        except (TypeError, ValueError, ArithmeticError):
+            w = t(v)
+        return w if w == v or float(w) == float(v) else None
+    except (TypeError, ValueError, ArithmeticError, OverflowError):
+        return None
 
 
 class Grid(NamedTuple):
@@ -1324,7 +1371,8 @@ def _covers(fine: Grid, coarse: Grid) -> bool:
     return round(q) >= 1 and abs(q - round(q)) < 1e-6 and abs(r - round(r)) < 1e-6
 
 
-def _joined(era: Grid | None, whole: Grid | None, near: Callable[[], bool] | None = None) -> Grid | None:
+def _joined(era: Grid | None, whole: Grid | None, near: Callable[[], bool] | None = None,
+            beyond: Callable[[], bool] | None = None) -> Grid | None:
     """The grid a price is set on where its era and its price level each have one: the coarser,
     where one's points are all the other's; where neither's are, the points on both. Either alone
     let a price through that the other forbids: an era's tick carried to a price level it never
@@ -1338,13 +1386,14 @@ def _joined(era: Grid | None, whole: Grid | None, near: Callable[[], bool] | Non
         return era
     if _covers(whole, era):
         return era
-    if whole.fine is not None and _covers(whole.fine, era) and (near is None or near()):
-        # the price level prints the era's finer tick at a rate, where it was counted by prints: the era
-        # printed that tick throughout, and joined to the level's coarser grid a 25-bar half-cent era
-        # was rebuilt on cents at the level's rate (a twenty-fourth red team). Only where the era
-        # printed that tick near the price (``near``): sixteen sub-dollar bars of four places, kept as
-        # an era, carried their tick to $1.06, where the era and the tape printed only cents (the
-        # round-fourteen test of banded ticks)
+    if ((whole.fine is not None and _covers(whole.fine, era)) or (near is not None and _covers(era, whole))) \
+            and (near is None or near()):
+        # the era printed a finer tick throughout: joined to the level's coarser grid a 25-bar
+        # half-cent era was rebuilt on cents at the level's rate (a twenty-fourth red team), and at
+        # its own lowest print, where the level has no finer grid at all (a twenty-fifth). Only where
+        # the era printed that tick near the price, off what the rest of the tape prints there
+        # (``near``): sixteen sub-dollar bars of four places, kept as an era, carried their tick to
+        # $1.06, where the era and the tape printed only cents (the round-fourteen test of banded ticks)
         return era
     if _covers(era, whole):
         return whole
@@ -1356,31 +1405,55 @@ def _joined(era: Grid | None, whole: Grid | None, near: Callable[[], bool] | Non
             return era                      # no common tick worth the name
         digits = None if era.digits is None or whole.digits is None else max(era.digits, whole.digits)
         return Grid(float(step), era.off, {}, digits, era.spelled and whole.spelled, width=era.width)
-    return era
+    # between two prices the tape printed on different ticks, where neither grid holds the other's
+    # points and the price lies past every price the era printed (``beyond``), the tape printed
+    # nothing but those two: the era's tick there set 20.18 above a spread table's 20, where the tape
+    # prints 0.05, for an era under 20 on 0.02 (the round-fourteen test of banded ticks, once a band
+    # excursion split that era). Within the era's own prices its tick stands: a nickel era's 20.77
+    # lies between its own 20.75 and a later cent era's 20.78
+    return whole if whole.pair and beyond is not None and beyond() else era
 
 
 class Joint(NamedTuple):
-    """An era's grids and the whole tape's grids by price level, read together."""
+    """An era's grids and the whole tape's grids by price level, read together; and, built on first
+    use, the grids by price level of the tape's prices outside the era."""
 
     era: Any
     whole: Any
+    rest: Callable[[], Any] | None = None
 
     def at(self, x: float, snap: bool = False) -> Grid | None:
         a = self.era.at(x, snap) if hasattr(self.era, "at") else self.era
         b = self.whole.at(x, snap) if hasattr(self.whole, "at") else self.whole
-        return _joined(a, b, lambda: self._finer_near(x))
+        return _joined(a, b, lambda: self._finer_near(x), lambda: self._beyond(x))
+
+    def _beyond(self, x: float) -> bool:
+        """Whether ``x`` lies past every price the era printed, above them or below; never for an era
+        of one grid, which names no prices."""
+        prices = getattr(self.era, "prices", None)
+        return prices is not None and len(prices) > 0 and not prices[0] <= x <= prices[-1]
 
     def _finer_near(self, x: float) -> bool:
-        """Whether the era printed, within 5% of ``x``, a price off the grid of its own price level:
-        each price against its own, as a three-bar era across a spread table's 20 printed 20.05,
-        off the 0.02 under it and on the 0.05 of its own band. An era of one grid (a split's
-        adjustment) names no prices, and keeps its tick everywhere."""
+        """Whether the era printed, within 5% of ``x``, a price off the grid the rest of the tape
+        prints at that price's level. Against the whole tape's, which the era's own prints help set,
+        no price of a half-cent era sat off it, and the era was rebuilt on cents at its own lowest
+        print (a twenty-fifth red team); against the rest, a sub-dollar stretch of four places
+        prints what the tape prints below a dollar. An era of one grid (a split's adjustment) names
+        no prices, and keeps its tick everywhere; so does an era the rest of the tape gives no grid."""
         prices = getattr(self.era, "prices", None)
-        if prices is None:
+        rest = self.rest() if prices is not None and self.rest is not None else None
+        if prices is None or rest is None:
             return True
         lo, hi = bisect.bisect_left(prices, x / 1.05), bisect.bisect_right(prices, x * 1.05)
-        level = self.whole.at if hasattr(self.whole, "at") else lambda p: self.whole
-        return any((g := level(p)) is not None and not _on_grid(g, p) for p in prices[lo:hi])
+        level = rest.at if hasattr(rest, "at") else lambda p: rest
+        # off the level's grid and off the finer one it prints at a rate -- just under a dollar a level
+        # read from both sides is cents with four places at a rate, and a sub-dollar era's prints there
+        # took its four places to $1.02 -- and more of them than the one in ten a level's grid leaves
+        # off it: one sub-dollar print off a 0.0002 the rest shared by chance took them to $1.0065
+        near = prices[lo:hi]
+        off = sum(1 for p in near if (g := level(p)) is not None and not _on_grid(g, p)
+                  and (g.fine is None or not _on_grid(g.fine, p)))
+        return off >= 2 and 10 * off > len(near)
 
 
 class Eras(NamedTuple):
@@ -1405,7 +1478,7 @@ class Eras(NamedTuple):
         return bisect.bisect_right(self.times, ts)
 
 
-def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20, by_level: bool = False) -> list[int]:
+def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20) -> list[int]:
     """The bars at which the grid the tape prints on changes in time. Every bar is labelled with
     the coarsest grid of any long run of bars on it -- a run of at least ``least`` bars whose prices
     all sit on that grid, a stray bar or two off it allowed, and significant: its distinct prices all
@@ -1441,11 +1514,13 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20, by_level: b
             while j < n and good[j]:
                 j += 1
             if runs and i - runs[-1][1] <= 2:
-                # a stray bar or two off the grid inside a run, up to one bar in ten: at one in fifty,
+                # a stray bar or two off the grid inside a run, up to one bar in four: at one in fifty,
                 # strays one bar in twenty broke a nickel tape's runs into one-bar eras of a finer tick
-                # (a twenty-third red team). A finer tick puts most bars off, not one in ten.
+                # (a twenty-third red team), and at one in ten, four stray bars in a 30-bar nickel era
+                # left no run of twenty, and the era was rebuilt on cents (a twenty-fifth). A finer tick
+                # puts most bars off, not one in four.
                 a, b = runs[-1][0], j
-                if sum(1 for t in range(a, b) if not good[t]) <= max(1, (b - a) // 10):
+                if sum(1 for t in range(a, b) if not good[t]) <= max(1, (b - a) // 4):
                     runs[-1][1] = j
                     i = j
                     continue
@@ -1466,9 +1541,6 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20, by_level: b
     # most of its bars sit on that grid. Where they do not, it is a real era the runs around it ate into
     # across its chance bars: a 25-bar half-cent era shrank to 18 and was taken for strays (a
     # twenty-fourth red team).
-    def most(a: int, b: int, fits: Callable[[float], bool]) -> bool:
-        return 2 * sum(1 for t in range(a, b) if all(fits(v) for v in per_bar[t]
-                                                     if v > 0 and math.isfinite(v))) > b - a
     segs: list[list] = []
     for t in range(n):
         if segs and segs[-1][0] == label[t]:
@@ -1479,16 +1551,8 @@ def _era_starts(per_bar: Sequence[Sequence[float]], least: int = 20, by_level: b
         if b - a >= least or len(segs) == 1:
             continue
         near = [segs[x][0] for x in (j - 1, j + 1) if 0 <= x < len(segs) and segs[x][2] - segs[x][1] >= least]
-        if near and (most(a, b, lambda v: on(v, min(near))) or (
-                # ... or where it breaks one era, and most of its bars print as the rest of the tape
-                # prints their price levels: three bars of a spread table's tape crossing 20 on its
-                # 0.05 split an era under 20 on 0.02 in two, and the era before them was rebuilt above
-                # 20 on 0.02 (the round-fourteen test of banded ticks). Not by levels read off the
-                # stretch itself, which explain any era as a band of its own; not at the edge of an
-                # era, where cent bars joined to a nickel era put it on cents
-                by_level and len(near) == 2 and near[0] == near[1]
-                and (rest := _local_grids([v for t in range(n) if not a <= t < b for v in per_bar[t]])) is not None
-                and most(a, b, lambda v: (g := rest.at(v)) is not None and _on_grid(g, v)))):
+        if near and 2 * sum(1 for t in range(a, b) if all(on(v, min(near)) for v in per_bar[t]
+                                                          if v > 0 and math.isfinite(v))) > b - a:
             to = min(near)
             for t in range(a, b):
                 label[t] = to
@@ -1528,19 +1592,24 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
     ref = common if common is not None and common.digits is not None else grid
     if ref.digits is None:
         return None
-    digits = ref.digits
-    unit = 10.0 ** -digits
-
-    def search(allowed: int, decimal_at_one: bool) -> tuple:
+    def search(allowed: int, decimal_at_one: bool, ref: Grid) -> tuple:
+        digits = ref.digits
+        assert digits is not None
+        unit = 10.0 ** -digits
         best, best_eff, best_off = None, 0.0, ()
         for r in _RATIOS:
             for base in _STEPS:
                 eff = base / r
-                if eff <= max(ref.step * 1.5, 3 * unit) or eff <= best_eff * (1 + 1e-9):
+                # at least three of the tape's last places: a 30-for-1 reverse split's 0.3 at one place,
+                # and a 10-for-3's 0.003 at three, sat on the floor and were never tried
+                if eff <= ref.step * 1.5 or eff < 3 * unit * (1 - 1e-9) or eff <= best_eff * (1 + 1e-9):
                     break
                 decimal = any(abs(eff / st - 1) < 1e-9 for st in _DECIMALS)
-                if r != 1.0 and any(abs(eff / st - 1) < 1e-9 for st in _STEPS):
-                    continue                   # a decimal or binary tick: tried unscaled, at r == 1
+                if r != 1.0 and decimal:
+                    # a decimal tick: tried unscaled, at r == 1. Not a binary one: an 8-for-5 history's
+                    # 0.01/1.6 is 1/160, and unscaled its halfway prices rounded the other way (a
+                    # twenty-fifth red team)
+                    continue
                 if r == 1.0 and decimal and not decimal_at_one:
                     continue                   # a decimal tick with prints off it: _grid's and _local_grids' job
                 if len(vals) * math.log(eff / unit) <= math.log(1e6):
@@ -1548,9 +1617,10 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
                 points: dict[int, float] = {}
                 off: list[float] = []
                 missed = 0
+                places = _places(base)
                 for v in vals:
                     k = round(v * r / base)
-                    if round(k * base / r, digits) != v:
+                    if round(round(k * base, places) / r, digits) != v:
                         off.append(v)
                         missed += counts[v]
                         if missed > allowed:
@@ -1562,7 +1632,10 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
                     # refines is evidence for it -- every cent is a point of 0.001/0.9, and a cent tape
                     # with a few sub-dollar prints was fit a 10-for-9 split it never had (a
                     # twenty-fourth red team) -- less the ways of choosing the prices that do not fit
-                    coarse = next((d for d in reversed(_DECIMALS) if d >= 1.5 * eff
+                    # (a multiple within a million steps: past that a float has no fraction left, and a
+                    # 4/3-adjusted cent's step took 2e13 for the decimal it refines -- no fitted price
+                    # was evidence, and the rule was dropped for a plain 0.0025; a twenty-fifth red team)
+                    coarse = next((d for d in reversed(_DECIMALS) if 1.5 * eff <= d <= 1e6 * eff
                                    and abs(d / eff - round(d / eff)) < 1e-6), None)
                     gone = set(off)
                     fits = [v for v in vals if v not in gone]
@@ -1577,15 +1650,19 @@ def _scaled(values: Sequence[float], grid: Grid | None, share: float = 0.9) -> G
     # quoted in 64ths was rebuilt on 32nds (a twenty-fourth red team). Strays only where they share a
     # grid the rebuild can print them on at their rate: left out, a strategy keyed on their absence
     # would tell the rebuild apart the other way.
-    best, best_eff, best_off = search(0, True)
+    # The rule every price fits coarser than the grid every price fits, where the tape writes them
+    # all to its places: coarser only than the grid nine prints in ten share, a tape of 64ths whose
+    # odd 64ths print one time in twenty never tried 1/64, and was rebuilt on 32nds with prices of
+    # five places no 64th is (a twenty-fifth red team)
+    best, best_eff, best_off = search(0, True, grid if grid.digits is not None else ref)
     every = _grid(vals)
     if best is None and every is not None:
-        best, best_eff, best_off = search(int(sum(counts.values()) * (1.0 - share) + 1e-9), False)
-    # never finer than the grid nine prices in ten share: one stray print of seven places let a
-    # step of 3.125e-7 at 0.9 fit every cent price, and rebuilt prices left the cent (a
-    # twenty-second red team)
-    if best is not None and common is not None and best_eff < common.step / common.scale * (1 - 1e-9):
-        return None
+        best, best_eff, best_off = search(int(sum(counts.values()) * (1.0 - share) + 1e-9), False, ref)
+        # never finer than the grid nine prices in ten share: one stray print of seven places let a
+        # step of 3.125e-7 at 0.9 fit every cent price, and rebuilt prices left the cent (a
+        # twenty-second red team)
+        if best is not None and common is not None and best_eff < common.step / common.scale * (1 - 1e-9):
+            return None
     if best is not None and best_off and every is not None:
         span = (best_off[0] - best_eff, best_off[-1] + best_eff)
         inside = sum(counts[v] for v in vals if span[0] <= v <= span[1])
@@ -1636,10 +1713,18 @@ def _point(grid: Grid, n: int) -> float:
         return got
     x = grid.off + n * grid.step
     if grid.scale != 1.0:
-        x /= grid.scale
+        # the unadjusted price as its tick writes it, then divided: n * 0.01 is not the float a vendor
+        # divides, and its halfway prices of an 8-for-5 history rounded the other way (a
+        # twenty-fifth red team)
+        x = round(x, _places(grid.step)) / grid.scale
     if grid.digits is not None:
         x = round(x, grid.digits)
     return _f32(x) if grid.width == 32 else x
+
+
+def _places(step: float) -> int:
+    """The decimal places a tick is written to: 2 for a cent, 6 for 1/64."""
+    return next((d for d in range(16) if round(step, d) == step), 15)
 
 
 def _index(grid: Grid, x: float) -> float:
@@ -1833,7 +1918,7 @@ PREV_LEVELS = ("open", "close", "high", "low")
 # on the previous high where the real one sat on this bar's own open (a twenty-fourth red team)
 ALL_TIES = frozenset({f"{f}@{ref}" for f in ("close", "high", "low") for ref in PREV_LEVELS}
                      | {"doji", "high_open", "high_close", "low_open", "low_close", "volume"}
-                     | {f"next@{ref}" for ref in ("own", *PREV_LEVELS)} | {"next_close", "next_edge"})
+                     | {f"next@{ref}" for ref in ("own", *PREV_LEVELS)} | {"next_close", "next_high", "next_low"})
 
 
 def _bad_levels(o: float, prev: Any, avoid: frozenset) -> tuple[frozenset, frozenset, frozenset]:
@@ -1882,8 +1967,12 @@ def _tie_fields(bars: Sequence[Any], k: int, sizes: Sizes) -> frozenset:
             out.add("next@own")
         if nxt == bar.close:
             out.add("next_close")
-        if nxt in (bar.high, bar.low):
-            out.add("next_edge")
+        # its own high and its own low apart: one field for both let a real next open on the low
+        # credit every draw that put it on the high (a twenty-fifth red team)
+        if nxt == bar.high:
+            out.add("next_high")
+        if nxt == bar.low:
+            out.add("next_low")
     return frozenset(out)
 
 
@@ -1903,9 +1992,12 @@ def _tie_of(rel: tuple, gapped: bool) -> frozenset | None:
         return frozenset(("next_close",))
     if kind == "next_rel" and rel[2] == 0:
         if rel[1] in ("own_high", "own_low"):
-            # by a gap onto it, or ungapped from a close with no wick that side
-            side = "high_close" if rel[1] == "own_high" else "low_close"
-            return frozenset(("next_edge", "next_close", side)) if gapped else frozenset((side,))
+            # by a gap onto it; on a tape that never gaps, from a close with no wick that side. Not
+            # both on a gappy tape: the close on the low, the next open on the close, carried two ties
+            # the real bar did not print, and was credited (a twenty-fifth red team)
+            if gapped:
+                return frozenset(("next_high" if rel[1] == "own_high" else "next_low",))
+            return frozenset(("high_close" if rel[1] == "own_high" else "low_close",))
         # on a tape that never gaps the next open is the close: the close's tie
         return (frozenset({f"next@{ref}" for ref in ("own", *PREV_LEVELS)}) if gapped
                 else frozenset(on_levels("close") | {"doji"}))
@@ -2143,6 +2235,7 @@ def _validate(tape: Sequence[Any]) -> None:
     """Every timestamp, price and volume a number the arithmetic can use. An infinite high crashed
     the builder with a bare math domain error (a twelfth red team); a NaN compares false with
     everything and made relations silently meaningless."""
+    kinds: set = set()
     for i, b in enumerate(tape):
         # a bar the audit can vary: namedtuple bars were refused only after the truncation phase had run
         # the strategy once a bar, and tuples or dicts crashed with an AttributeError naming no bar (a
@@ -2166,6 +2259,22 @@ def _validate(tape: Sequence[Any]) -> None:
             if not ok:
                 raise ValueError(f"bar {i} has a {name} of {_shown(v)}; every timestamp, price and volume "
                                  f"must be a finite number")
+        # ... each of the six a field the bar is made with, once for each kind of bar: a close that was a
+        # property, or a field with init=False or an InitVar beside it, passed and crashed the audit with
+        # a bare dataclasses error after the strategy had run (a twenty-fifth red team)
+        if type(b) not in kinds:
+            made = {f.name for f in dataclasses.fields(b) if f.init}
+            for name in ("ts", "open", "high", "low", "close", "volume"):
+                if name not in made:
+                    raise ValueError(f"bar {i}'s {name} is not a field its {type(b).__name__} is made with (a "
+                                     f"property, or a field with init=False): the audit varies bars with "
+                                     f"dataclasses.replace, which cannot set it")
+            try:
+                dataclasses.replace(b, **{n: getattr(b, n) for n in ("ts", "open", "high", "low", "close", "volume")})
+            except Exception as e:
+                raise ValueError(f"bar {i} cannot be remade with its own values by dataclasses.replace, as the "
+                                 f"audit varies bars: {type(e).__name__}: {e}") from None
+            kinds.add(type(b))
         # Prices are varied by log moves, which a price below zero has none of: a tape of negative prices
         # was rebuilt at 0.0, a price it never printed, told it had made no moves, and an honest strategy
         # dividing by the last close crashed on it (a twenty-fourth red team).
@@ -2604,7 +2713,7 @@ def _price_grids(tape: Sequence[Any]) -> tuple:
     sc = _scaled(sp, pg or _grid(sp, 0.9))
     if sc is not None:
         pg, levels = sc, None
-    starts = _era_starts(per_bar, by_level=levels is not None)
+    starts = _era_starts(per_bar)
     own = []
     for a, b in zip([0] + starts, starts + [len(tape)]):
         ev = [x for ps in per_bar[a:b] for x in ps]
@@ -2620,7 +2729,19 @@ def _price_grids(tape: Sequence[Any]) -> tuple:
     eras = None
     if starts:
         whole = levels or pg
-        eras = Eras(tuple(starts), tuple(tape[i].ts for i in starts), tuple(own), tuple(Joint(a, whole) for a, _ in own),
+        cuts = [0, *starts, len(tape)]
+
+        def outside(a: int, b: int) -> Callable[[], Any]:
+            memo: list = []
+
+            def rest() -> Any:
+                if not memo:
+                    g = _local_grids([x for ps in per_bar[:a] + per_bar[b:] for x in ps])
+                    memo.append(_widen(g, {}) if pw == 32 else g)
+                return memo[0]
+            return rest
+        eras = Eras(tuple(starts), tuple(tape[i].ts for i in starts), tuple(own),
+                    tuple(Joint(a, whole, outside(c, d)) for (a, _), c, d in zip(own, cuts, cuts[1:])),
                     tuple(_joined(b, pg) for _, b in own))
     return pg, vg, levels, eras, (pw, vw)
 
@@ -2967,9 +3088,8 @@ def _next_bar(plan: Plan, sizes: Sizes, rng: random.Random, closed: float | None
         if gapped:
             # off every tie the real next bar did not print: a level or this bar's open, its close,
             # its own high or low
-            edges = {"own_high", "own_low"}
-            bad = frozenset(v for key, v in refs.items() if v > 0 and (
-                ("next_edge" if key in edges else f"next@{key}") in avoid))
+            edges = {"own_high": "next_high", "own_low": "next_low"}
+            bad = frozenset(v for key, v in refs.items() if v > 0 and edges.get(key, f"next@{key}") in avoid)
             bad |= {closed} if "next_close" in avoid else frozenset()
 
         def gap_open(side: int, g: float, beyond: float) -> float | None:
@@ -3381,11 +3501,14 @@ def _owed(tape: Sequence[Any], k: int, sizes: Sizes, plans: Sequence[Plan], sg: 
     if len(plans) == 1:
         pl = plans[0]
         m = pl.move
-        if m and r["up" if m > 0 else "dn"]:
+        # blind to ties, as the many-draw branch's high and low are: one draw has no other to make the
+        # push with a tie, and where only a close on a level the real bar did not print got past the
+        # open, nothing was owed and a plain read of the close walked (a twenty-fifth red team)
+        if m and rb["up" if m > 0 else "dn"]:
             owed.add(("move", m))
             for name in LEVELS:              # past the farthest of the levels it reaches
                 level = getattr(p, name)
-                if level > 0 and (level - o) * m > 0 and r["past"](level):
+                if level > 0 and (level - o) * m > 0 and rb["past"](level):
                     owed.add(("rel", "close", name, m))
         if pl.wick and r["wick_up" if pl.wick > 0 else "wick_dn"]:
             owed.add(("wick", pl.wick))
