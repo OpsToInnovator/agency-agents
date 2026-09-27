@@ -436,13 +436,27 @@ class Sandbox:
         self.entry, self.func, self.limits = entry, func, limits
         self.isolation: Isolation = isolation or detect_isolation()
         self._owns_work_root = work_root is None
-        self.work_root = Path(work_root).resolve() if work_root else Path(tempfile.mkdtemp(prefix="edgecheck-"))
-        self.work_root.mkdir(parents=True, exist_ok=True)
+        if work_root is not None and (src == Path(work_root).resolve() or src in Path(work_root).resolve().parents):
+            raise ValueError(f"the work root {Path(work_root).resolve()} lies inside the strategy directory {src}: "
+                             f"staging would copy the strategy into itself")
         # Staged once. Every run copies from here, never from the source, so a run that
-        # wrote into the source directory would still not be feeding the next run.
-        self.strategy_dir = Path(tempfile.mkdtemp(prefix="stage-", dir=self.work_root))
-        shutil.copytree(src, self.strategy_dir, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # wrote into the source directory would still not be feeding the next run. Removed if staging
+        # fails: a dangling symlink in an honest strategy's directory, or a Ctrl-C mid-copy, left the work
+        # root and a partial copy of the source behind, with a bare shutil.Error (a twenty-fifth red team).
+        root: Path | None = None
+        stage: Path | None = None
+        try:
+            root = Path(work_root).resolve() if work_root else Path(tempfile.mkdtemp(prefix="edgecheck-"))
+            root.mkdir(parents=True, exist_ok=True)
+            stage = Path(tempfile.mkdtemp(prefix="stage-", dir=root))
+            shutil.copytree(src, stage, dirs_exist_ok=True, ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        except BaseException as e:
+            Sandbox._cleanup(stage, root if self._owns_work_root else None)
+            if isinstance(e, (shutil.Error, OSError)):
+                raise ValueError(f"the strategy directory {src} could not be staged: {e}") from None
+            raise
+        self.work_root, self.strategy_dir = root, stage
         self.records: list[RunRecord] = []
         # The staged copy is the customer's source, sitting in a world-readable temp dir for
         # as long as the host lives unless someone removes it; a long-lived auditor would
@@ -462,7 +476,7 @@ class Sandbox:
         self.close()
 
     @staticmethod
-    def _cleanup(stage: Path, owned_root: Path | None) -> None:
+    def _cleanup(stage: Path | None, owned_root: Path | None) -> None:
         for d in (stage, owned_root):
             if d is not None and d.exists():
                 Sandbox._remove_tree(d)

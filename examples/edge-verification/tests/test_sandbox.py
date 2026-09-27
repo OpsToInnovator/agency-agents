@@ -1303,3 +1303,51 @@ def test_a_tape_of_numpy_numbers_reaches_the_strategy(tmp_path):
     sb = fixture_sandbox("clean_lagged", tmp_path, limits=Limits(cpu_s=5, wall_s=10))
     pc, report = prove(sb, tape, boundaries=[10, 20])
     assert pc.deterministic
+
+
+def test_round_twenty_five_an_int_tape_keeps_its_ints_through_the_sandbox(tmp_path):
+    """The rebuild wrote every varied field as a float, and the tape's ints stayed ints in JSON: a
+    strategy reading only its own bar's open, gated on the open being an int, was PROVEN."""
+    import dataclasses
+    from edgecheck.sandbox import prove
+    base = bars(40, seed=3, price=100.0, vol=0.004, gap_prob=0.3)
+    ints = [dataclasses.replace(b, ts=int(b.ts), open=int(round(b.open * 100)), close=int(round(b.close * 100)),
+                                high=int(round(max(b.high, b.open, b.close) * 100)),
+                                low=int(round(min(b.low, b.open, b.close) * 100)), volume=int(round(b.volume)))
+            for b in base]
+    ks = [k for k in range(5, 38) if ints[k].open % 10 == 0][:3]
+    assert ks
+    p = strategy_file(tmp_path, "own_open", """
+        def signals(bars):
+            return [1 if isinstance(b.open, int) and b.open % 10 == 0 else 0 for b in bars]
+    """)
+    pc, report = prove(Sandbox.from_file(p, work_root=tmp_path / "runs", isolation="plain"), ints,
+                       boundaries=ks, draws=2, seed=1)
+    assert report is not None and not report.proven, report.describe().splitlines()[0]
+
+
+def test_round_twenty_five_a_strategy_directory_is_staged_or_refused_cleanly(tmp_path, monkeypatch):
+    """A dangling symlink in an honest strategy's directory made it unsandboxable with a bare
+    shutil.Error, and a failed or interrupted staging left the work root and a partial copy of the
+    source behind."""
+    import shutil
+    import tempfile
+    src = tmp_path / "strat"
+    src.mkdir()
+    (src / "strategy.py").write_text("def signals(bars):\n    return [0] * len(bars)\n", encoding="utf-8")
+    (src / "latest").symlink_to(tmp_path / "nowhere")
+    with Sandbox(src, isolation="plain", work_root=tmp_path / "work") as sb:
+        assert sorted(os.listdir(sb.strategy_dir)) == ["strategy.py"]
+    with pytest.raises(ValueError, match="inside the strategy directory"):
+        Sandbox(src, isolation="plain", work_root=src / "runs")
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    copy = shutil.copytree
+
+    def interrupted(*a, **k):
+        copy(*a, **k)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(shutil, "copytree", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        Sandbox(src, isolation="plain")
+    assert os.listdir(tmp_path / "tmp") == []

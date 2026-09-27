@@ -493,12 +493,8 @@ tape's. Those rules broke round fourteen's banded tapes once merged: a short str
 as an era wherever its bars were off its neighbours' grid, and a price band is off it too. Sixteen
 sub-dollar bars of a fast drop, kept as an era of four places, carried that tick up to $1.06, where
 the band prints cents. Three bars of a spread table's tape crossing 20 on its 0.05 split an era
-under 20 in two, and the era before them was rebuilt above 20 on 0.02. An era's finer tick is now
-kept only near a price where the era printed it. And a short stretch breaking one era is smoothed
-where most of its bars print as the rest of the tape prints their price levels. The stretch's own
-prints are left out of that reading, since read off them a price level explains any era as a band.
-The rule does not apply at the edge of an era, where cent bars joined to a nickel era put the era
-on cents.
+under 20 in two, and the era after them was rebuilt above 20 on 0.02. The first fix, a rule that
+smoothed a stretch its price levels explained, was itself undone by round twenty-five (below).
 
 Its tie reviewer found round twenty-three's split of the ties unfinished, and one relation class
 silently left out. A tie on a previous-bar level was still one field for all four levels, so a draw
@@ -519,11 +515,75 @@ first cut; a float32 tape failed writing the tape for the strategy process; and 
 across a 1:100 reverse split onto the new era's coarser tick printed bars of 0.0, where an honest
 strategy's log escaped the audit -- a positive price is now never set to zero or below.
 
+Round twenty-five's grid reviewer found five more holes, four of them regressions since round
+twenty-two and two of those opened by the fix of main above. A 4/3-, 2/3-, 1/3- or 10/7-adjusted
+cent's step took a float with no fraction left, 2e13, for the coarser decimal it refines, so no
+fitted price counted as evidence and the adjusted rule was dropped for a plain 0.0025: the decimal
+must now lie within a million steps. A tape of 64ths whose odd 64ths print one time in twenty never
+tried 1/64, because the pass for a rule every price fits was floored by the 32nds nine prints in ten
+share. It is now floored by the grid every price fits, and only the pass that allows strays keeps
+the older floor. An era's finer tick was judged against the whole tape's level grids, which the
+era's own prints help set, so a found half-cent era was rebuilt on cents at its own lowest print. It
+is now judged against the grids of the rest of the tape. The era keeps its tick near a price where
+more than one in ten of its prints there sit off what the rest of the tape prints, and where the
+level has no finer grid at all. The band rule smoothed away a real 22-bar half-cent era wherever the
+tape printed half-cents at its level later, and it is gone. The spread table's leak it had closed
+came through a case `_joined` never handled: between two prices printed on different ticks, where
+the tape printed nothing else, an era's tick fell through to the era. Past every price that era
+printed, the tape's two prices now win. And a run allowed one stray bar in ten, so four stray bars
+in a 30-bar nickel era left no run of twenty and the era was rebuilt on cents. A run now allows one
+in four, and a finer tick still puts most bars off. Two limits remain as statistical, not evasions.
+A tail that visits a band briefly, such as eight bars over a spread table's 20, gets a sigma from
+the finer band below, and moves less there than the band's tick (more dojis than the real tape).
+Rebuilds carried across a 1:100 reverse split pile at the floor of the tick, and the bars an evader
+keyed on that pile walks at are listed as undelivered.
+
+Round twenty-five's other reviewers found the worst hole in several rounds. Every rebuilt field came
+back a Python float, so on a tape of ints or numpy float32s bar k's own open kept its value and
+changed its type. A strategy that read only its own open was PROVEN, in-process and through the
+sandbox, and the proof said it read the future. A read of the close gated on the close being an int
+walked, and honest code indexing a list by an int price crashed. Every field the tape prints in one
+type is now written back in it (an int where the value is whole), and the probed bar's time and open
+are the tape's own. An 8-for-5 history's step, 0.01/1.6, is 1/160, and was tried only as a binary
+tick, whose halfway prices round the other way. A split's step is now formed as a vendor divides:
+the unadjusted price at its own places, then divided. A 30-for-1 reverse split's 0.3 at one place and
+a 10-for-3's 0.003 at three sat exactly on the floor of three last places and were never tried. Every
+tried ratio but one is now found; the exception is 40-for-1 at four places, whose 0.00025 is finer
+than three of the tape's places, and the note now names that limit. Three tie holes were closed:
+- A next open on the bar's own high and one on its own low were one tie, so a real tie on one side
+  credited every draw on the other. They are now two ties.
+- On a gappy tape, a next open on the own low was credited with the close on the low and the
+  ungapped next open on it, two ties the real bar never printed. It now sets only its own tie.
+- With one draw, a close that could pass its open only onto a previous-bar level was owed nothing,
+  so a plain read of it walked. It is now owed blind to ties, and counted where it was not made.
+
+With the ties split, more bars come up short: 37-38% on the session tape, and 33-34 of 200 on the
+tick-and-lot tape. The daily tape's 19 and the penny tape's 97% are unchanged.
+
+The note's undelivered clause said a push "could not be made ... even on a repair draw". Three
+repair draws on random coins miss what a fourth would make, and a bar counted on one seed was
+delivered on the next, so it now says the push was not made on the planned draws or on up to three
+repair draws. Bars whose close is a property or a field made with init=False passed the checks and
+crashed the audit after the strategy ran; they are now refused first, by bar and field. And a
+dangling symlink in an honest strategy's directory made it unsandboxable, while a failed or
+interrupted staging left the work root and a partial copy of the source behind. Dangling links are
+now skipped, a failed staging cleans up after itself, and a work root inside the strategy directory
+is refused by name. Other findings are limits, not evasions:
+- A 25-bar half-cent era's last bars are eaten by the cent run after it; the bars that loses are
+  counted undelivered.
+- The least sigma is too low on a dollar-edge tape that never prints above $1, since the rule is not
+  in the tape.
+- A Ctrl-C landing inside Popen, after the fork but before the auditor holds the child, can leave the
+  strategy running until the sandbox closes. That was simulated only; 450 real trials left none.
+- The plain tier's writes to /tmp reach the host, as documented: it is a correctness boundary, not a
+  security one.
+
 The cost is honest and uneven. On a float tape with no gaps repairs are about 5% of runs at
 four draws (the every-bar default), and about 17% on a gappy one, where an ungapped next open
 is a tie at every bar whose real next bar gapped and gets a draw of its own. On a tick-and-lot
 tape, where every tie the tape prints is owed against every level and each needs a draw of its
-own, repairs are about fourteen draws a bar — roughly three runs in four. On a penny stock on a
+own, repairs are about eighteen draws a bar (17.6 on the tests' tick tape and 18.6 on the tick-and-lot
+tape, as measured at round twenty-five) — roughly four runs in five. On a penny stock on a
 one-cent tick they are twelve to forty a bar, and a fifth to nearly all of its bars still come
 up short, by the tape (43–45% on the eighteenth and nineteenth red teams', 97% on the
 twenty-second's at 37 cents, where a cent is about the largest gap the tape makes and most wicks
