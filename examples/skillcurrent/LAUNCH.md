@@ -198,20 +198,85 @@ aren't landing in spam. Then find the stage where people drop out:
 - **Installs stall.** The install is too hard. Fix the most common snag
   before recruiting more.
 
-## 6. Exit criteria (proposed; settle them before week 1)
+## 6. Exit criteria (settled before week 1)
 
-- **Enough evidence to judge:** at least five teams completed the install
-  session and sent three or more weekly reports each.
-- **Keep building:** at least three of those teams would keep using it, and
-  most say "yes" to review, and at least one team's sync caught a bad copy.
-- **Rethink review:** most teams show "partly" because of draft installs or
-  rubber-stamp approvals. Review is friction they route around; make it
-  lighter before going further.
-- **Rethink sync:** after four weeks every team says "no bad copy seen", or
-  most say "never checked". Drift may not be the pain you thought it was.
-- **Stop or change course:** fewer than three teams complete the install by
-  week 6, or nobody would keep using it.
-- **Deadline:** decide by the end of week 8, whatever the data looks like.
+Write the date week 1 starts at the top of the tracking sheet on day 0.
+Weeks run Monday to Sunday, Perth time. These rules are fixed once week 1
+starts. If a rule turns out to be wrong, write down why and apply it
+anyway for this beta; change it for the next one.
+
+### Definitions
+
+- **Qualifying team:** finished the install session by the end of week 5.
+  "Finished" means the session's done-when checks passed: a released skill
+  shows `current` on two machines in two tools, and the hook writes to
+  `sync.log`. Teams installed later are welcome, but their results are
+  reported separately and don't count below.
+- **Counted report:** a weekly report whose review verdict is not
+  `no activity`.
+- **Evaluable team:** a qualifying team with three or more counted reports
+  by the end of week 8.
+- **A team's review verdict:** the verdict in most of its counted reports.
+  If there's a tie, use the less favourable verdict (`yes`, then `partly`,
+  then `unclear`, from most to least favourable).
+- **A team's sync verdict:** `caught` if any report says `yes`. Otherwise
+  `unanswered` if most reports say `never checked`. Otherwise `clean`
+  (no bad copy seen while the hook ran).
+- **Retained team:** answers "yes" to exit interview question 1 ("Would you
+  keep using it if the beta ended today?") and shows at least one submitted
+  or approved skill across its last two reports. "Probably" or "maybe"
+  counts as no.
+- **Most:** more than half of evaluable teams.
+
+### Apply in this order, at the end of week 8
+
+1. **Stop early.** At the end of week 5, if fewer than three teams
+   qualify: stop recruiting new waves, finish the teams you have, and treat
+   the beta as a "change course" result. Use section 5 to find where people
+   dropped out.
+2. **Evidence gate.**
+   - Five or more evaluable teams: go to step 3.
+   - Three or four: **thin evidence.** Take one extension of four weeks
+     (deadline: end of week 12). Keep recruiting, count installs up to the
+     end of week 9, and apply these rules once at week 12, whatever the
+     data shows. No second extension.
+   - Fewer than three: **change course** (see below).
+3. **Overall verdict.** Choose exactly one.
+   - **Keep building:** three or more evaluable teams are retained, they
+     make up at least half of evaluable teams, and at least one mechanism
+     is confirmed (step 4).
+   - **Stop:** no evaluable team is retained.
+   - **Change course:** anything else. If teams are retained but neither
+     mechanism is confirmed, they value something the beta isn't
+     measuring. Find out what from the exit interviews before building
+     more.
+4. **Mechanism verdicts.** Judge each one separately, whatever the overall
+   verdict.
+   - **Review confirmed:** most teams' review verdict is `yes`.
+     **Rethink review:** most are `partly`. Record which reason caused it
+     (draft installs, `--no-auth`, or rubber-stamp approvals); that's what
+     to make lighter. **Measurement problem:** most are `unclear`. Fix the
+     report before the next wave.
+   - **Sync confirmed:** at least two teams are `caught`, or one team is
+     `caught` and says in the exit interview it wouldn't have noticed
+     otherwise (question 4). **Rethink sync:** most teams are `clean`
+     after four or more weeks with the hook running. Drift may not be the
+     pain you thought it was. **Sync unanswered:** most are `unanswered`.
+     This says nothing about drift. Make the hook part of `install`
+     before the next wave.
+5. **Commercial read-out.** Apply `BUSINESS.md` section 5 once five teams
+   have answered the pricing questions. It decides whether the Supported
+   plan goes ahead, not whether the product continues. Also count, from
+   qualification calls, the teams that declined because they won't run a
+   server. Two or more is the hosted-demand signal in `BUSINESS.md`
+   section 5, even though those teams never send a report.
+
+### Recording the decision
+
+By the deadline, write down: the verdict, the two mechanism verdicts, the
+counts behind each, and the one next action. Put it in the tracking sheet
+and in Notion. Week 8, or week 12 after a thin-evidence extension, is the
+deadline whatever the data looks like.
 
 ## 7. Time budget
 
