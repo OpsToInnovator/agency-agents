@@ -4,7 +4,7 @@ Send this to a startup or marketing lawyer with a request for **one
 fixed-fee quote** covering everything below. One bundled review costs less
 than four separate ones.
 
-**From:** ApexForm Life Pty Ltd (ABN [[ABN]]), Perth, Western Australia,
+**From:** ApexForm Life Pty Ltd (ABN 11 698 784 904), Perth, Western Australia,
 apexformlife.com.
 
 > **Fill in before sending:** the ABN, and the countries where you expect
