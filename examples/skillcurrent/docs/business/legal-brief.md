@@ -86,6 +86,9 @@ Questions:
   It includes email support with a one-working-day reply target, an install
   session, and an audit evidence pack (see `BUSINESS.md` section 3).
 - **Enterprise:** annual contracts, possibly with data-processing terms.
+- **Pilot offer:** the beta terms now promise pilot teams 6 months free of
+  the standard team plan, excluding quoted work. Please confirm the wording
+  is clear and that the exclusion holds.
 
 Questions:
 
@@ -96,6 +99,9 @@ Questions:
    customer's servers and we see no customer data? What changes if a
    customer sends us logs or exports for support?
 4. What changes if we later offer a hosted version?
+5. Does the pilot clause clearly identify the standard Supported plan and
+   explain the transition to payment, including any separate opt-in,
+   renewal notice and cancellation terms needed before charging?
 
 ### 4. Names and ownership
 
