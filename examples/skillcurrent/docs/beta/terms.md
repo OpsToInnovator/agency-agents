@@ -98,9 +98,12 @@ Either of us can stop at any time, for any reason, by email. `BETA.md`
 explains how to remove everything from your machines.
 
 After the beta, SkillCurrent's source stays available under its open-source
-licence, and nothing you use during the beta will stop working. If we
-introduce a paid plan, pilot teams will be told first and get it free for
-12 months after it launches. You are under no obligation to take it.
+licence, and nothing you use during the beta will stop working.
+If we introduce a paid plan for teams, pilot teams will be told first and
+get it free for 6 months after it launches. After that it costs the
+published price, and you can cancel at any time. Quoted work, such as
+migrations or security reviews, is not included. You are under no
+obligation to take it.
 
 ## Questions and complaints
 
