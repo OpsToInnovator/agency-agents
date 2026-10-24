@@ -42,7 +42,7 @@ facts.
 | **Licence** | Keep the core under MIT and add your own copyright line in `examples/skillcurrent/LICENSE`, before anyone else contributes (`BUSINESS.md` section 8) | The only licence file is the repository's MIT licence, "Copyright (c) 2025 AgentLand Contributors". The business sells support, not access, so it doesn't need a different licence. |
 | **Repository home** | Keep it here for the beta. Consider its own repository before Show HN | The install command works from here today. A dedicated repository gives issues, releases and stars their own home. |
 | **Team cap** | Invite up to 10 qualified teams and expect two or three to stall | The page promises 5 to 10. |
-| **After the beta** | The terms already say it: the source stays open, and pilot teams get any paid plan free for 12 months. The plan itself is in `BUSINESS.md` | Teams will ask. Don't promise prices or dates until the exit interviews have tested them. |
+| **After the beta** | The source stays open, and pilot teams get the standard paid plan free for 6 months after it launches, then at the published price. Quoted work is excluded. The plan itself is in `BUSINESS.md` | Keep the offer aligned with the legally reviewed terms. Don't promise prices or dates until the exit interviews have tested them. |
 | **Legal review** | One fixed-fee review covering terms, privacy, ad claims, names and the order form. Send `docs/business/legal-brief.md` | Terms and privacy before the first pilot team signs; ad copy before paid spend; the order form before the first invoice. |
 | **Exit rules** | Adopt section 6 or edit it, before week 1 | Deciding after you see the data invites wishful reading. |
 

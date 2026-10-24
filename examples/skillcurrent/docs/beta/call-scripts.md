@@ -121,15 +121,37 @@ When a report arrives:
 5. "Who else on your team or in your company should have been involved?"
 6. "What would you have to see before paying for something like this?"
    Listen; don't quote a price yet.
-7. "For the whole team, per month, at what price would it be so expensive
+7. "If your company paid for the audit evidence this produces, who would
+   sign off on that, and from which budget: engineering, platform, or
+   security and compliance?" Write down the role title and the budget
+   name, not just a person's name. If they don't know, ask: "Who would
+   know?" and write that down instead.
+8. "For the whole team, per month, at what price would it be so expensive
    you wouldn't consider it?" Then: "At what price would it be so cheap
    you'd doubt it?"
-8. "If a supported plan cost [the hypothesis price in `BUSINESS.md`], would
-   you buy it when the beta ends? Yes, no, or 'I'd need to ask someone'?"
+9. "If a supported plan cost [the hypothesis price in `BUSINESS.md`], would
+   you buy it when your six free months end? Yes, no, or 'I'd need to ask someone'?"
    If they name someone, write down who. Record all three answers in the
    tracking sheet; `BUSINESS.md` section 5 says how to use them.
-9. "May I describe your results publicly? Anonymously only, or with your
+10. "May I describe your results publicly? Anonymously only, or with your
    name?" Get any yes in writing, by email, and keep it.
-10. "Who else in your company should see this?"
+11. "Who else in your company should see this?"
+
+Add two tracking-sheet columns beside the price answers: **Budget holder
+(role)** and **Budget (eng / platform / security-compliance / none /
+unknown)**. Keep the participant's wording in the notes, including risk or
+audit where named.
+
+For question 7, listen for:
+
+- **Engineering or platform:** the Supported plan is the first offer to
+  test with the team.
+- **Security, risk, compliance or audit:** test the evidence pack and
+  Enterprise offer with that buyer; this is a signal to revisit an AFOS
+  link, not a decision to integrate the products.
+- **Nobody would pay:** record it as evidence against the paid plan and
+  for testing fixed-price services (`BUSINESS.md` section 9).
+- **Unknown:** record the role that could answer. Do not count an unknown
+  budget as confirmed buying intent.
 
 Afterwards, send the wrap-up email and offer to delete their data.

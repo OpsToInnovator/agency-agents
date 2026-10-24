@@ -73,7 +73,8 @@ A self-hosted plan with a human behind it, sold to compliance-minded
 buyers, can sit at the top of the per-organisation range. The pilot tests
 whether it can.
 
-**Pilot teams:** the Supported plan free for 12 months after it launches.
+**Pilot teams:** the Supported plan free for 6 months after it launches,
+then at the published price. Quoted Enterprise work is not included.
 
 **Currency and GST.** The figures above are US dollars, because most buyers
 and every competitor price found are overseas. ApexForm Life is Australian,
@@ -116,11 +117,14 @@ until this test is done.
 **In every exit interview** (see `docs/beta/call-scripts.md`), ask:
 
 1. "What would you have to see before paying for something like this?"
-2. "For the whole team, per month, at what price would it be so expensive
+2. "If your company paid for the audit evidence this produces, who would
+   sign off, and from which budget?" Record the role title and budget name;
+   if they don't know, ask who would know.
+3. "For the whole team, per month, at what price would it be so expensive
    you wouldn't consider it?"
-3. "At what price would it be so cheap you'd doubt it?"
-4. "If the Supported plan cost [hypothesis price], would you buy it when
-   the beta ends? Yes, no, or 'I'd need to ask [who]'?"
+4. "At what price would it be so cheap you'd doubt it?"
+5. "If the Supported plan cost [hypothesis price], would you buy it when
+   your six free months end? Yes, no, or 'I'd need to ask [who]'?"
 
 **Decision rules**, once at least five teams have answered:
 
@@ -133,9 +137,18 @@ until this test is done.
   won't carry the business. Test the alternative in section 9.
 - **If two or more teams won't run a server:** the demand is for a hosted
   version. That is a different business with different costs (section 9).
+- **If most teams name a security, risk or compliance budget:** build the
+  evidence pack and the Enterprise plan before the Supported plan, and
+  price it for that buyer. Revisit the AFOS module decision with this
+  evidence. Here "most" means more than half of all teams answering these
+  questions; keep unknown and no-budget responses in the denominator.
+  This changes the offer sequence, not the requirement to validate price
+  or complete section 4 before charging.
 
 Record every answer in the tracking sheet, next to the team's beta
-verdicts. A team that kept review on and saw sync catch a bad copy is the
+verdicts. Add **Budget holder (role)** and **Budget (eng / platform /
+security-compliance / none / unknown)** beside the price answers, retaining
+the exact budget name in the notes. A team that kept review on and saw sync catch a bad copy is the
 strongest price signal you'll get.
 
 ## 6. Unit economics (illustrative)
@@ -174,7 +187,7 @@ customer:
 ## 7. Go-to-market, in order
 
 1. **Beta pilot**, free (running now; see `LAUNCH.md`). Converts to
-   Supported with 12 months free.
+   Supported with 6 months free.
 2. **Organic channels:** warm network, LinkedIn, communities, open feature
    threads, Show HN. The ad kit in `marketing/ads/` is ready.
 3. **Paid search on skills terms**, only after three teams have installed,
@@ -224,7 +237,10 @@ to us" for larger teams.
   organisations have paid, so you know what a customer is worth before
   buying clicks.
 - **Enterprise:** after the first two Supported customers, so there's a
-  reference and a tested evidence pack to show.
+  reference and a tested evidence pack to show, unless section 5's
+  budget-holder evidence calls for Enterprise first. In that case validate
+  the Enterprise offer and price with those buyers and finish section 4
+  before charging.
 
 **What changes on the page.** Add one pricing page with three columns.
 Community ads link to the README, Supported ads to the pricing page, and
