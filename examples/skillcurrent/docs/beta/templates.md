@@ -133,8 +133,11 @@ sign-up inside that, even when the answer is "not yet".
 > [one or two sentences, their numbers only].
 >
 > SkillCurrent stays on your machines and keeps working, and its source
-> stays open. If we introduce a paid plan, you'll hear first, and your team
-> gets it free for 12 months after it launches.
+> stays open. If we introduce a paid plan for teams, you'll hear first, and
+> your team gets it free for 6 months after it launches. After that it costs
+> the published price, and you can cancel at any time. Quoted work, such as
+> migrations or security reviews, is not included. You are under no
+> obligation to take it.
 >
 > I'll keep your sign-up, reports and our notes until [date], as the terms
 > say. If you'd like them deleted now, reply "delete" and I'll confirm
