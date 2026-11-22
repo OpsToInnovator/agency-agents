@@ -315,6 +315,10 @@ class Session:
 
     def dates(self):
         keys = set(self.human_prompts) | set(self.agent_prompts) | set(self.active) | set(self.counts)
+        # a sub-agent can work, or a turn can sit waiting, past midnight while
+        # the main thread is quiet; that day still gets a row
+        for bucket in (self.subagent, self.wait, self.cost):
+            keys |= {d for d, v in bucket.items() if v}
         return sorted(keys)
 
     def row(self, d):
@@ -837,15 +841,26 @@ def main(argv=None):
         sessions += list(iter_codex_sessions(args.codex_dir, tz, since_utc))
 
     fresh_rows, fresh_daily = build(sessions, since, until)
-    rows = merge_rows(read_csv(sessions_csv), fresh_rows)
-    # Days computed this run use exact interval unions. Older days keep the row
-    # they were given when their logs still existed; a day with no saved row is
-    # rebuilt from its session rows (human time summed, so an upper bound).
-    fresh_dates = {r["date"] for r in fresh_daily}
-    saved = {r["date"]: r for r in read_csv(daily_csv) if r["date"] not in fresh_dates}
-    missing = {r["date"] for r in rows} - fresh_dates - set(saved)
+    existing_rows = read_csv(sessions_csv)
+    rows = merge_rows(existing_rows, fresh_rows)
+    # A day computed this run is only trusted if every session saved for it was
+    # read again. Claude Code deletes logs after 30 days, so a day near that edge
+    # can lose some of its logs while others survive; recomputing it would
+    # shrink its totals. Such a day keeps the row it was given when its logs were
+    # all there.
+    key = lambda r: (r["date"], r["source"], r["session_id"])
+    fresh_keys = {key(r) for r in fresh_rows}
+    lo, hi = since.isoformat(), until.isoformat()
+    incomplete = {r["date"] for r in existing_rows
+                  if lo <= r["date"] <= hi and key(r) not in fresh_keys}
+    trusted = {r["date"]: r for r in fresh_daily if r["date"] not in incomplete}
+    # Days computed this run use exact interval unions. Other days keep their
+    # saved row; a day with no saved row is rebuilt from its session rows
+    # (human time summed, so an upper bound).
+    saved = {r["date"]: r for r in read_csv(daily_csv) if r["date"] not in trusted}
+    missing = {r["date"] for r in rows} - set(trusted) - set(saved)
     rebuilt = daily_from_rows([r for r in rows if r["date"] in missing])
-    daily = sorted(fresh_daily + list(saved.values()) + rebuilt, key=lambda r: r["date"])
+    daily = sorted(list(trusted.values()) + list(saved.values()) + rebuilt, key=lambda r: r["date"])
 
     write_csv(sessions_csv, SESSION_COLUMNS, rows)
     write_csv(daily_csv, DAILY_COLUMNS, daily)

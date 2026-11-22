@@ -92,7 +92,7 @@ Volume is not value. Eight Notion pages created count as 8, and one merged fix t
 | Scheduled tasks | No, same reason |
 | Cowork, claude.ai chats, ChatGPT, Notion agents | No. They don't write local logs |
 
-Claude Code deletes local session logs after 30 days by default. Run `collect` at least monthly (the nightly job takes care of this) and the ledger keeps the history after the logs are gone. Days rebuilt from saved rows, instead of from the logs themselves, sum your time across sessions rather than merging overlaps. That makes them an upper bound.
+Claude Code deletes local session logs after 30 days by default. Run `collect` at least monthly (the nightly job takes care of this) and the ledger keeps the history after the logs are gone. A day whose logs have only partly been cleaned up keeps the totals it was given while all its logs were there, rather than being recomputed from the logs that are left. Days rebuilt from saved rows, instead of from the logs themselves, sum your time across sessions rather than merging overlaps. That makes them an upper bound.
 
 ## Install the nightly run
 

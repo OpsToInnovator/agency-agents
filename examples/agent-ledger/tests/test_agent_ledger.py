@@ -125,6 +125,22 @@ class Timing(unittest.TestCase):
         self.assertAlmostEqual(s.row(DAY)["agent_active_min"], 5.0)
         self.assertAlmostEqual(s.row(DAY + dt.timedelta(days=1))["agent_active_min"], 3.0)
 
+    def test_subagent_only_day_gets_a_row(self):
+        nxt = DAY + dt.timedelta(days=1)
+        with tempfile.TemporaryDirectory() as d:
+            main = write_session(d, "s1", [human(at(23, 50)), assistant(at(23, 51), tools=[("Agent", {})])])
+            sub_dir = main.with_suffix("") / "subagents"
+            sub_dir.mkdir(parents=True)
+            with open(sub_dir / "agent-1.jsonl", "w") as fh:
+                for r in (assistant(at(0, 10, day=nxt)), assistant(at(0, 15, day=nxt)),
+                          assistant(at(0, 20, day=nxt))):
+                    fh.write(json.dumps(dict(r, message=dict(r["message"], content=[]))) + "\n")
+            s = al.parse_claude_session(main, PERTH)
+        self.assertIn(nxt, s.dates())
+        self.assertAlmostEqual(s.row(nxt)["subagent_min"], 10.0)
+        rows, _ = al.build([s])
+        self.assertEqual([r["date"] for r in rows], [DAY.isoformat(), nxt.isoformat()])
+
     def test_agent_prompts_counted_separately(self):
         s = parse([human(at(9, 0)), assistant(at(9, 1)), agent_prompt(at(9, 30)), assistant(at(9, 31))])
         row = s.row(DAY)
@@ -241,6 +257,25 @@ class Ledger(unittest.TestCase):
             self.assertIn("2026-10-01", daily)
             self.assertEqual(daily["2026-11-17"]["files_edited"], "1")
             self.assertTrue((out / "report.md").read_text().startswith("# Agent ledger"))
+
+
+    def test_day_keeps_its_totals_when_some_of_its_logs_are_cleaned_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            claude = Path(d) / "claude"
+            a = write_session(claude, "a", [human(at(9, 0)), assistant(at(9, 10))])
+            write_session(claude, "b", [human(at(13, 0)), assistant(at(13, 10))])
+            out = Path(d) / "out"
+            args = ["collect", "--since", "2026-11-17", "--until", "2026-11-17",
+                    "--claude-dir", str(claude), "--no-codex", "--out", str(out)]
+            al.main(args)
+            before = read_rows(out / "daily.csv")[0]
+            self.assertEqual(before["sessions"], "2")
+            self.assertEqual(before["agent_min"], "20.0")
+            a.unlink()  # Claude Code's 30-day cleanup removes one of the day's logs
+            al.main(args)
+            after = read_rows(out / "daily.csv")[0]
+            self.assertEqual(after, before)
+            self.assertEqual(len(read_rows(out / "sessions.csv")), 2)
 
 
 class Codex(unittest.TestCase):
